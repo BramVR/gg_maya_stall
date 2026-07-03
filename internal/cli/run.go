@@ -238,10 +238,10 @@ func buildManifestPayload(payload runPayload) ([]manifestPayload, error) {
 func cleanRepoRelativePath(path string) (string, error) {
 	clean := filepath.Clean(path)
 	if clean == "." || filepath.IsAbs(clean) || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || clean == ".." {
-		return "", fmt.Errorf("payload path %q must be repo-relative", path)
+		return "", fmt.Errorf("repo path %q must be repo-relative", path)
 	}
 	if isReservedPayloadPath(clean) {
-		return "", fmt.Errorf("payload path %q is reserved for Maya Stall run state and artifacts", path)
+		return "", fmt.Errorf("repo path %q is reserved for Maya Stall run state and artifacts", path)
 	}
 	return clean, nil
 }

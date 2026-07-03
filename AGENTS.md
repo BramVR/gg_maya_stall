@@ -2,6 +2,9 @@
 
 ## Agent skills
 
+### Commits
+Use `committer` for commits in this repo. Stage only the intended files.
+
 ### Issue tracker
 Issues and PRDs for this repo live in GitHub Issues. External PRs are not a triage request surface by default. See `docs/agents/issue-tracker.md`.
 

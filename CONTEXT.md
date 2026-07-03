@@ -1,0 +1,139 @@
+# Maya Stall
+
+Maya Stall is the shared language for real Autodesk Maya desktop UI end-to-end testing from external repositories. It exists to keep Maya UI test orchestration separate from any one plugin repo.
+
+## Language
+
+**Maya Stall**:
+A reusable test harness for running real Maya UI end-to-end checks on a target Windows machine.
+_Avoid_: Plugin test code, batch test runner, gg_klv_push test harness
+
+**maya-stall**:
+The command-line binary for Maya Stall.
+_Avoid_: gg_maya_stall when referring to the command users run
+
+**Consuming Repo**:
+A repository that supplies Maya Stall with non-secret run configuration, test payloads, and build artifacts.
+_Avoid_: Client, plugin repo when the repository might not be a plugin
+
+**Target Profile**:
+A named target environment for a Maya UI run, including the machine and runner identity implied by external credentials.
+_Avoid_: Host, machine, profile when only one part of the target is meant
+
+**Host Pool**:
+A set of Maya Hosts that a Target Profile may choose from for a run.
+_Avoid_: Target profile when referring to the individual selectable machines
+
+**Repo Run Config**:
+Non-secret configuration supplied by a consuming repo for Maya Stall runs.
+_Avoid_: Secrets config, user config
+
+**Scenario**:
+A named Maya end-to-end flow in Repo Run Config, with its own Run Payload, Expected Outputs, and evidence policy.
+_Avoid_: Test when referring to the configured end-to-end flow
+
+**Host Credentials**:
+Secrets and identity material needed to reach or use a Maya Host.
+_Avoid_: Target profile, repo config
+
+**Maya Host**:
+A local or network Windows machine that has Autodesk Maya installed and can run an interactive Maya UI session for Maya Stall.
+_Avoid_: Cloud runner, headless worker
+
+**Maya Version Requirement**:
+The Autodesk Maya version a Scenario needs in order to run correctly.
+_Avoid_: Host capability when referring specifically to Maya version compatibility
+
+**Host Lock**:
+A claim that prevents more than one active Fresh Run from using the same Maya Host at the same time.
+_Avoid_: Session lock when the machine-level run claim is meant
+
+**Host Health**:
+The readiness of a Maya Host to accept a run, checked in layers such as SSH, workspace access, Session Broker, Maya UI, Visual Evidence, and Scenario inputs.
+_Avoid_: Status when only the current lock or run state is meant
+
+**Maya UI Session**:
+An interactive Autodesk Maya desktop process used for a run.
+_Avoid_: Batch session, headless session
+
+**Fresh Run**:
+A Maya Stall run that starts from a clean Maya UI Session.
+_Avoid_: Reused session, warm session
+
+**Debug Attach**:
+A Maya Stall run that intentionally reuses an existing Maya UI Session for investigation.
+_Avoid_: Fresh run, CI run
+
+**Run Attach**:
+A read-only connection to an active or kept run's events and logs.
+_Avoid_: Debug Attach, UI viewer
+
+**Kept Session**:
+A Maya UI Session intentionally left open after a run for debugging.
+_Avoid_: Leaked session, active run
+
+**Stop Policy**:
+The cleanup rule that decides whether Maya Stall stops or keeps a Maya UI Session after a run.
+_Avoid_: Cleanup when only the run-retention rule is meant
+
+**Run Payload**:
+The repo-owned tests, scripts, scenes, expected outputs, and build artifacts that a consuming repo gives Maya Stall to execute.
+_Avoid_: Test bundle unless packaging is specifically meant
+
+**Plugin Artifact**:
+A built Maya plugin file or related loadable binary supplied by a consuming repo.
+_Avoid_: Package when the loadable file itself is meant
+
+**Maya Script**:
+A script supplied by a consuming repo to drive Maya behavior inside a Maya UI Session.
+_Avoid_: Shell command, payload command
+
+**Expected Output**:
+A repo-owned artifact or value that defines what a successful Maya run should produce.
+_Avoid_: Golden file unless file comparison is specifically meant
+
+**Scenario Result**:
+A structured result written by a Scenario to report status, assertions, measurements, and produced outputs.
+_Avoid_: Evidence Bundle, log output
+
+**Validator**:
+A reusable Maya Stall check that compares run outputs against Expected Outputs.
+_Avoid_: Test when the consuming repo owns the scenario logic
+
+**Evidence Bundle**:
+The logs, screenshots, scenes, output files, and other artifacts returned from a run to prove what happened.
+_Avoid_: Results when only pass/fail status is meant
+
+**Visual Evidence**:
+Screenshots or screen recordings captured from the Maya UI Session during a run.
+_Avoid_: Evidence Bundle when non-visual logs and files are also meant
+
+**Review Comment**:
+A published summary that links an Evidence Bundle into a code review system.
+_Avoid_: PR comment when the hosting platform might not be GitHub
+
+**Evidence Store**:
+A durable location where published Evidence Bundles are kept for reviewers.
+_Avoid_: Evidence Bundle when referring to the storage location
+
+**Session Broker**:
+The Windows-side service that launches, owns, or attaches to Maya UI sessions for Maya Stall.
+_Avoid_: Runner when the test execution layer is meant
+
+**Maya Session Daemon**:
+The first Session Broker implementation used by Maya Stall on a Maya Host.
+_Avoid_: Session Broker when speaking about the abstract role
+
+**Crabbox**:
+An upstream remote execution control plane used as a reference for leases, target profiles, repo sync, remote command execution, desktop evidence, and artifact publishing.
+_Avoid_: Maya Stall, Maya session broker
+
+## Example Dialogue
+
+Dev: "The consuming repo provides a target profile and a run payload."
+
+Domain expert: "Right. Maya Stall uses the target profile to reach the Windows Maya environment, asks the session broker for a Maya UI session, runs the payload, then returns an evidence bundle."
+
+Dev: "So pass/fail is not enough?"
+
+Domain expert: "Correct. A run must leave enough evidence to debug UI failures later."

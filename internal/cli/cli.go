@@ -49,6 +49,23 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 		}
 		fmt.Fprintf(stdout, "wrote %s\n", filepath.Join(workDir, defaultConfigName))
 		return 0
+	case "doctor":
+		options, err := parseDoctorArgs(args[1:])
+		if err != nil {
+			fmt.Fprintf(stderr, "maya-stall doctor: %v\n", err)
+			return 2
+		}
+		report := runDoctor(workDir, options)
+		for _, check := range report.Checks {
+			fmt.Fprintf(stdout, "%s: %s - %s\n", check.Layer, check.Status, check.Detail)
+			if check.Hint != "" {
+				fmt.Fprintf(stdout, "hint: %s\n", check.Hint)
+			}
+		}
+		if report.Healthy {
+			return 0
+		}
+		return 1
 	case "run":
 		options, err := parseRunArgs(args[1:])
 		if err != nil {
@@ -90,9 +107,11 @@ Usage:
   maya-stall [--help]
   maya-stall version
   maya-stall init
+  maya-stall doctor [--host-config <path>] [--target-profile <name>] [--host <id>] [--scenario <name>]
   maya-stall run [--host-config <path>] [--target-profile <name>] [--host <id>] [--host-lock-wait <duration>|--host-lock-fail-fast] <scenario>
 
 Commands:
+  doctor   check local config, Target Profile, and fake Host Health layers
   init      write a repo-only sample .maya-stall.yaml
   run       run a named Scenario with the fake runtime
   version   print the maya-stall version
@@ -154,6 +173,49 @@ func parseRunArgs(args []string) (runOptions, error) {
 	}
 	if options.ScenarioName == "" {
 		return runOptions{}, newUsageError("expected Scenario name")
+	}
+	return options, nil
+}
+
+type doctorOptions struct {
+	HostConfig    string
+	TargetProfile string
+	HostPin       string
+	ScenarioName  string
+}
+
+func parseDoctorArgs(args []string) (doctorOptions, error) {
+	options := doctorOptions{TargetProfile: "default"}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch arg {
+		case "--host-config":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return doctorOptions{}, newUsageError("--host-config needs a path")
+			}
+			options.HostConfig = args[i]
+		case "--target-profile":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return doctorOptions{}, newUsageError("--target-profile needs a name")
+			}
+			options.TargetProfile = args[i]
+		case "--host":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return doctorOptions{}, newUsageError("--host needs a Maya Host id")
+			}
+			options.HostPin = args[i]
+		case "--scenario":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return doctorOptions{}, newUsageError("--scenario needs a name")
+			}
+			options.ScenarioName = args[i]
+		default:
+			return doctorOptions{}, newUsageError("unknown doctor option %q", arg)
+		}
 	}
 	return options, nil
 }

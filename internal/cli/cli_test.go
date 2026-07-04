@@ -191,6 +191,285 @@ func TestRunScenarioStagesPayloadAndWritesStateAndEvidence(t *testing.T) {
 	}
 }
 
+func TestDoctorReportsHealthyLocalConfigAndTargetProfile(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("doctor exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	for _, want := range []string{
+		"local-config: ok - .maya-stall.yaml",
+		"target-profile: ok - default",
+		"host-pool: ok - default",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("doctor output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestDoctorLocalConfigFailureIncludesRepairHint(t *testing.T) {
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("doctor exit code = %d, want 1; stderr: %s", code, stderr.String())
+	}
+	for _, want := range []string{
+		"local-config: fail",
+		"no Maya Stall repo config found",
+		"hint: Run maya-stall init or fix the repo config schema.",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("doctor output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestDoctorReportsHostSpecificHealthLayers(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := writeLayeredHostConfig(t, dir)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("doctor exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	for _, want := range []string{
+		"host: ok - alpha",
+		"fake-ssh: ok - reachable",
+		"work-root: ok - writable",
+		"session-broker: ok - reachable",
+		"maya-version: ok - 2025",
+		"visual-evidence: ok - available",
+		"host-lock: ok - unlocked",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("doctor output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestDoctorScenarioValidatesInputsAndMayaVersion(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := writeLayeredHostConfig(t, dir)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--scenario", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("doctor exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	for _, want := range []string{
+		"scenario-inputs: ok - smoke",
+		"host: ok - alpha",
+		"maya-version: ok - 2025 satisfies Scenario smoke",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("doctor output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestDoctorFailureLayersIncludeRepairHints(t *testing.T) {
+	tests := []struct {
+		name       string
+		config     string
+		args       []string
+		lockHost   string
+		wantLayer  string
+		wantDetail string
+		wantHint   string
+	}{
+		{
+			name: "target profile",
+			config: `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+`,
+			args:       []string{"--target-profile", "missing"},
+			wantLayer:  "target-profile: fail",
+			wantDetail: `unknown Target Profile "missing"`,
+			wantHint:   "Choose a configured Target Profile",
+		},
+		{
+			name: "host pool",
+			config: `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts: []
+`,
+			wantLayer:  "host-pool: fail",
+			wantDetail: "has no Maya Hosts",
+			wantHint:   "Add at least one Maya Host",
+		},
+		{
+			name: "fake ssh",
+			config: `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        ssh: down
+`,
+			wantLayer:  "fake-ssh: fail",
+			wantDetail: "down",
+			wantHint:   "Fix SSH reachability",
+		},
+		{
+			name: "work root",
+			config: `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        workRoot: unwritable
+`,
+			wantLayer:  "work-root: fail",
+			wantDetail: "unwritable",
+			wantHint:   "Fix the host work root",
+		},
+		{
+			name: "session broker",
+			config: `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        broker: down
+`,
+			wantLayer:  "session-broker: fail",
+			wantDetail: "down",
+			wantHint:   "Start or repair the Session Broker",
+		},
+		{
+			name: "maya version",
+			config: `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        mayaVersions: ["2024"]
+`,
+			args:       []string{"--scenario", "smoke"},
+			wantLayer:  "maya-version: fail",
+			wantDetail: "needs 2025",
+			wantHint:   "Install a compatible Autodesk Maya version",
+		},
+		{
+			name: "visual evidence",
+			config: `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        visualEvidence: false
+`,
+			wantLayer:  "visual-evidence: fail",
+			wantDetail: "unavailable",
+			wantHint:   "Enable screenshot or recording capture",
+		},
+		{
+			name: "host lock",
+			config: `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+`,
+			lockHost:   "alpha",
+			wantLayer:  "host-lock: fail",
+			wantDetail: "locked",
+			wantHint:   "Wait for the active Fresh Run",
+		},
+		{
+			name: "scenario inputs",
+			config: `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+`,
+			args:       []string{"--scenario", "smoke"},
+			wantLayer:  "scenario-inputs: fail",
+			wantDetail: "missing.py",
+			wantHint:   "Fix the Scenario payload paths",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := writeRunConfigFixture(t)
+			if tt.name == "scenario inputs" {
+				configPath := filepath.Join(dir, ".maya-stall.yaml")
+				contentBytes, err := os.ReadFile(configPath)
+				if err != nil {
+					t.Fatalf("read config fixture: %v", err)
+				}
+				content := strings.Replace(string(contentBytes), "maya/smoke.py", "maya/missing.py", 1)
+				if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+					t.Fatalf("write missing payload config fixture: %v", err)
+				}
+			}
+			hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+			mustWriteFile(t, hostConfigPath, tt.config)
+			if tt.lockHost != "" {
+				release, locked, err := acquireHostLock(dir, tt.lockHost)
+				if err != nil {
+					t.Fatalf("pre-lock host: %v", err)
+				}
+				if locked {
+					t.Fatal("host was already locked")
+				}
+				defer release()
+			}
+			args := []string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha"}
+			args = append(args, tt.args...)
+			var stdout, stderr bytes.Buffer
+
+			code := Run(args, &stdout, &stderr, dir, "test-version")
+			if code != 1 {
+				t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+			}
+			for _, want := range []string{tt.wantLayer, tt.wantDetail, "hint: " + tt.wantHint} {
+				if !strings.Contains(stdout.String(), want) {
+					t.Fatalf("doctor output missing %q:\n%s", want, stdout.String())
+				}
+			}
+		})
+	}
+}
+
 func TestRunScenarioSelectsFirstHealthyUnlockedHostFromExternalConfig(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -687,6 +966,26 @@ hostPools:
     hosts:
       - id: alpha
         health: healthy
+`)
+	return hostConfigPath
+}
+
+func writeLayeredHostConfig(t *testing.T, dir string) string {
+	t.Helper()
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        ssh: ok
+        workRoot: writable
+        broker: ok
+        mayaVersions: ["2025"]
+        visualEvidence: true
 `)
 	return hostConfigPath
 }

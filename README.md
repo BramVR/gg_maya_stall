@@ -161,6 +161,8 @@ maya-stall doctor --host-config ci-hosts.yaml --target-profile ci --scenario smo
 
 `maya-stall doctor` reports layered local, Target Profile, Host Pool, fake SSH, work root, Session Broker, Maya version, Visual Evidence, Host Lock, and Scenario input checks. Failures name the failed layer and include a repair hint. Default checks stay fake/local; no real Maya, SSH, hostnames, credentials, or Evidence Store are required.
 
+For real host preparation, use the [Windows Maya Host setup checklist](docs/setup/windows-maya-host.md). Maya Stall diagnoses host prerequisites; OpenSSH, interactive desktop, Autodesk Maya, `gg_mayasessiond`, work roots, Visual Evidence capture, and Evidence Store access stay host-managed.
+
 Host config may include fake diagnostic fields for deterministic checks:
 
 ```yaml

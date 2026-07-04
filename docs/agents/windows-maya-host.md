@@ -1,6 +1,8 @@
 # Windows Maya Host
 
-Read when working on live SSH transport, `gg_mayasessiond`, Session Broker integration, Visual Evidence, recordings, or opt-in live smoke tests.
+Read when working on live SSH transport, `gg_mayasessiond`, Session Broker integration, Visual Evidence, recordings, opt-in live smoke tests, or the public Windows Maya Host setup checklist.
+
+Public setup guide: `docs/setup/windows-maya-host.md`.
 
 ## Current Dev Fixture
 

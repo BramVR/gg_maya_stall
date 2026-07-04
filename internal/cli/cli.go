@@ -158,6 +158,11 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 			}
 			published, err := publishEvidenceBundle(workDir, options)
 			if err != nil {
+				var userErr *usageError
+				if errors.As(err, &userErr) {
+					fmt.Fprintf(stderr, "maya-stall evidence publish: %v\n", err)
+					return 2
+				}
 				fmt.Fprintf(stderr, "maya-stall evidence publish: %v\n", err)
 				return 1
 			}

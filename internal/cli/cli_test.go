@@ -596,6 +596,33 @@ scenarios:
 	}
 }
 
+func TestEvidencePublishInvalidBundleRunIDReturnsUsageCode(t *testing.T) {
+	dir := t.TempDir()
+	bundleDir := filepath.Join(dir, "bundle")
+	mustWriteFile(t, filepath.Join(bundleDir, "evidence.json"), `{
+  "runId": "../bad",
+  "scenario": "smoke",
+  "status": "passed",
+  "targetProfile": "default",
+  "host": "fake-local",
+  "manifest": "manifest.json",
+  "events": "events.jsonl",
+  "log": "logs/session.log",
+  "scenarioResult": "scenario-result.json",
+  "payload": []
+}
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"evidence", "publish", "--destination", filepath.Join(dir, "store"), "--base-url", "https://evidence.example.test/maya", bundleDir}, &stdout, &stderr, dir, "test-version")
+	if code != 2 {
+		t.Fatalf("publish exit code = %d, want 2; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "run id") {
+		t.Fatalf("publish error missing run id usage detail: %s", stderr.String())
+	}
+}
+
 func TestEvidencePublishEscapesReviewMarkdownLabels(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1

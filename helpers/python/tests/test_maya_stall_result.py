@@ -49,6 +49,5 @@ class ScenarioResultTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "status must not be empty"):
                 maya_stall.write_result(status="", env=env)
 
-
 if __name__ == "__main__":
     unittest.main()

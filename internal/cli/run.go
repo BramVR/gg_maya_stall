@@ -184,7 +184,7 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 		return runOutcome{}, err
 	}
 	brokerResult := result
-	if err := ensureWorkspacePathHasNoSymlinkAncestor(context.Workspace, scenarioResultPath); err != nil {
+	if err := validateScenarioResultPath(context, scenarioResultPath); err != nil {
 		return runOutcome{}, err
 	}
 	resultDocument, found, err := readScenarioResultDocument(context.ScenarioResultPath)
@@ -376,7 +376,7 @@ func (document *scenarioResultDocument) setResult(result ScenarioResult) {
 }
 
 func writeScenarioResult(context runContext, resultPath string, result scenarioResultDocument) error {
-	if err := ensureWorkspacePathHasNoSymlinkAncestor(context.Workspace, resultPath); err != nil {
+	if err := validateScenarioResultPath(context, resultPath); err != nil {
 		return err
 	}
 	workspaceResult := filepath.Join(context.Workspace, resultPath)
@@ -384,6 +384,13 @@ func writeScenarioResult(context runContext, resultPath string, result scenarioR
 		return err
 	}
 	return writeJSONFile(filepath.Join(context.EvidenceDir, "scenario-result.json"), result.Fields)
+}
+
+func validateScenarioResultPath(context runContext, resultPath string) error {
+	if err := ensureWorkspacePathHasNoSymlinkAncestor(context.Workspace, resultPath); err != nil {
+		return fmt.Errorf("Scenario Result path %q: %w", resultPath, err)
+	}
+	return nil
 }
 
 func validateRunOutputs(context runContext, scenario scenarioConfig, result ScenarioResult) ([]validatorResult, error) {

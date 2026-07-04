@@ -305,7 +305,7 @@ func TestRunScenarioRejectsSymlinkedScenarioResult(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "must not be or contain a symlink") {
+	if !strings.Contains(stderr.String(), "Scenario Result path") || !strings.Contains(stderr.String(), "must not be or contain a symlink") {
 		t.Fatalf("run error did not reject symlinked Scenario Result: %s", stderr.String())
 	}
 }

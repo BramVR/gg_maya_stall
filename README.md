@@ -58,9 +58,12 @@ Validator failures mark the run failed and are recorded in `evidence.json`.
 maya-stall screenshot
 maya-stall record
 maya-stall evidence collect smoke
+maya-stall evidence publish --destination /mnt/evidence/maya-stall --base-url https://evidence.example.com/maya-stall artifacts/maya-stall/<run-id>
 ```
 
 `maya-stall screenshot` and `maya-stall record` ask the fake Session Broker to capture a standalone screenshot or recording, then store a local Evidence Bundle under `artifacts/maya-stall/`. `maya-stall evidence collect <scenario>` runs the Scenario, captures configured Visual Evidence through the fake Session Broker, writes `evidence.json`, `manifest.json`, events, logs, Scenario Result, and visual artifacts, and prints validator failures such as missing required Visual Evidence.
+
+`maya-stall evidence publish` copies one Evidence Bundle to a filesystem Evidence Store under `<destination>/<run-id>/`, generates artifact URLs from `--base-url`, and writes `artifact-manifest.json` plus `review-comment.md`. The Review Comment markdown summarizes run status and links Visual Evidence, logs, metadata, and output files from the bundle. Publishing the same run again replaces the previous published run directory so stale files do not survive.
 
 ## Write a Scenario Result
 

@@ -133,7 +133,7 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 	if err := appendEvent(context.EventsPath, "visual-evidence.completed", artifact.Path); err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}
-	if err := writeEvidenceBundle(context, manifest, result, nil); err != nil {
+	if err := writeEvidenceBundle(context, manifest, scenarioConfig{}, result, nil); err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}
 	if err := cleanupRunState(repoDir, runID); err != nil {

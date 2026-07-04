@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 )
@@ -116,11 +117,17 @@ type evidenceBundle struct {
 	ScenarioResult string                   `json:"scenarioResult"`
 	Payload        []manifestPayload        `json:"payload"`
 	VisualEvidence []visualEvidenceArtifact `json:"visualEvidence,omitempty"`
+	Outputs        []outputArtifact         `json:"outputs,omitempty"`
 	Validators     []validatorResult        `json:"validators,omitempty"`
 }
 
 type visualEvidenceArtifact struct {
 	Kind      string `json:"kind"`
+	Path      string `json:"path"`
+	MediaType string `json:"mediaType"`
+}
+
+type outputArtifact struct {
 	Path      string `json:"path"`
 	MediaType string `json:"mediaType"`
 }
@@ -282,7 +289,7 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	if err := appendEvent(context.EventsPath, "run.completed", result.Status); err != nil {
 		return runOutcome{}, err
 	}
-	if err := writeEvidenceBundle(context, manifest, result, validatorResults); err != nil {
+	if err := writeEvidenceBundle(context, manifest, scenario, result, validatorResults); err != nil {
 		return runOutcome{}, err
 	}
 	if stopPolicy == "kept" {
@@ -851,7 +858,11 @@ func hasValidatorFailure(results []validatorResult) bool {
 	return false
 }
 
-func writeEvidenceBundle(context runContext, manifest runManifest, result ScenarioResult, validators []validatorResult) error {
+func writeEvidenceBundle(context runContext, manifest runManifest, scenario scenarioConfig, result ScenarioResult, validators []validatorResult) error {
+	outputs, err := copyEvidenceOutputs(context, scenario)
+	if err != nil {
+		return err
+	}
 	if err := copyFile(filepath.Join(context.StateDir, "manifest.json"), filepath.Join(context.EvidenceDir, "manifest.json")); err != nil {
 		return err
 	}
@@ -877,9 +888,140 @@ func writeEvidenceBundle(context runContext, manifest runManifest, result Scenar
 		ScenarioResult: "scenario-result.json",
 		Payload:        manifest.Payload,
 		VisualEvidence: visualEvidence,
+		Outputs:        outputs,
 		Validators:     validators,
 	}
 	return writeJSONFile(filepath.Join(context.EvidenceDir, "evidence.json"), bundle)
+}
+
+func copyEvidenceOutputs(context runContext, scenario scenarioConfig) ([]outputArtifact, error) {
+	seen := make(map[string]bool)
+	var outputs []outputArtifact
+	if err := copyEvidenceOutputDir(context, "outputs", seen, &outputs); err != nil {
+		return nil, err
+	}
+	for _, path := range append([]string{scenario.ExpectedOutputs.ScenarioResult}, scenario.ExpectedOutputs.Files...) {
+		if err := copyEvidenceOutputPath(context, path, seen, &outputs); err != nil {
+			return nil, err
+		}
+	}
+	for _, validator := range scenario.Validators {
+		if validator.Path == "" {
+			continue
+		}
+		if err := copyEvidenceOutputPath(context, validator.Path, seen, &outputs); err != nil {
+			return nil, err
+		}
+	}
+	sort.Slice(outputs, func(i, j int) bool {
+		return outputs[i].Path < outputs[j].Path
+	})
+	return outputs, nil
+}
+
+func copyEvidenceOutputPath(context runContext, relativePath string, seen map[string]bool, outputs *[]outputArtifact) error {
+	if relativePath == "" {
+		return nil
+	}
+	clean, err := cleanRepoRelativePath(relativePath)
+	if err != nil {
+		return nil
+	}
+	if err := ensureWorkspacePathHasNoSymlinkAncestor(context.Workspace, clean); err != nil {
+		return nil
+	}
+	source := filepath.Join(context.Workspace, clean)
+	info, err := os.Lstat(source)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil
+	}
+	if info.IsDir() {
+		return copyEvidenceOutputDir(context, clean, seen, outputs)
+	}
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+	return copyEvidenceOutputFile(context, source, clean, seen, outputs)
+}
+
+func copyEvidenceOutputDir(context runContext, relativePath string, seen map[string]bool, outputs *[]outputArtifact) error {
+	source := filepath.Join(context.Workspace, relativePath)
+	info, err := os.Lstat(source)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return nil
+	}
+	return filepath.WalkDir(source, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		return copyEvidenceOutputFile(context, path, filepath.Join(relativePath, relative), seen, outputs)
+	})
+}
+
+func copyEvidenceOutputFile(context runContext, source string, relativePath string, seen map[string]bool, outputs *[]outputArtifact) error {
+	clean := filepath.ToSlash(filepath.Clean(relativePath))
+	if isReservedEvidenceArtifactPath(clean) {
+		return nil
+	}
+	if seen[clean] {
+		return nil
+	}
+	destination := filepath.Join(context.EvidenceDir, filepath.FromSlash(clean))
+	if err := copyFile(source, destination); err != nil {
+		return err
+	}
+	seen[clean] = true
+	*outputs = append(*outputs, outputArtifact{Path: clean, MediaType: mediaTypeForPath(clean)})
+	return nil
+}
+
+func isReservedEvidenceArtifactPath(path string) bool {
+	slashed := strings.ToLower(filepath.ToSlash(path))
+	for _, reserved := range []string{
+		"evidence.json",
+		"manifest.json",
+		"events.jsonl",
+		"scenario-result.json",
+		"artifact-manifest.json",
+		"review-comment.md",
+		"logs",
+		"screenshots",
+		"recordings",
+	} {
+		if slashed == reserved || strings.HasPrefix(slashed, reserved+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func discoverVisualEvidence(evidenceDir string) ([]visualEvidenceArtifact, error) {

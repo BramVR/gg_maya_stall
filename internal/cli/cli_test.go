@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHelpAndVersion(t *testing.T) {
@@ -187,6 +188,253 @@ func TestRunScenarioStagesPayloadAndWritesStateAndEvidence(t *testing.T) {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected run artifact %s: %v", path, err)
 		}
+	}
+}
+
+func TestRunScenarioSelectsFirstHealthyUnlockedHostFromExternalConfig(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        health: unhealthy
+      - id: beta
+        health: healthy
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "host: beta") {
+		t.Fatalf("run output missing selected host:\n%s", stdout.String())
+	}
+
+	runState := onlyRunDir(t, filepath.Join(dir, ".maya-stall", "state", "runs"))
+	manifestBytes, err := os.ReadFile(filepath.Join(runState, "manifest.json"))
+	if err != nil {
+		t.Fatalf("read run manifest: %v", err)
+	}
+	var manifest struct {
+		TargetProfile string `json:"targetProfile"`
+		Host          string `json:"host"`
+	}
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatalf("parse run manifest: %v", err)
+	}
+	if manifest.TargetProfile != "ci" || manifest.Host != "beta" {
+		t.Fatalf("manifest selected target/host = %q/%q, want ci/beta", manifest.TargetProfile, manifest.Host)
+	}
+}
+
+func TestRunScenarioSkipsLockedHostForNextHealthyHost(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        health: healthy
+      - id: beta
+        health: healthy
+`)
+	release, locked, err := acquireHostLock(dir, "alpha")
+	if err != nil {
+		t.Fatalf("pre-lock alpha: %v", err)
+	}
+	if locked {
+		t.Fatal("alpha was already locked")
+	}
+	defer release()
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "host: beta") {
+		t.Fatalf("run output missing next unlocked host:\n%s", stdout.String())
+	}
+}
+
+func TestRunScenarioRemovesStaleHostLock(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := writeSingleHealthyHostConfig(t, dir)
+	lockPath := filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")
+	mustWriteFile(t, lockPath, "host: alpha\npid: -1\n")
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--host-lock-fail-fast", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "host: alpha") {
+		t.Fatalf("run output missing host after stale lock removal:\n%s", stdout.String())
+	}
+}
+
+func TestRunScenarioRemovesMalformedHostLock(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := writeSingleHealthyHostConfig(t, dir)
+	lockPath := filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")
+	mustWriteFile(t, lockPath, "host: alpha\n")
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--host-lock-fail-fast", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "host: alpha") {
+		t.Fatalf("run output missing host after malformed lock removal:\n%s", stdout.String())
+	}
+}
+
+func TestRunScenarioHostPinSelectsRequestedHostOrFailsClearly(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        health: healthy
+      - id: beta
+        health: healthy
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "beta", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("pinned run exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "host: beta") {
+		t.Fatalf("pinned run output missing requested host:\n%s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "gamma", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 2 {
+		t.Fatalf("missing pinned host exit code = %d, want 2; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `pinned Maya Host "gamma" is not in Target Profile "ci"`) {
+		t.Fatalf("missing pinned host error = %q", stderr.String())
+	}
+}
+
+func TestRunScenarioHostLockPreventsConcurrentFailFastRun(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := writeSingleHealthyHostConfig(t, dir)
+	firstBroker := newBlockingBroker(ScenarioResult{Status: "passed", Summary: "first done"})
+	firstDone := make(chan int, 1)
+	go func() {
+		var stdout, stderr bytes.Buffer
+		runtime := defaultRunRuntime()
+		runtime.Broker = firstBroker
+		firstDone <- RunWithRuntime([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	}()
+	<-firstBroker.started
+	lockPath := filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("active run did not hold host lock: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--host-lock-fail-fast", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("concurrent fail-fast run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `no healthy unlocked Maya Host available in Target Profile "ci"`) {
+		t.Fatalf("concurrent lock error = %q", stderr.String())
+	}
+
+	close(firstBroker.release)
+	select {
+	case code := <-firstDone:
+		if code != 0 {
+			t.Fatalf("first run exit code = %d, want 0", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first run did not finish after release")
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("host lock was not released: %v", err)
+	}
+}
+
+func TestRunScenarioHostLockWaitsForRelease(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := writeSingleHealthyHostConfig(t, dir)
+	firstBroker := newBlockingBroker(ScenarioResult{Status: "passed", Summary: "first done"})
+	firstDone := make(chan int, 1)
+	go func() {
+		var stdout, stderr bytes.Buffer
+		runtime := defaultRunRuntime()
+		runtime.Broker = firstBroker
+		firstDone <- RunWithRuntime([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	}()
+	<-firstBroker.started
+
+	secondDone := make(chan runResult, 1)
+	go func() {
+		var stdout, stderr bytes.Buffer
+		code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--host-lock-wait", "2s", "smoke"}, &stdout, &stderr, dir, "test-version")
+		secondDone <- runResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
+	}()
+	select {
+	case result := <-secondDone:
+		t.Fatalf("waiting run finished before lock release: %+v", result)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(firstBroker.release)
+	select {
+	case code := <-firstDone:
+		if code != 0 {
+			t.Fatalf("first run exit code = %d, want 0", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first run did not finish after release")
+	}
+	select {
+	case result := <-secondDone:
+		if result.code != 0 {
+			t.Fatalf("waiting run exit code = %d, want 0; stdout: %s stderr: %s", result.code, result.stdout, result.stderr)
+		}
+		if !strings.Contains(result.stdout, "host: alpha") {
+			t.Fatalf("waiting run output missing host:\n%s", result.stdout)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiting run did not finish after lock release")
+	}
+}
+
+func TestRunScenarioReportsHostLockReleaseFailure(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := writeSingleHealthyHostConfig(t, dir)
+	var stdout, stderr bytes.Buffer
+	runtime := defaultRunRuntime()
+	runtime.Broker = lockCorruptingBroker{}
+
+	code := RunWithRuntime([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "release Host Lock for alpha") {
+		t.Fatalf("release failure error = %q", stderr.String())
 	}
 }
 
@@ -425,6 +673,76 @@ scenarios:
         enabled: false
 `)
 	return dir
+}
+
+func writeSingleHealthyHostConfig(t *testing.T, dir string) string {
+	t.Helper()
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        health: healthy
+`)
+	return hostConfigPath
+}
+
+type blockingBroker struct {
+	started chan struct{}
+	release chan struct{}
+	result  ScenarioResult
+}
+
+type runResult struct {
+	code   int
+	stdout string
+	stderr string
+}
+
+func newBlockingBroker(result ScenarioResult) *blockingBroker {
+	return &blockingBroker{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		result:  result,
+	}
+}
+
+func (broker *blockingBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
+	if err := appendEvent(context.EventsPath, "broker.session.started", scenario.MayaVersion); err != nil {
+		return ScenarioResult{}, err
+	}
+	close(broker.started)
+	<-broker.release
+	if err := os.WriteFile(context.LogPath, []byte("blocking fake Session Broker completed\n"), 0o644); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := appendEvent(context.EventsPath, "broker.session.finished", broker.result.Status); err != nil {
+		return ScenarioResult{}, err
+	}
+	return broker.result, nil
+}
+
+type lockCorruptingBroker struct{}
+
+func (lockCorruptingBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
+	lockPath := filepath.Join(context.RepoDir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")
+	if err := os.Remove(lockPath); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := os.Mkdir(lockPath, 0o755); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := os.WriteFile(filepath.Join(lockPath, "child"), []byte("blocks remove\n"), 0o644); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := os.WriteFile(context.LogPath, []byte("corrupted lock path\n"), 0o644); err != nil {
+		return ScenarioResult{}, err
+	}
+	return ScenarioResult{Status: "passed", Summary: "lock release should fail"}, nil
 }
 
 func mustWriteFile(t *testing.T, path string, content string) {

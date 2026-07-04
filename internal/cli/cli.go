@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -49,11 +50,12 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 		fmt.Fprintf(stdout, "wrote %s\n", filepath.Join(workDir, defaultConfigName))
 		return 0
 	case "run":
-		if len(args) != 2 {
-			fmt.Fprintln(stderr, "maya-stall run: expected Scenario name")
+		options, err := parseRunArgs(args[1:])
+		if err != nil {
+			fmt.Fprintf(stderr, "maya-stall run: %v\n", err)
 			return 2
 		}
-		outcome, err := runScenario(workDir, args[1], runtime)
+		outcome, err := runScenario(workDir, options, runtime)
 		if err != nil {
 			var userErr *usageError
 			if errors.As(err, &userErr) {
@@ -65,6 +67,8 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 		}
 		fmt.Fprintf(stdout, "run: %s\n", outcome.RunID)
 		fmt.Fprintf(stdout, "scenario: %s\n", outcome.Scenario)
+		fmt.Fprintf(stdout, "targetProfile: %s\n", outcome.TargetProfile)
+		fmt.Fprintf(stdout, "host: %s\n", outcome.Host)
 		fmt.Fprintf(stdout, "status: %s\n", outcome.Result.Status)
 		fmt.Fprintf(stdout, "state: %s\n", outcome.StateDir)
 		fmt.Fprintf(stdout, "evidence: %s\n", outcome.EvidenceDir)
@@ -86,13 +90,72 @@ Usage:
   maya-stall [--help]
   maya-stall version
   maya-stall init
-  maya-stall run <scenario>
+  maya-stall run [--host-config <path>] [--target-profile <name>] [--host <id>] [--host-lock-wait <duration>|--host-lock-fail-fast] <scenario>
 
 Commands:
   init      write a repo-only sample .maya-stall.yaml
   run       run a named Scenario with the fake runtime
   version   print the maya-stall version
 `)
+}
+
+type runOptions struct {
+	ScenarioName  string
+	HostConfig    string
+	TargetProfile string
+	HostPin       string
+	HostLockWait  time.Duration
+}
+
+func parseRunArgs(args []string) (runOptions, error) {
+	options := runOptions{TargetProfile: "default"}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch arg {
+		case "--host-config":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return runOptions{}, newUsageError("--host-config needs a path")
+			}
+			options.HostConfig = args[i]
+		case "--target-profile":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return runOptions{}, newUsageError("--target-profile needs a name")
+			}
+			options.TargetProfile = args[i]
+		case "--host":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return runOptions{}, newUsageError("--host needs a Maya Host id")
+			}
+			options.HostPin = args[i]
+		case "--host-lock-wait":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return runOptions{}, newUsageError("--host-lock-wait needs a duration")
+			}
+			duration, err := time.ParseDuration(args[i])
+			if err != nil {
+				return runOptions{}, newUsageError("invalid --host-lock-wait duration %q", args[i])
+			}
+			options.HostLockWait = duration
+		case "--host-lock-fail-fast":
+			options.HostLockWait = 0
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return runOptions{}, newUsageError("unknown run option %q", arg)
+			}
+			if options.ScenarioName != "" {
+				return runOptions{}, newUsageError("expected one Scenario name")
+			}
+			options.ScenarioName = arg
+		}
+	}
+	if options.ScenarioName == "" {
+		return runOptions{}, newUsageError("expected Scenario name")
+	}
+	return options, nil
 }
 
 // DiscoverConfig finds the Repo Run Config file in dir.

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -36,18 +37,22 @@ type runContext struct {
 }
 
 type runOutcome struct {
-	RunID       string
-	Scenario    string
-	StateDir    string
-	EvidenceDir string
-	Result      ScenarioResult
+	RunID         string
+	Scenario      string
+	TargetProfile string
+	Host          string
+	StateDir      string
+	EvidenceDir   string
+	Result        ScenarioResult
 }
 
 type runManifest struct {
-	RunID      string            `json:"runId"`
-	Scenario   string            `json:"scenario"`
-	ConfigPath string            `json:"configPath"`
-	Payload    []manifestPayload `json:"payload"`
+	RunID         string            `json:"runId"`
+	Scenario      string            `json:"scenario"`
+	TargetProfile string            `json:"targetProfile"`
+	Host          string            `json:"host"`
+	ConfigPath    string            `json:"configPath"`
+	Payload       []manifestPayload `json:"payload"`
 }
 
 type manifestPayload struct {
@@ -65,6 +70,8 @@ type evidenceBundle struct {
 	RunID          string            `json:"runId"`
 	Scenario       string            `json:"scenario"`
 	Status         string            `json:"status"`
+	TargetProfile  string            `json:"targetProfile"`
+	Host           string            `json:"host"`
 	Manifest       string            `json:"manifest"`
 	Events         string            `json:"events"`
 	Log            string            `json:"log"`
@@ -72,7 +79,7 @@ type evidenceBundle struct {
 	Payload        []manifestPayload `json:"payload"`
 }
 
-func runScenario(repoDir string, scenarioName string, runtime runRuntime) (runOutcome, error) {
+func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcome runOutcome, err error) {
 	if runtime.Host == nil {
 		runtime.Host = fakeHost{}
 	}
@@ -87,17 +94,26 @@ func runScenario(repoDir string, scenarioName string, runtime runRuntime) (runOu
 	if err != nil {
 		return runOutcome{}, err
 	}
-	scenario, ok := config.Scenarios[scenarioName]
+	scenario, ok := config.Scenarios[options.ScenarioName]
 	if !ok {
-		return runOutcome{}, newUsageError("unknown Scenario %q", scenarioName)
+		return runOutcome{}, newUsageError("unknown Scenario %q", options.ScenarioName)
 	}
 	if scenario.ExpectedOutputs.ScenarioResult == "" {
-		return runOutcome{}, fmt.Errorf("Scenario %q missing expectedOutputs.scenarioResult", scenarioName)
+		return runOutcome{}, fmt.Errorf("Scenario %q missing expectedOutputs.scenarioResult", options.ScenarioName)
 	}
 	scenarioResultPath, err := cleanRepoRelativePath(scenario.ExpectedOutputs.ScenarioResult)
 	if err != nil {
 		return runOutcome{}, err
 	}
+	host, err := selectHostForRun(repoDir, options)
+	if err != nil {
+		return runOutcome{}, err
+	}
+	defer func() {
+		if releaseErr := host.release(); releaseErr != nil {
+			err = errors.Join(err, fmt.Errorf("release Host Lock for %s: %w", host.HostID, releaseErr))
+		}
+	}()
 
 	runID := runtime.Now().UTC().Format("20060102T150405.000000000Z")
 	stateDir := filepath.Join(repoDir, ".maya-stall", "state", "runs", runID)
@@ -123,15 +139,17 @@ func runScenario(repoDir string, scenarioName string, runtime runRuntime) (runOu
 	}
 
 	manifest := runManifest{
-		RunID:      runID,
-		Scenario:   scenarioName,
-		ConfigPath: repoRelativePath(repoDir, configPath),
-		Payload:    payload,
+		RunID:         runID,
+		Scenario:      options.ScenarioName,
+		TargetProfile: host.TargetProfile,
+		Host:          host.HostID,
+		ConfigPath:    repoRelativePath(repoDir, configPath),
+		Payload:       payload,
 	}
 	if err := writeJSONFile(filepath.Join(stateDir, "manifest.json"), manifest); err != nil {
 		return runOutcome{}, err
 	}
-	if err := appendEvent(context.EventsPath, "run.started", scenarioName); err != nil {
+	if err := appendEvent(context.EventsPath, "run.started", options.ScenarioName); err != nil {
 		return runOutcome{}, err
 	}
 
@@ -153,11 +171,13 @@ func runScenario(repoDir string, scenarioName string, runtime runRuntime) (runOu
 	}
 
 	return runOutcome{
-		RunID:       runID,
-		Scenario:    scenarioName,
-		StateDir:    stateDir,
-		EvidenceDir: evidenceDir,
-		Result:      result,
+		RunID:         runID,
+		Scenario:      options.ScenarioName,
+		TargetProfile: host.TargetProfile,
+		Host:          host.HostID,
+		StateDir:      stateDir,
+		EvidenceDir:   evidenceDir,
+		Result:        result,
 	}, nil
 }
 
@@ -280,6 +300,8 @@ func writeEvidenceBundle(context runContext, manifest runManifest, result Scenar
 		RunID:          manifest.RunID,
 		Scenario:       manifest.Scenario,
 		Status:         result.Status,
+		TargetProfile:  manifest.TargetProfile,
+		Host:           manifest.Host,
 		Manifest:       "manifest.json",
 		Events:         "events.jsonl",
 		Log:            filepath.Join("logs", "session.log"),

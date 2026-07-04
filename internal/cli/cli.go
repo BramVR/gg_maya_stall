@@ -271,12 +271,19 @@ scenarios:
     description: "Open a minimal Maya scene and produce visual evidence."
     mayaVersion: "2025"
     payload:
-      scripts: []
+      mayaScripts: []
       scenes: []
       pluginArtifacts: []
+      expectedOutputs: []
+      includePaths: []
     expectedOutputs:
       files: []
       scenarioResult: "outputs/smoke-result.json"
+    validators:
+      - type: scenarioResultStatus
+        status: passed
+      - type: visualEvidence
+        required: true
     evidence:
       screenshots:
         enabled: true

@@ -24,6 +24,33 @@ maya-stall run smoke
 ```
 
 `maya-stall run <scenario>` selects a named Scenario from repo config, stages only its declared Run Payload paths into hidden run state, and writes a minimal local Evidence Bundle under `artifacts/maya-stall/`.
+Run Payload entries are typed: `pluginArtifacts`, `mayaScripts`, `scenes`, repo-owned `expectedOutputs`, and `includePaths`. Maya Stall stages declared paths even when a consuming repo ignores them, such as build outputs under `build/`.
+
+Scenarios can add generic Validators:
+
+```yaml
+validators:
+  - type: scenarioResultStatus
+    status: passed
+  - type: outputExists
+    path: outputs/report.json
+  - type: jsonEquals
+    path: outputs/report.json
+    jsonPath: $.plugin.loaded
+    equals: true
+  - type: numericApprox
+    path: outputs/report.json
+    jsonPath: $.timings.solveMs
+    equals: 12.5
+    tolerance: 0.25
+  - type: fileHash
+    path: outputs/report.json
+    sha256: "<sha256>"
+  - type: visualEvidence
+    required: true
+```
+
+Validator failures mark the run failed and are recorded in `evidence.json`.
 
 Host Pools live outside repo config. A user or CI host config can map Target Profiles to Host Pools:
 

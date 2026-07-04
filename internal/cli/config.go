@@ -13,17 +13,21 @@ type repoRunConfig struct {
 }
 
 type scenarioConfig struct {
-	Description     string          `yaml:"description"`
-	MayaVersion     string          `yaml:"mayaVersion"`
-	Payload         runPayload      `yaml:"payload"`
-	ExpectedOutputs expectedOutputs `yaml:"expectedOutputs"`
-	Evidence        evidenceConfig  `yaml:"evidence"`
+	Description     string            `yaml:"description"`
+	MayaVersion     string            `yaml:"mayaVersion"`
+	Payload         runPayload        `yaml:"payload"`
+	ExpectedOutputs expectedOutputs   `yaml:"expectedOutputs"`
+	Evidence        evidenceConfig    `yaml:"evidence"`
+	Validators      []validatorConfig `yaml:"validators"`
 }
 
 type runPayload struct {
+	MayaScripts     []string `yaml:"mayaScripts"`
 	Scripts         []string `yaml:"scripts"`
 	Scenes          []string `yaml:"scenes"`
 	PluginArtifacts []string `yaml:"pluginArtifacts"`
+	ExpectedOutputs []string `yaml:"expectedOutputs"`
+	IncludePaths    []string `yaml:"includePaths"`
 }
 
 type expectedOutputs struct {
@@ -38,6 +42,17 @@ type evidenceConfig struct {
 
 type evidenceToggle struct {
 	Enabled bool `yaml:"enabled"`
+}
+
+type validatorConfig struct {
+	Type      string  `yaml:"type"`
+	Status    string  `yaml:"status"`
+	Path      string  `yaml:"path"`
+	JSONPath  string  `yaml:"jsonPath"`
+	Equals    any     `yaml:"equals"`
+	Tolerance float64 `yaml:"tolerance"`
+	SHA256    string  `yaml:"sha256"`
+	Required  *bool   `yaml:"required"`
 }
 
 func loadRepoRunConfig(dir string) (repoRunConfig, string, error) {

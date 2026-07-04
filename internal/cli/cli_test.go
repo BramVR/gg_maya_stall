@@ -193,6 +193,203 @@ func TestRunScenarioStagesPayloadAndWritesStateAndEvidence(t *testing.T) {
 	}
 }
 
+func TestScreenshotCapturesVisualEvidenceArtifact(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"screenshot"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("screenshot exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "artifact: screenshots/screenshot.png") {
+		t.Fatalf("screenshot output missing artifact path:\n%s", stdout.String())
+	}
+
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	if _, err := os.Stat(filepath.Join(evidence, "screenshots", "screenshot.png")); err != nil {
+		t.Fatalf("expected screenshot artifact: %v", err)
+	}
+	bundle := readEvidenceBundle(t, evidence)
+	if len(bundle.VisualEvidence) != 1 {
+		t.Fatalf("visual evidence count = %d, want 1", len(bundle.VisualEvidence))
+	}
+	got := bundle.VisualEvidence[0]
+	if got.Kind != "screenshot" || got.Path != filepath.ToSlash(filepath.Join("screenshots", "screenshot.png")) {
+		t.Fatalf("visual evidence metadata = %+v", got)
+	}
+}
+
+func TestRecordCapturesVisualEvidenceArtifact(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"record"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("record exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "artifact: recordings/recording.mp4") {
+		t.Fatalf("record output missing artifact path:\n%s", stdout.String())
+	}
+
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	if _, err := os.Stat(filepath.Join(evidence, "recordings", "recording.mp4")); err != nil {
+		t.Fatalf("expected recording artifact: %v", err)
+	}
+	bundle := readEvidenceBundle(t, evidence)
+	if len(bundle.VisualEvidence) != 1 {
+		t.Fatalf("visual evidence count = %d, want 1", len(bundle.VisualEvidence))
+	}
+	got := bundle.VisualEvidence[0]
+	if got.Kind != "recording" || got.Path != filepath.ToSlash(filepath.Join("recordings", "recording.mp4")) {
+		t.Fatalf("visual evidence metadata = %+v", got)
+	}
+}
+
+func TestEvidenceCollectWritesManifestAndExpectedVisualFiles(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    mayaVersion: "2025"
+    payload:
+      scripts:
+        - "maya/smoke.py"
+      scenes:
+        - "scenes/start.ma"
+      pluginArtifacts:
+        - "build/demo.mll"
+    expectedOutputs:
+      scenarioResult: "outputs/smoke-result.json"
+    evidence:
+      screenshots:
+        enabled: true
+    validators:
+      - type: visualEvidence
+        required: true
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"evidence", "collect", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("evidence collect exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "status: passed") {
+		t.Fatalf("evidence collect output missing status:\n%s", stdout.String())
+	}
+
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	for _, path := range []string{
+		filepath.Join(evidence, "evidence.json"),
+		filepath.Join(evidence, "manifest.json"),
+		filepath.Join(evidence, "events.jsonl"),
+		filepath.Join(evidence, "logs", "session.log"),
+		filepath.Join(evidence, "scenario-result.json"),
+		filepath.Join(evidence, "screenshots", "smoke.png"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected evidence collect file %s: %v", path, err)
+		}
+	}
+	bundle := readEvidenceBundle(t, evidence)
+	if bundle.Status != resultStatusPassed {
+		t.Fatalf("evidence status = %q, want passed", bundle.Status)
+	}
+	if len(bundle.VisualEvidence) != 1 || bundle.VisualEvidence[0].Kind != "screenshot" {
+		t.Fatalf("visual evidence metadata = %+v", bundle.VisualEvidence)
+	}
+	if len(bundle.Validators) != 1 || bundle.Validators[0].Type != "visualEvidence" || bundle.Validators[0].Status != resultStatusPassed {
+		t.Fatalf("validator metadata = %+v", bundle.Validators)
+	}
+}
+
+func TestEvidenceCollectFailsClearlyWhenRequiredVisualEvidenceMissing(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload: {}
+    expectedOutputs:
+      scenarioResult: "outputs/result.json"
+    validators:
+      - type: visualEvidence
+        required: true
+`)
+	var stdout, stderr bytes.Buffer
+	runtime := defaultRunRuntime()
+	runtime.Broker = outputWritingBroker{}
+
+	code := RunWithRuntime([]string{"evidence", "collect", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("evidence collect exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "status: failed") {
+		t.Fatalf("evidence collect output missing failed status:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "validator: visualEvidence failed - Visual Evidence is missing") {
+		t.Fatalf("evidence collect output missing clear Visual Evidence failure:\n%s", stdout.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	bundle := readEvidenceBundle(t, evidence)
+	if bundle.Status != resultStatusFailed {
+		t.Fatalf("evidence status = %q, want failed", bundle.Status)
+	}
+	if len(bundle.Validators) != 1 || bundle.Validators[0].Status != resultStatusFailed || !strings.Contains(bundle.Validators[0].Message, "Visual Evidence is missing") {
+		t.Fatalf("missing Visual Evidence failure = %+v", bundle.Validators)
+	}
+}
+
+func TestEvidenceCollectSanitizesScenarioNameBeforeWritingVisualEvidence(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  "../escape":
+    payload: {}
+    expectedOutputs:
+      scenarioResult: "outputs/result.json"
+    evidence:
+      screenshots:
+        enabled: true
+    validators:
+      - type: visualEvidence
+        required: true
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"evidence", "collect", "../escape"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("evidence collect exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	if _, err := os.Stat(filepath.Join(evidence, "escape.png")); !os.IsNotExist(err) {
+		t.Fatalf("unexpected escaped screenshot path stat err = %v", err)
+	}
+	bundle := readEvidenceBundle(t, evidence)
+	if len(bundle.VisualEvidence) != 1 {
+		t.Fatalf("visual evidence metadata = %+v", bundle.VisualEvidence)
+	}
+	if strings.Contains(bundle.VisualEvidence[0].Path, "..") || strings.Contains(bundle.VisualEvidence[0].Path, "/../") {
+		t.Fatalf("visual evidence path was not sanitized: %+v", bundle.VisualEvidence[0])
+	}
+	if _, err := os.Stat(filepath.Join(evidence, bundle.VisualEvidence[0].Path)); err != nil {
+		t.Fatalf("expected sanitized visual evidence file: %v", err)
+	}
+}
+
+func TestScreenshotReportsHostLockReleaseFailure(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+	runtime := defaultRunRuntime()
+	runtime.Broker = lockCorruptingVisualBroker{}
+
+	code := RunWithRuntime([]string{"screenshot"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("screenshot exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "release Host Lock for fake-local") {
+		t.Fatalf("screenshot error did not report Host Lock release failure: %s", stderr.String())
+	}
+}
+
 func TestRunScenarioProvidesScenarioResultPathInRunEnvironment(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	var stdout, stderr bytes.Buffer
@@ -1880,7 +2077,7 @@ scenarios:
       scenarioResult: "outputs/smoke-result.json"
     evidence:
       screenshots:
-        enabled: true
+        enabled: false
       recording:
         enabled: false
 `)
@@ -1975,6 +2172,26 @@ func (lockCorruptingBroker) RunScenario(context runContext, scenario scenarioCon
 		return ScenarioResult{}, err
 	}
 	return ScenarioResult{Status: "passed", Summary: "lock release should fail"}, nil
+}
+
+type lockCorruptingVisualBroker struct{}
+
+func (lockCorruptingVisualBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
+	return ScenarioResult{Status: resultStatusPassed}, nil
+}
+
+func (lockCorruptingVisualBroker) CaptureScreenshot(context runContext, request screenshotRequest) (visualEvidenceArtifact, error) {
+	lockPath := filepath.Join(context.RepoDir, ".maya-stall", "state", "locks", "hosts", "fake-local.lock")
+	if err := os.Remove(lockPath); err != nil {
+		return visualEvidenceArtifact{}, err
+	}
+	if err := os.Mkdir(lockPath, 0o755); err != nil {
+		return visualEvidenceArtifact{}, err
+	}
+	if err := os.WriteFile(filepath.Join(lockPath, "child"), []byte("blocks remove\n"), 0o644); err != nil {
+		return visualEvidenceArtifact{}, err
+	}
+	return fakeSessionBroker{}.CaptureScreenshot(context, request)
 }
 
 type outputWritingBroker struct {

@@ -82,17 +82,58 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 			fmt.Fprintf(stderr, "maya-stall run: %v\n", err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "run: %s\n", outcome.RunID)
-		fmt.Fprintf(stdout, "scenario: %s\n", outcome.Scenario)
-		fmt.Fprintf(stdout, "targetProfile: %s\n", outcome.TargetProfile)
-		fmt.Fprintf(stdout, "host: %s\n", outcome.Host)
-		fmt.Fprintf(stdout, "status: %s\n", outcome.Result.Status)
-		fmt.Fprintf(stdout, "stopPolicy: %s\n", outcome.StopPolicy)
-		fmt.Fprintf(stdout, "state: %s\n", outcome.StateDir)
-		fmt.Fprintf(stdout, "evidence: %s\n", outcome.EvidenceDir)
-		for _, command := range outcome.FollowUpCommands {
-			fmt.Fprintf(stdout, "next: %s\n", command)
+		printRunOutcome(stdout, outcome)
+		if outcome.Result.Status == resultStatusPassed {
+			return 0
 		}
+		return 1
+	case "screenshot":
+		options, err := parseVisualEvidenceArgs(args[1:])
+		if err != nil {
+			fmt.Fprintf(stderr, "maya-stall screenshot: %v\n", err)
+			return 2
+		}
+		outcome, artifact, err := captureStandaloneVisualEvidence(workDir, options, runtime, "screenshot")
+		if err != nil {
+			fmt.Fprintf(stderr, "maya-stall screenshot: %v\n", err)
+			return 1
+		}
+		printVisualEvidenceOutcome(stdout, outcome, artifact)
+		return 0
+	case "record":
+		options, err := parseVisualEvidenceArgs(args[1:])
+		if err != nil {
+			fmt.Fprintf(stderr, "maya-stall record: %v\n", err)
+			return 2
+		}
+		outcome, artifact, err := captureStandaloneVisualEvidence(workDir, options, runtime, "recording")
+		if err != nil {
+			fmt.Fprintf(stderr, "maya-stall record: %v\n", err)
+			return 1
+		}
+		printVisualEvidenceOutcome(stdout, outcome, artifact)
+		return 0
+	case "evidence":
+		if len(args) < 2 || args[1] != "collect" {
+			fmt.Fprintf(stderr, "maya-stall evidence: expected collect\n")
+			return 2
+		}
+		options, err := parseRunArgs(args[2:])
+		if err != nil {
+			fmt.Fprintf(stderr, "maya-stall evidence collect: %v\n", err)
+			return 2
+		}
+		outcome, err := runScenario(workDir, options, runtime)
+		if err != nil {
+			var userErr *usageError
+			if errors.As(err, &userErr) {
+				fmt.Fprintf(stderr, "maya-stall evidence collect: %v\n", err)
+				return 2
+			}
+			fmt.Fprintf(stderr, "maya-stall evidence collect: %v\n", err)
+			return 1
+		}
+		printRunOutcome(stdout, outcome)
 		if outcome.Result.Status == resultStatusPassed {
 			return 0
 		}
@@ -153,6 +194,30 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 	}
 }
 
+func printRunOutcome(stdout io.Writer, outcome runOutcome) {
+	fmt.Fprintf(stdout, "run: %s\n", outcome.RunID)
+	fmt.Fprintf(stdout, "scenario: %s\n", outcome.Scenario)
+	fmt.Fprintf(stdout, "targetProfile: %s\n", outcome.TargetProfile)
+	fmt.Fprintf(stdout, "host: %s\n", outcome.Host)
+	fmt.Fprintf(stdout, "status: %s\n", outcome.Result.Status)
+	fmt.Fprintf(stdout, "stopPolicy: %s\n", outcome.StopPolicy)
+	fmt.Fprintf(stdout, "state: %s\n", outcome.StateDir)
+	fmt.Fprintf(stdout, "evidence: %s\n", outcome.EvidenceDir)
+	for _, validator := range outcome.Validators {
+		if validator.Status != resultStatusPassed {
+			fmt.Fprintf(stdout, "validator: %s %s - %s\n", validator.Type, validator.Status, validator.Message)
+		}
+	}
+	for _, command := range outcome.FollowUpCommands {
+		fmt.Fprintf(stdout, "next: %s\n", command)
+	}
+}
+
+func printVisualEvidenceOutcome(stdout io.Writer, outcome runOutcome, artifact visualEvidenceArtifact) {
+	printRunOutcome(stdout, outcome)
+	fmt.Fprintf(stdout, "artifact: %s\n", artifact.Path)
+}
+
 func printHelp(w io.Writer) {
 	fmt.Fprint(w, `maya-stall runs Autodesk Maya UI Scenarios from repo-owned config.
 
@@ -162,6 +227,9 @@ Usage:
   maya-stall init
   maya-stall doctor [--host-config <path>] [--target-profile <name>] [--host <id>] [--scenario <name>]
   maya-stall run [--host-config <path>] [--target-profile <name>] [--host <id>] [--host-lock-wait <duration>|--host-lock-fail-fast] [--keep-on-failure|--stop-after <success|failure|always|never>] <scenario>
+  maya-stall screenshot [--host-config <path>] [--target-profile <name>] [--host <id>]
+  maya-stall record [--host-config <path>] [--target-profile <name>] [--host <id>]
+  maya-stall evidence collect [--host-config <path>] [--target-profile <name>] [--host <id>] <scenario>
   maya-stall status [--run <run-id>]
   maya-stall attach <run-id>
   maya-stall stop <run-id>
@@ -169,8 +237,11 @@ Usage:
 Commands:
   attach   print kept run events and logs
   doctor   check local config, Target Profile, and fake Host Health layers
+  evidence collect   run a Scenario and write a complete Evidence Bundle
   init      write a repo-only sample .maya-stall.yaml
+  record    capture a fake Session Broker recording artifact
   run       run a named Scenario with the fake runtime
+  screenshot   capture a fake Session Broker screenshot artifact
   status   show kept run state
   stop     stop a kept run and release its Host Lock
   version   print the maya-stall version

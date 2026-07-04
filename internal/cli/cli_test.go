@@ -125,7 +125,7 @@ func TestRunScenarioStagesPayloadAndWritesStateAndEvidence(t *testing.T) {
 	runtime := defaultRunRuntime()
 	runtime.Broker = fakeSessionBroker{Result: ScenarioResult{Status: "passed", Summary: "fake broker result"}}
 
-	code := RunWithRuntime([]string{"run", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	code := RunWithRuntime([]string{"run", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
 	if code != 0 {
 		t.Fatalf("run exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -338,7 +338,7 @@ scenarios:
 `)
 	var stdout, stderr bytes.Buffer
 
-	code := Run([]string{"run", "smoke"}, &stdout, &stderr, dir, "test-version")
+	code := Run([]string{"run", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
 	if code != 0 {
 		t.Fatalf("run exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -697,7 +697,7 @@ hostPools:
 `)
 	var stdout, stderr bytes.Buffer
 
-	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
 	if code != 0 {
 		t.Fatalf("run exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -861,6 +861,493 @@ func TestRunScenarioHostLockPreventsConcurrentFailFastRun(t *testing.T) {
 	}
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 		t.Fatalf("host lock was not released: %v", err)
+	}
+}
+
+func TestRunScenarioCleansUpFreshRunStateAndReleasesHostLockByDefault(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := writeSingleHealthyHostConfig(t, dir)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "stopPolicy: stopped") {
+		t.Fatalf("run output missing stopped Stop Policy:\n%s", stdout.String())
+	}
+	onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	runsDir := filepath.Join(dir, ".maya-stall", "state", "runs")
+	if entries, err := os.ReadDir(runsDir); err == nil && len(entries) != 0 {
+		t.Fatalf("run state entries after default cleanup = %d, want 0", len(entries))
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read run state after cleanup: %v", err)
+	}
+	lockPath := filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("host lock after default cleanup = %v, want missing", err)
+	}
+}
+
+func TestKeepOnFailureLeavesSessionForStatusAttachAndStop(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+	runtime := defaultRunRuntime()
+	runtime.Broker = fakeSessionBroker{Result: ScenarioResult{Status: "failed", Summary: "fake failure"}}
+
+	code := RunWithRuntime([]string{"run", "--keep-on-failure", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+	for _, want := range []string{
+		"status: failed",
+		"stopPolicy: kept",
+		"next: maya-stall status --run " + runID,
+		"next: maya-stall attach " + runID,
+		"next: maya-stall stop " + runID,
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("run output missing %q:\n%s", want, stdout.String())
+		}
+	}
+	lockPath := filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("kept Host Lock missing: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"status", "--run", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("status exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	for _, want := range []string{"run: " + runID, "state: kept", "host: " + defaultFakeHostID, "status: failed"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("status output missing %q:\n%s", want, stdout.String())
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"attach", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("attach exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	for _, want := range []string{"events:", "run.started", "broker.session.finished", "logs:", "fake Session Broker ran Scenario"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("attach output missing %q:\n%s", want, stdout.String())
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"stop", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("stop exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "stopped: "+runID) {
+		t.Fatalf("stop output missing run id:\n%s", stdout.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".maya-stall", "state", "runs", runID)); !os.IsNotExist(err) {
+		t.Fatalf("kept run state after stop = %v, want missing", err)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("kept Host Lock after stop = %v, want missing", err)
+	}
+}
+
+func TestStopReleasesKeptHostLockWhenEvidenceIsMissing(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+	lockPath := filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("kept Host Lock missing: %v", err)
+	}
+	if err := os.Rename(filepath.Join(dir, "artifacts", "maya-stall", runID, "evidence.json"), filepath.Join(dir, "artifacts", "maya-stall", runID, "evidence.json.moved")); err != nil {
+		t.Fatalf("move evidence fixture: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"stop", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("stop exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("kept Host Lock after stop = %v, want missing", err)
+	}
+}
+
+func TestAttachWorksWhenEvidenceIsMissing(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+	if err := os.Rename(filepath.Join(dir, "artifacts", "maya-stall", runID, "evidence.json"), filepath.Join(dir, "artifacts", "maya-stall", runID, "evidence.json.moved")); err != nil {
+		t.Fatalf("move evidence fixture: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"attach", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("attach exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"events:", "run.started", "logs:", "fake Session Broker ran Scenario"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("attach output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestRunStateCommandsRejectDotRunIDs(t *testing.T) {
+	for _, command := range []string{"status", "attach", "stop"} {
+		for _, runID := range []string{".", ".."} {
+			t.Run(command+" "+runID, func(t *testing.T) {
+				dir := writeRunConfigFixture(t)
+				var stdout, stderr bytes.Buffer
+				args := []string{command}
+				if command == "status" {
+					args = append(args, "--run")
+				}
+				args = append(args, runID)
+
+				code := Run(args, &stdout, &stderr, dir, "test-version")
+				if code != 2 {
+					t.Fatalf("%s exit code = %d, want 2; stdout: %s stderr: %s", command, code, stdout.String(), stderr.String())
+				}
+				if !strings.Contains(stderr.String(), "run id") {
+					t.Fatalf("%s error missing run id detail: %s", command, stderr.String())
+				}
+			})
+		}
+	}
+}
+
+func TestStatusIgnoresPartialNonKeptRunState(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	if err := os.MkdirAll(filepath.Join(dir, ".maya-stall", "state", "runs", "partial"), 0o755); err != nil {
+		t.Fatalf("create partial run state: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"status"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("status exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "state: no kept sessions") {
+		t.Fatalf("status output did not ignore partial state:\n%s", stdout.String())
+	}
+}
+
+func TestStatusRejectsSymlinkedLockDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not consistently available on Windows test runners")
+	}
+	dir := writeRunConfigFixture(t)
+	outside := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".maya-stall", "state", "locks"), 0o755); err != nil {
+		t.Fatalf("create lock parent: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, ".maya-stall", "state", "locks", "hosts")); err != nil {
+		t.Skipf("create symlink fixture: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"status"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("status exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestTargetedStatusAndAttachRequireKeptHostLock(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+	lockPath := filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")
+	if err := os.Rename(lockPath, lockPath+".moved"); err != nil {
+		t.Fatalf("move Host Lock fixture: %v", err)
+	}
+
+	for _, args := range [][]string{
+		{"status", "--run", runID},
+		{"attach", runID},
+	} {
+		stdout.Reset()
+		stderr.Reset()
+		code := Run(args, &stdout, &stderr, dir, "test-version")
+		if code == 0 {
+			t.Fatalf("%v exit code = 0, want failure; stdout: %s stderr: %s", args, stdout.String(), stderr.String())
+		}
+		if strings.Contains(stdout.String(), "state: kept") {
+			t.Fatalf("%v misreported stale state as kept:\n%s", args, stdout.String())
+		}
+	}
+}
+
+func TestStatusRejectsSymlinkedEvidenceParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not consistently available on Windows test runners")
+	}
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"run", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+	outside := t.TempDir()
+	mustWriteFile(t, filepath.Join(outside, "maya-stall", runID, "evidence.json"), `{"runId":"`+runID+`","status":"passed"}`+"\n")
+	artifactsPath := filepath.Join(dir, "artifacts")
+	if err := os.Rename(artifactsPath, artifactsPath+".real"); err != nil {
+		t.Fatalf("move artifacts fixture: %v", err)
+	}
+	if err := os.Symlink(outside, artifactsPath); err != nil {
+		t.Skipf("create symlink fixture: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"status", "--run", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("status exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestStopDoesNotReleaseHostLockForDifferentKeptRun(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+	lockPath := filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")
+	mustWriteFile(t, lockPath, "host: "+defaultFakeHostID+"\nkeptRun: different-run\n")
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"stop", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("stop exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	content, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("read Host Lock after mismatched stop: %v", err)
+	}
+	if !strings.Contains(string(content), "keptRun: different-run") {
+		t.Fatalf("Host Lock was changed by mismatched stop:\n%s", string(content))
+	}
+}
+
+func TestStopReleasesMatchingKeptHostLockWhenRunStateIsMissing(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	runID := "20260704T112500.000000000Z"
+	lockPath := filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")
+	mustWriteFile(t, lockPath, "host: "+defaultFakeHostID+"\nkeptRun: "+runID+"\n")
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"stop", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("stop exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("kept Host Lock after orphan stop = %v, want missing", err)
+	}
+}
+
+func TestStopRejectsSymlinkedRunStateParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not consistently available on Windows test runners")
+	}
+	dir := writeRunConfigFixture(t)
+	runID := "20260704T112300.000000000Z"
+	outside := t.TempDir()
+	mustWriteFile(t, filepath.Join(outside, runID, "manifest.json"), `{"runId":"`+runID+`","scenario":"smoke","targetProfile":"default","host":"`+defaultFakeHostID+`"}`+"\n")
+	if err := os.MkdirAll(filepath.Join(dir, ".maya-stall", "state"), 0o755); err != nil {
+		t.Fatalf("create state parent: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, ".maya-stall", "state", "runs")); err != nil {
+		t.Skipf("create symlink fixture: %v", err)
+	}
+	lockPath := filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")
+	mustWriteFile(t, lockPath, "host: "+defaultFakeHostID+"\nkeptRun: "+runID+"\n")
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"stop", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("stop exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(outside, runID, "manifest.json")); err != nil {
+		t.Fatalf("outside run state was removed or changed: %v", err)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("Host Lock was released after failed stop: %v", err)
+	}
+}
+
+func TestCleanupRunStateRejectsSymlinkedRunStateParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not consistently available on Windows test runners")
+	}
+	dir := t.TempDir()
+	runID := "20260704T112400.000000000Z"
+	outside := t.TempDir()
+	mustWriteFile(t, filepath.Join(outside, runID, "sentinel.txt"), "keep me\n")
+	if err := os.MkdirAll(filepath.Join(dir, ".maya-stall", "state"), 0o755); err != nil {
+		t.Fatalf("create state parent: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, ".maya-stall", "state", "runs")); err != nil {
+		t.Skipf("create symlink fixture: %v", err)
+	}
+
+	err := cleanupRunState(dir, runID)
+	if err == nil {
+		t.Fatal("cleanupRunState returned nil error for symlinked run state parent")
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, runID, "sentinel.txt")); statErr != nil {
+		t.Fatalf("outside run state was removed or changed: %v", statErr)
+	}
+}
+
+func TestRunRejectsConflictingStopPolicyFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"run", "--keep-on-failure", "--stop-after", "always", "smoke"},
+		{"run", "--stop-after", "never", "--keep-on-failure", "smoke"},
+	} {
+		t.Run(strings.Join(args[1:len(args)-1], " "), func(t *testing.T) {
+			dir := writeRunConfigFixture(t)
+			var stdout, stderr bytes.Buffer
+
+			code := Run(args, &stdout, &stderr, dir, "test-version")
+			if code != 2 {
+				t.Fatalf("run exit code = %d, want 2; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "Stop Policy") {
+				t.Fatalf("conflicting Stop Policy error = %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestAttachRejectsSymlinkedEventOrLogFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not consistently available on Windows test runners")
+	}
+	tests := []struct {
+		name       string
+		path       string
+		linkParent bool
+	}{
+		{name: "events", path: "events.jsonl"},
+		{name: "log", path: filepath.Join("logs", "session.log")},
+		{name: "log parent", path: "logs", linkParent: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := writeRunConfigFixture(t)
+			var stdout, stderr bytes.Buffer
+			code := Run([]string{"run", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+			if code != 0 {
+				t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+			}
+			runID := runIDFromOutput(t, stdout.String())
+			target := filepath.Join(t.TempDir(), "secret.txt")
+			if tt.linkParent {
+				target = t.TempDir()
+				mustWriteFile(t, filepath.Join(target, "session.log"), "do not print\n")
+			} else {
+				mustWriteFile(t, target, "do not print\n")
+			}
+			linkPath := filepath.Join(dir, ".maya-stall", "state", "runs", runID, tt.path)
+			if err := os.Rename(linkPath, linkPath+".real"); err != nil {
+				t.Fatalf("move %s fixture: %v", tt.path, err)
+			}
+			if err := os.Symlink(target, linkPath); err != nil {
+				t.Skipf("create symlink fixture: %v", err)
+			}
+
+			stdout.Reset()
+			stderr.Reset()
+			code = Run([]string{"attach", runID}, &stdout, &stderr, dir, "test-version")
+			if code != 1 {
+				t.Fatalf("attach exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+			}
+			if strings.Contains(stdout.String(), "do not print") {
+				t.Fatalf("attach printed symlink target:\n%s", stdout.String())
+			}
+		})
+	}
+}
+
+func TestRunScenarioHonorsExplicitStopAfterPolicy(t *testing.T) {
+	tests := []struct {
+		name       string
+		stopAfter  string
+		result     string
+		wantPolicy string
+	}{
+		{name: "success", stopAfter: "success", result: "passed", wantPolicy: "stopped"},
+		{name: "success keeps failure", stopAfter: "success", result: "failed", wantPolicy: "kept"},
+		{name: "failure", stopAfter: "failure", result: "failed", wantPolicy: "stopped"},
+		{name: "failure keeps success", stopAfter: "failure", result: "passed", wantPolicy: "kept"},
+		{name: "always", stopAfter: "always", result: "passed", wantPolicy: "stopped"},
+		{name: "never", stopAfter: "never", result: "passed", wantPolicy: "kept"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := writeRunConfigFixture(t)
+			var stdout, stderr bytes.Buffer
+			runtime := defaultRunRuntime()
+			runtime.Broker = fakeSessionBroker{Result: ScenarioResult{Status: tt.result, Summary: "fake result"}}
+
+			code := RunWithRuntime([]string{"run", "--stop-after", tt.stopAfter, "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+			wantCode := 0
+			if tt.result != resultStatusPassed {
+				wantCode = 1
+			}
+			if code != wantCode {
+				t.Fatalf("run exit code = %d, want %d; stdout: %s stderr: %s", code, wantCode, stdout.String(), stderr.String())
+			}
+			runID := runIDFromOutput(t, stdout.String())
+			if !strings.Contains(stdout.String(), "stopPolicy: "+tt.wantPolicy) {
+				t.Fatalf("run output missing Stop Policy %q:\n%s", tt.wantPolicy, stdout.String())
+			}
+			_, stateErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "runs", runID))
+			_, lockErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock"))
+			if tt.wantPolicy == "kept" {
+				if stateErr != nil {
+					t.Fatalf("kept run state missing: %v", stateErr)
+				}
+				if lockErr != nil {
+					t.Fatalf("kept Host Lock missing: %v", lockErr)
+				}
+				return
+			}
+			if !os.IsNotExist(stateErr) {
+				t.Fatalf("stopped run state = %v, want missing", stateErr)
+			}
+			if !os.IsNotExist(lockErr) {
+				t.Fatalf("stopped Host Lock = %v, want missing", lockErr)
+			}
+		})
 	}
 }
 
@@ -1675,4 +2162,16 @@ func readEvidenceBundle(t *testing.T, evidenceDir string) evidenceBundle {
 		t.Fatalf("parse evidence bundle: %v", err)
 	}
 	return bundle
+}
+
+func runIDFromOutput(t *testing.T, output string) string {
+	t.Helper()
+	for _, line := range strings.Split(output, "\n") {
+		value, ok := strings.CutPrefix(line, "run: ")
+		if ok {
+			return strings.TrimSpace(value)
+		}
+	}
+	t.Fatalf("run output missing run id:\n%s", output)
+	return ""
 }

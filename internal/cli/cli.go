@@ -87,12 +87,65 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 		fmt.Fprintf(stdout, "targetProfile: %s\n", outcome.TargetProfile)
 		fmt.Fprintf(stdout, "host: %s\n", outcome.Host)
 		fmt.Fprintf(stdout, "status: %s\n", outcome.Result.Status)
+		fmt.Fprintf(stdout, "stopPolicy: %s\n", outcome.StopPolicy)
 		fmt.Fprintf(stdout, "state: %s\n", outcome.StateDir)
 		fmt.Fprintf(stdout, "evidence: %s\n", outcome.EvidenceDir)
+		for _, command := range outcome.FollowUpCommands {
+			fmt.Fprintf(stdout, "next: %s\n", command)
+		}
 		if outcome.Result.Status == resultStatusPassed {
 			return 0
 		}
 		return 1
+	case "status":
+		options, err := parseStatusArgs(args[1:])
+		if err != nil {
+			fmt.Fprintf(stderr, "maya-stall status: %v\n", err)
+			return 2
+		}
+		if err := printStatus(workDir, options, stdout); err != nil {
+			var userErr *usageError
+			if errors.As(err, &userErr) {
+				fmt.Fprintf(stderr, "maya-stall status: %v\n", err)
+				return 2
+			}
+			fmt.Fprintf(stderr, "maya-stall status: %v\n", err)
+			return 1
+		}
+		return 0
+	case "attach":
+		runID, err := parseRunIDArg("attach", args[1:])
+		if err != nil {
+			fmt.Fprintf(stderr, "maya-stall attach: %v\n", err)
+			return 2
+		}
+		if err := attachRun(workDir, runID, stdout); err != nil {
+			var userErr *usageError
+			if errors.As(err, &userErr) {
+				fmt.Fprintf(stderr, "maya-stall attach: %v\n", err)
+				return 2
+			}
+			fmt.Fprintf(stderr, "maya-stall attach: %v\n", err)
+			return 1
+		}
+		return 0
+	case "stop":
+		runID, err := parseRunIDArg("stop", args[1:])
+		if err != nil {
+			fmt.Fprintf(stderr, "maya-stall stop: %v\n", err)
+			return 2
+		}
+		if err := stopRun(workDir, runID); err != nil {
+			var userErr *usageError
+			if errors.As(err, &userErr) {
+				fmt.Fprintf(stderr, "maya-stall stop: %v\n", err)
+				return 2
+			}
+			fmt.Fprintf(stderr, "maya-stall stop: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "stopped: %s\n", runID)
+		return 0
 	default:
 		fmt.Fprintf(stderr, "maya-stall: unknown command %q\n\n", args[0])
 		printHelp(stderr)
@@ -108,12 +161,18 @@ Usage:
   maya-stall version
   maya-stall init
   maya-stall doctor [--host-config <path>] [--target-profile <name>] [--host <id>] [--scenario <name>]
-  maya-stall run [--host-config <path>] [--target-profile <name>] [--host <id>] [--host-lock-wait <duration>|--host-lock-fail-fast] <scenario>
+  maya-stall run [--host-config <path>] [--target-profile <name>] [--host <id>] [--host-lock-wait <duration>|--host-lock-fail-fast] [--keep-on-failure|--stop-after <success|failure|always|never>] <scenario>
+  maya-stall status [--run <run-id>]
+  maya-stall attach <run-id>
+  maya-stall stop <run-id>
 
 Commands:
+  attach   print kept run events and logs
   doctor   check local config, Target Profile, and fake Host Health layers
   init      write a repo-only sample .maya-stall.yaml
   run       run a named Scenario with the fake runtime
+  status   show kept run state
+  stop     stop a kept run and release its Host Lock
   version   print the maya-stall version
 `)
 }
@@ -124,10 +183,12 @@ type runOptions struct {
 	TargetProfile string
 	HostPin       string
 	HostLockWait  time.Duration
+	StopAfter     string
 }
 
 func parseRunArgs(args []string) (runOptions, error) {
-	options := runOptions{TargetProfile: "default"}
+	options := runOptions{TargetProfile: "default", StopAfter: stopAfterAlways}
+	stopPolicySet := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch arg {
@@ -161,6 +222,25 @@ func parseRunArgs(args []string) (runOptions, error) {
 			options.HostLockWait = duration
 		case "--host-lock-fail-fast":
 			options.HostLockWait = 0
+		case "--keep-on-failure":
+			if stopPolicySet {
+				return runOptions{}, newUsageError("Stop Policy already set")
+			}
+			options.StopAfter = stopAfterSuccess
+			stopPolicySet = true
+		case "--stop-after":
+			if stopPolicySet {
+				return runOptions{}, newUsageError("Stop Policy already set")
+			}
+			i++
+			if i >= len(args) || args[i] == "" {
+				return runOptions{}, newUsageError("--stop-after needs success, failure, always, or never")
+			}
+			if !isValidStopAfter(args[i]) {
+				return runOptions{}, newUsageError("invalid --stop-after %q", args[i])
+			}
+			options.StopAfter = args[i]
+			stopPolicySet = true
 		default:
 			if strings.HasPrefix(arg, "-") {
 				return runOptions{}, newUsageError("unknown run option %q", arg)

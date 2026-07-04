@@ -113,6 +113,27 @@ maya-stall run --host-config ci-hosts.yaml --target-profile ci --host-lock-wait 
 
 The fake runtime chooses the first healthy unlocked Maya Host, writes the selected Target Profile and Maya Host into run output and manifests, and holds a Host Lock under `.maya-stall/state/locks/hosts/` for the Fresh Run.
 
+Fresh Runs stop and clean hidden run state by default after writing the Evidence Bundle. Use `--keep-on-failure` to leave a failed Kept Session for local debugging, or set the Stop Policy explicitly:
+
+```sh
+maya-stall run --keep-on-failure smoke
+maya-stall run --stop-after success smoke
+maya-stall run --stop-after failure smoke
+maya-stall run --stop-after always smoke
+maya-stall run --stop-after never smoke
+```
+
+Kept Sessions stay visible in fake local run state and keep their Host Lock until stopped:
+
+```sh
+maya-stall status
+maya-stall status --run <run-id>
+maya-stall attach <run-id>
+maya-stall stop <run-id>
+```
+
+`attach` prints the kept run's events and Session Broker log. `stop` removes the kept run state and releases the Host Lock.
+
 ## Check fake Host Health
 
 ```sh

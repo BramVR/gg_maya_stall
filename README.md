@@ -48,3 +48,31 @@ maya-stall run --host-config ci-hosts.yaml --target-profile ci --host-lock-wait 
 ```
 
 The fake runtime chooses the first healthy unlocked Maya Host, writes the selected Target Profile and Maya Host into run output and manifests, and holds a Host Lock under `.maya-stall/state/locks/hosts/` for the Fresh Run.
+
+## Check fake Host Health
+
+```sh
+maya-stall doctor
+maya-stall doctor --host-config ci-hosts.yaml --target-profile ci --host beta
+maya-stall doctor --host-config ci-hosts.yaml --target-profile ci --scenario smoke
+```
+
+`maya-stall doctor` reports layered local, Target Profile, Host Pool, fake SSH, work root, Session Broker, Maya version, Visual Evidence, Host Lock, and Scenario input checks. Failures name the failed layer and include a repair hint. Default checks stay fake/local; no real Maya, SSH, hostnames, credentials, or Evidence Store are required.
+
+Host config may include fake diagnostic fields for deterministic checks:
+
+```yaml
+version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: beta
+        ssh: ok
+        workRoot: writable
+        broker: ok
+        mayaVersions: ["2025"]
+        visualEvidence: true
+```

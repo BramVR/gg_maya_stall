@@ -38,8 +38,13 @@ type hostPoolConfig struct {
 }
 
 type mayaHostConfig struct {
-	ID     string `yaml:"id"`
-	Health string `yaml:"health"`
+	ID             string   `yaml:"id"`
+	Health         string   `yaml:"health"`
+	SSH            string   `yaml:"ssh"`
+	WorkRoot       string   `yaml:"workRoot"`
+	Broker         string   `yaml:"broker"`
+	MayaVersions   []string `yaml:"mayaVersions"`
+	VisualEvidence *bool    `yaml:"visualEvidence"`
 }
 
 func selectHostForRun(repoDir string, options runOptions) (hostRuntime, error) {

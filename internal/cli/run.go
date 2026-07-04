@@ -337,7 +337,7 @@ func collectScenarioVisualEvidence(broker sessionBroker, context runContext, sce
 		if !ok {
 			return fmt.Errorf("Session Broker does not support recording capture")
 		}
-		if _, err := capturer.CaptureRecording(context, recordingRequest{Name: visualEvidenceFileName(scenarioName, ".mp4"), Duration: 10 * time.Second, FPS: 15}); err != nil {
+		if _, err := capturer.CaptureRecording(context, recordingRequest{Name: visualEvidenceFileName(scenarioName, ".mp4"), Duration: defaultRecordingDuration, FPS: defaultRecordingFPS}); err != nil {
 			return err
 		}
 	}

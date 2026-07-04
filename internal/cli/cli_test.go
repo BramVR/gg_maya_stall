@@ -233,8 +233,17 @@ func TestRecordCapturesVisualEvidenceArtifact(t *testing.T) {
 	}
 
 	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
-	if _, err := os.Stat(filepath.Join(evidence, "recordings", "recording.mp4")); err != nil {
+	recordingPath := filepath.Join(evidence, "recordings", "recording.mp4")
+	if _, err := os.Stat(recordingPath); err != nil {
 		t.Fatalf("expected recording artifact: %v", err)
+	}
+	recordingBytes, err := os.ReadFile(recordingPath)
+	if err != nil {
+		t.Fatalf("read recording artifact: %v", err)
+	}
+	wantDefaults := fmt.Sprintf("duration=%s fps=%d", defaultRecordingDuration, defaultRecordingFPS)
+	if !strings.Contains(string(recordingBytes), wantDefaults) {
+		t.Fatalf("recording artifact missing Crabbox-like defaults %q:\n%s", wantDefaults, string(recordingBytes))
 	}
 	bundle := readEvidenceBundle(t, evidence)
 	if len(bundle.VisualEvidence) != 1 {

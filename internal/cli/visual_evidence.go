@@ -119,7 +119,7 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 		if !ok {
 			return runOutcome{}, visualEvidenceArtifact{}, fmt.Errorf("Session Broker does not support recording capture")
 		}
-		artifact, err = capturer.CaptureRecording(context, recordingRequest{Name: "recording.mp4", Duration: 10 * time.Second, FPS: 15})
+		artifact, err = capturer.CaptureRecording(context, recordingRequest{Name: "recording.mp4", Duration: defaultRecordingDuration, FPS: defaultRecordingFPS})
 	default:
 		err = fmt.Errorf("unknown Visual Evidence kind %q", kind)
 	}

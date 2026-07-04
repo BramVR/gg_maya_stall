@@ -124,30 +124,53 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 		printVisualEvidenceOutcome(stdout, outcome, artifact)
 		return 0
 	case "evidence":
-		if len(args) < 2 || args[1] != "collect" {
-			fmt.Fprintf(stderr, "maya-stall evidence: expected collect\n")
+		if len(args) < 2 {
+			fmt.Fprintf(stderr, "maya-stall evidence: expected collect or publish\n")
 			return 2
 		}
-		options, err := parseRunArgs(args[2:])
-		if err != nil {
-			fmt.Fprintf(stderr, "maya-stall evidence collect: %v\n", err)
-			return 2
-		}
-		outcome, err := runScenario(workDir, options, runtime)
-		if err != nil {
-			var userErr *usageError
-			if errors.As(err, &userErr) {
+		switch args[1] {
+		case "collect":
+			options, err := parseRunArgs(args[2:])
+			if err != nil {
 				fmt.Fprintf(stderr, "maya-stall evidence collect: %v\n", err)
 				return 2
 			}
-			fmt.Fprintf(stderr, "maya-stall evidence collect: %v\n", err)
+			outcome, err := runScenario(workDir, options, runtime)
+			if err != nil {
+				var userErr *usageError
+				if errors.As(err, &userErr) {
+					fmt.Fprintf(stderr, "maya-stall evidence collect: %v\n", err)
+					return 2
+				}
+				fmt.Fprintf(stderr, "maya-stall evidence collect: %v\n", err)
+				return 1
+			}
+			printRunOutcome(stdout, outcome)
+			if outcome.Result.Status == resultStatusPassed {
+				return 0
+			}
 			return 1
-		}
-		printRunOutcome(stdout, outcome)
-		if outcome.Result.Status == resultStatusPassed {
+		case "publish":
+			options, err := parseEvidencePublishArgs(args[2:])
+			if err != nil {
+				fmt.Fprintf(stderr, "maya-stall evidence publish: %v\n", err)
+				return 2
+			}
+			published, err := publishEvidenceBundle(workDir, options)
+			if err != nil {
+				fmt.Fprintf(stderr, "maya-stall evidence publish: %v\n", err)
+				return 1
+			}
+			fmt.Fprintf(stdout, "run: %s\n", published.RunID)
+			fmt.Fprintf(stdout, "published: %s\n", published.PublishedDir)
+			fmt.Fprintf(stdout, "artifactManifest: %s\n", published.ManifestPath)
+			fmt.Fprintf(stdout, "reviewComment: %s\n", published.MarkdownPath)
+			fmt.Fprintf(stdout, "url: %s\n", published.URL)
 			return 0
+		default:
+			fmt.Fprintf(stderr, "maya-stall evidence: expected collect or publish\n")
+			return 2
 		}
-		return 1
 	case "status":
 		options, err := parseStatusArgs(args[1:])
 		if err != nil {
@@ -240,6 +263,7 @@ Usage:
   maya-stall screenshot [--host-config <path>] [--target-profile <name>] [--host <id>]
   maya-stall record [--host-config <path>] [--target-profile <name>] [--host <id>]
   maya-stall evidence collect [--host-config <path>] [--target-profile <name>] [--host <id>] <scenario>
+  maya-stall evidence publish --destination <path> --base-url <url> <evidence-bundle-dir>
   maya-stall status [--run <run-id>]
   maya-stall attach <run-id>
   maya-stall stop <run-id>
@@ -248,6 +272,7 @@ Commands:
   attach   print kept run events and logs
   doctor   check local config, Target Profile, and fake Host Health layers
   evidence collect   run a Scenario and write a complete Evidence Bundle
+  evidence publish   copy an Evidence Bundle to a filesystem Evidence Store
   init      write a repo-only sample .maya-stall.yaml
   record    capture a fake Session Broker recording artifact
   run       run a named Scenario with the fake runtime

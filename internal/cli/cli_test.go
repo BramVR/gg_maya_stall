@@ -392,6 +392,404 @@ scenarios:
 	}
 }
 
+func TestEvidencePublishCopiesBundleAndWritesReviewLinks(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload: {}
+    expectedOutputs:
+      scenarioResult: "outputs/result.json"
+`)
+	var stdout, stderr bytes.Buffer
+	runtime := defaultRunRuntime()
+	runtime.Broker = outputWritingBroker{
+		files:          map[string]string{"outputs/report.json": `{"ok":true}` + "\n"},
+		visualEvidence: true,
+	}
+
+	code := RunWithRuntime([]string{"evidence", "collect", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 0 {
+		t.Fatalf("evidence collect exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	runID := filepath.Base(evidence)
+	store := filepath.Join(t.TempDir(), "evidence-store")
+	baseURL := "https://evidence.example.test/maya/"
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"evidence", "publish", "--destination", store, "--base-url", baseURL, evidence}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("evidence publish exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	published := filepath.Join(store, runID)
+	for _, path := range []string{
+		filepath.Join(published, "evidence.json"),
+		filepath.Join(published, "manifest.json"),
+		filepath.Join(published, "artifact-manifest.json"),
+		filepath.Join(published, "review-comment.md"),
+		filepath.Join(published, "screenshots", "smoke.png"),
+		filepath.Join(published, "outputs", "report.json"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected published artifact %s: %v", path, err)
+		}
+	}
+
+	artifactManifestBytes, err := os.ReadFile(filepath.Join(published, "artifact-manifest.json"))
+	if err != nil {
+		t.Fatalf("read artifact manifest: %v", err)
+	}
+	var artifactManifest publishedArtifactManifest
+	if err := json.Unmarshal(artifactManifestBytes, &artifactManifest); err != nil {
+		t.Fatalf("parse artifact manifest: %v", err)
+	}
+	wantScreenshotURL := "https://evidence.example.test/maya/" + runID + "/screenshots/smoke.png"
+	wantLogURL := "https://evidence.example.test/maya/" + runID + "/logs/session.log"
+	wantOutputURL := "https://evidence.example.test/maya/" + runID + "/outputs/report.json"
+	if artifactManifest.RunID != runID || artifactManifest.BaseURL != strings.TrimRight(baseURL, "/") {
+		t.Fatalf("artifact manifest identity = %+v, want run/base URL", artifactManifest)
+	}
+	if !publishedManifestHasURL(artifactManifest, "Visual Evidence", wantScreenshotURL) {
+		t.Fatalf("artifact manifest missing screenshot URL %q: %+v", wantScreenshotURL, artifactManifest.Artifacts)
+	}
+	if !publishedManifestHasURL(artifactManifest, "logs", wantLogURL) {
+		t.Fatalf("artifact manifest missing log URL %q: %+v", wantLogURL, artifactManifest.Artifacts)
+	}
+	if !publishedManifestHasURL(artifactManifest, "outputs", wantOutputURL) {
+		t.Fatalf("artifact manifest missing output URL %q: %+v", wantOutputURL, artifactManifest.Artifacts)
+	}
+
+	reviewMarkdownBytes, err := os.ReadFile(filepath.Join(published, "review-comment.md"))
+	if err != nil {
+		t.Fatalf("read review markdown: %v", err)
+	}
+	reviewMarkdown := string(reviewMarkdownBytes)
+	for _, want := range []string{
+		"status: passed",
+		wantScreenshotURL,
+		wantLogURL,
+		wantOutputURL,
+		"https://evidence.example.test/maya/" + runID + "/evidence.json",
+	} {
+		if !strings.Contains(reviewMarkdown, want) {
+			t.Fatalf("review markdown missing %q:\n%s", want, reviewMarkdown)
+		}
+	}
+
+	mustWriteFile(t, filepath.Join(published, "stale.txt"), "stale\n")
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"evidence", "publish", "--destination", store, "--base-url", baseURL, evidence}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("republish exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(published, "stale.txt")); !os.IsNotExist(err) {
+		t.Fatalf("republish did not remove stale file, stat err = %v", err)
+	}
+}
+
+func TestEvidencePublishRejectsDestinationInsideBundle(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload: {}
+    expectedOutputs:
+      scenarioResult: "outputs/result.json"
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"evidence", "collect", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("evidence collect exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	nestedStore := filepath.Join(evidence, "store")
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"evidence", "publish", "--destination", nestedStore, "--base-url", "https://evidence.example.test/maya", evidence}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("nested publish exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "must not overlap") {
+		t.Fatalf("nested publish error missing clear detail: %s", stderr.String())
+	}
+	if _, err := os.Stat(nestedStore); !os.IsNotExist(err) {
+		t.Fatalf("nested publish created destination, stat err = %v", err)
+	}
+}
+
+func TestEvidencePublishRejectsBundleInsideDestinationRun(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload: {}
+    expectedOutputs:
+      scenarioResult: "outputs/result.json"
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"evidence", "collect", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("evidence collect exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	runID := filepath.Base(evidence)
+	store := filepath.Join(t.TempDir(), "store")
+	bundleInsidePublishedRun := filepath.Join(store, runID, "bundle")
+	if err := copyPath(evidence, bundleInsidePublishedRun); err != nil {
+		t.Fatalf("prepare nested source bundle: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"evidence", "publish", "--destination", store, "--base-url", "https://evidence.example.test/maya", bundleInsidePublishedRun}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("overlap publish exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "must not overlap") {
+		t.Fatalf("overlap publish error missing clear detail: %s", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(bundleInsidePublishedRun, "evidence.json")); err != nil {
+		t.Fatalf("overlap publish deleted source bundle: %v", err)
+	}
+}
+
+func TestEvidencePublishDoesNotDeleteSourceAtScratchLikePath(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload: {}
+    expectedOutputs:
+      scenarioResult: "outputs/result.json"
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"evidence", "collect", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("evidence collect exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	runID := filepath.Base(evidence)
+	store := filepath.Join(t.TempDir(), "store")
+	scratchLikeSource := filepath.Join(store, "."+runID+".tmp")
+	if err := copyPath(evidence, scratchLikeSource); err != nil {
+		t.Fatalf("prepare scratch-like source bundle: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"evidence", "publish", "--destination", store, "--base-url", "https://evidence.example.test/maya", scratchLikeSource}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("publish exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(scratchLikeSource, "evidence.json")); err != nil {
+		t.Fatalf("publish deleted scratch-like source bundle: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(store, runID, "review-comment.md")); err != nil {
+		t.Fatalf("publish did not create final review comment: %v", err)
+	}
+}
+
+func TestEvidencePublishEscapesReviewMarkdownLabels(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload: {}
+    expectedOutputs:
+      scenarioResult: "outputs/result.json"
+`)
+	var stdout, stderr bytes.Buffer
+	runtime := defaultRunRuntime()
+	runtime.Broker = outputWritingBroker{
+		files: map[string]string{"outputs/report](https://evil.test).json": "{}\n"},
+	}
+
+	code := RunWithRuntime([]string{"evidence", "collect", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 0 {
+		t.Fatalf("evidence collect exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	store := filepath.Join(t.TempDir(), "store")
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"evidence", "publish", "--destination", store, "--base-url", "https://evidence.example.test/maya", evidence}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("evidence publish exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := filepath.Base(evidence)
+	reviewMarkdownBytes, err := os.ReadFile(filepath.Join(store, runID, "review-comment.md"))
+	if err != nil {
+		t.Fatalf("read review markdown: %v", err)
+	}
+	reviewMarkdown := string(reviewMarkdownBytes)
+	if strings.Contains(reviewMarkdown, "](https://evil.test)") || strings.Contains(reviewMarkdown, "](https:/evil.test)") {
+		t.Fatalf("review markdown contains unescaped forged link:\n%s", reviewMarkdown)
+	}
+	if !strings.Contains(reviewMarkdown, `outputs/report\]\(https:/evil.test\).json`) {
+		t.Fatalf("review markdown missing escaped output label:\n%s", reviewMarkdown)
+	}
+	if !strings.Contains(reviewMarkdown, `](<https://evidence.example.test/maya/`) {
+		t.Fatalf("review markdown missing angle-bracket link destination:\n%s", reviewMarkdown)
+	}
+}
+
+func TestEvidencePublishFailedRepublishPreservesExistingRun(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload: {}
+    expectedOutputs:
+      scenarioResult: "outputs/result.json"
+    evidence:
+      screenshots:
+        enabled: true
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"evidence", "collect", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("evidence collect exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	runID := filepath.Base(evidence)
+	store := filepath.Join(t.TempDir(), "store")
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"evidence", "publish", "--destination", store, "--base-url", "https://evidence.example.test/maya", evidence}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("initial publish exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	published := filepath.Join(store, runID)
+	mustWriteFile(t, filepath.Join(published, "existing-marker.txt"), "keep me\n")
+	bundle := readEvidenceBundle(t, evidence)
+	bundle.VisualEvidence = []visualEvidenceArtifact{{Kind: "screenshot", Path: "screenshots/missing.png", MediaType: "image/png"}}
+	if err := writeJSONFile(filepath.Join(evidence, "evidence.json"), bundle); err != nil {
+		t.Fatalf("corrupt source evidence bundle: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"evidence", "publish", "--destination", store, "--base-url", "https://evidence.example.test/maya", evidence}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("failed republish exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(published, "existing-marker.txt")); err != nil {
+		t.Fatalf("failed republish did not preserve existing published run: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(published, "review-comment.md")); err != nil {
+		t.Fatalf("failed republish removed existing review comment: %v", err)
+	}
+}
+
+func TestEvidencePublishLinksDeclaredOutputsOutsideOutputsDir(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload: {}
+    expectedOutputs:
+      scenarioResult: "outputs/result.json"
+    validators:
+      - type: outputExists
+        path: "reports/report.json"
+`)
+	var stdout, stderr bytes.Buffer
+	runtime := defaultRunRuntime()
+	runtime.Broker = outputWritingBroker{
+		files: map[string]string{"reports/report.json": "{}\n"},
+	}
+
+	code := RunWithRuntime([]string{"evidence", "collect", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 0 {
+		t.Fatalf("evidence collect exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	if _, err := os.Stat(filepath.Join(evidence, "reports", "report.json")); err != nil {
+		t.Fatalf("expected declared output in Evidence Bundle: %v", err)
+	}
+	store := filepath.Join(t.TempDir(), "store")
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"evidence", "publish", "--destination", store, "--base-url", "https://evidence.example.test/maya", evidence}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("evidence publish exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	published := filepath.Join(store, filepath.Base(evidence))
+	wantOutputURL := "https://evidence.example.test/maya/" + filepath.Base(evidence) + "/reports/report.json"
+	artifactManifestBytes, err := os.ReadFile(filepath.Join(published, "artifact-manifest.json"))
+	if err != nil {
+		t.Fatalf("read artifact manifest: %v", err)
+	}
+	var artifactManifest publishedArtifactManifest
+	if err := json.Unmarshal(artifactManifestBytes, &artifactManifest); err != nil {
+		t.Fatalf("parse artifact manifest: %v", err)
+	}
+	if !publishedManifestHasURL(artifactManifest, "outputs", wantOutputURL) {
+		t.Fatalf("artifact manifest missing declared output URL %q: %+v", wantOutputURL, artifactManifest.Artifacts)
+	}
+	reviewMarkdownBytes, err := os.ReadFile(filepath.Join(published, "review-comment.md"))
+	if err != nil {
+		t.Fatalf("read review markdown: %v", err)
+	}
+	if !strings.Contains(string(reviewMarkdownBytes), wantOutputURL) {
+		t.Fatalf("review markdown missing declared output URL %q:\n%s", wantOutputURL, string(reviewMarkdownBytes))
+	}
+}
+
+func TestEvidencePublishEscapesReviewMarkdownMetadata(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload: {}
+    expectedOutputs:
+      scenarioResult: "outputs/result.json"
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"evidence", "collect", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("evidence collect exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	bundle := readEvidenceBundle(t, evidence)
+	bundle.Status = "passed\n- forged: [x](https://evil.test)"
+	bundle.Scenario = "smoke [scenario](https://evil.test)"
+	if err := writeJSONFile(filepath.Join(evidence, "evidence.json"), bundle); err != nil {
+		t.Fatalf("write malicious evidence metadata: %v", err)
+	}
+	store := filepath.Join(t.TempDir(), "store")
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"evidence", "publish", "--destination", store, "--base-url", "https://evidence.example.test/maya", evidence}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("evidence publish exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	reviewMarkdownBytes, err := os.ReadFile(filepath.Join(store, filepath.Base(evidence), "review-comment.md"))
+	if err != nil {
+		t.Fatalf("read review markdown: %v", err)
+	}
+	reviewMarkdown := string(reviewMarkdownBytes)
+	if strings.Contains(reviewMarkdown, "\n- forged:") || strings.Contains(reviewMarkdown, "](https://evil.test)") {
+		t.Fatalf("review markdown contains unescaped metadata:\n%s", reviewMarkdown)
+	}
+	if !strings.Contains(reviewMarkdown, `status: passed - forged: \[x\]\(https://evil.test\)`) {
+		t.Fatalf("review markdown missing escaped metadata:\n%s", reviewMarkdown)
+	}
+}
+
 func TestScreenshotReportsHostLockReleaseFailure(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	var stdout, stderr bytes.Buffer
@@ -1877,6 +2275,59 @@ scenarios:
 	if len(bundle.Validators) != 1 || bundle.Validators[0].Status != "failed" || !strings.Contains(bundle.Validators[0].Message, "symlink") {
 		t.Fatalf("validator metadata = %+v", bundle.Validators)
 	}
+	if _, err := os.Stat(filepath.Join(evidence, "outputs", "secret.json")); !os.IsNotExist(err) {
+		t.Fatalf("symlinked output was copied into Evidence Bundle, stat err = %v", err)
+	}
+}
+
+func TestRunScenarioSkipsOutputPathThatCollidesWithEvidenceMetadata(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload: {}
+    expectedOutputs:
+      scenarioResult: "scenario-result.json"
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	bundle := readEvidenceBundle(t, evidence)
+	if len(bundle.Outputs) != 0 {
+		t.Fatalf("metadata-colliding Scenario Result was recorded as output: %+v", bundle.Outputs)
+	}
+	if _, err := os.Stat(filepath.Join(evidence, "scenario-result.json")); err != nil {
+		t.Fatalf("Scenario Result metadata missing: %v", err)
+	}
+}
+
+func TestRunScenarioInvalidValidatorPathStillWritesEvidence(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload: {}
+    expectedOutputs:
+      scenarioResult: "outputs/result.json"
+    validators:
+      - type: outputExists
+        path: "../secret.json"
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	bundle := readEvidenceBundle(t, evidence)
+	if len(bundle.Validators) != 1 || bundle.Validators[0].Status != "failed" || !strings.Contains(bundle.Validators[0].Message, "repo-relative") {
+		t.Fatalf("validator metadata = %+v", bundle.Validators)
+	}
 }
 
 func TestRunScenarioRequiresKnownScenario(t *testing.T) {
@@ -2396,6 +2847,15 @@ func readEvidenceBundle(t *testing.T, evidenceDir string) evidenceBundle {
 		t.Fatalf("parse evidence bundle: %v", err)
 	}
 	return bundle
+}
+
+func publishedManifestHasURL(manifest publishedArtifactManifest, label string, url string) bool {
+	for _, artifact := range manifest.Artifacts {
+		if artifact.Label == label && artifact.URL == url {
+			return true
+		}
+	}
+	return false
 }
 
 func runIDFromOutput(t *testing.T, output string) string {

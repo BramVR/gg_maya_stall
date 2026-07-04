@@ -861,6 +861,10 @@ func writeEvidenceBundle(context runContext, manifest runManifest, result Scenar
 	if err := copyFile(context.LogPath, filepath.Join(context.EvidenceDir, "logs", "session.log")); err != nil {
 		return err
 	}
+	visualEvidence, err := discoverVisualEvidence(context.EvidenceDir)
+	if err != nil {
+		return err
+	}
 	bundle := evidenceBundle{
 		RunID:          manifest.RunID,
 		Scenario:       manifest.Scenario,
@@ -872,13 +876,13 @@ func writeEvidenceBundle(context runContext, manifest runManifest, result Scenar
 		Log:            filepath.Join("logs", "session.log"),
 		ScenarioResult: "scenario-result.json",
 		Payload:        manifest.Payload,
-		VisualEvidence: discoverVisualEvidence(context.EvidenceDir),
+		VisualEvidence: visualEvidence,
 		Validators:     validators,
 	}
 	return writeJSONFile(filepath.Join(context.EvidenceDir, "evidence.json"), bundle)
 }
 
-func discoverVisualEvidence(evidenceDir string) []visualEvidenceArtifact {
+func discoverVisualEvidence(evidenceDir string) ([]visualEvidenceArtifact, error) {
 	var artifacts []visualEvidenceArtifact
 	for _, spec := range []struct {
 		dir       string
@@ -889,7 +893,7 @@ func discoverVisualEvidence(evidenceDir string) []visualEvidenceArtifact {
 		{dir: "recordings", kind: "recording", mediaType: "video/mp4"},
 	} {
 		root := filepath.Join(evidenceDir, spec.dir)
-		_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil
 			}
@@ -914,8 +918,11 @@ func discoverVisualEvidence(evidenceDir string) []visualEvidenceArtifact {
 			})
 			return nil
 		})
+		if err != nil {
+			return nil, fmt.Errorf("discover %s Visual Evidence: %w", spec.kind, err)
+		}
 	}
-	return artifacts
+	return artifacts, nil
 }
 
 func repoRelativePath(repoDir string, path string) string {

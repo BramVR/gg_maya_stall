@@ -245,6 +245,23 @@ func TestRecordCapturesVisualEvidenceArtifact(t *testing.T) {
 	}
 }
 
+func TestStandaloneVisualEvidenceCommandsReturnUsageCodeForUnknownTargetProfile(t *testing.T) {
+	for _, command := range []string{"screenshot", "record"} {
+		t.Run(command, func(t *testing.T) {
+			dir := writeRunConfigFixture(t)
+			var stdout, stderr bytes.Buffer
+
+			code := Run([]string{command, "--target-profile", "missing"}, &stdout, &stderr, dir, "test-version")
+			if code != 2 {
+				t.Fatalf("%s exit code = %d, want 2; stdout: %s stderr: %s", command, code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "unknown Target Profile") {
+				t.Fatalf("%s error missing usage detail: %s", command, stderr.String())
+			}
+		})
+	}
+}
+
 func TestEvidenceCollectWritesManifestAndExpectedVisualFiles(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1

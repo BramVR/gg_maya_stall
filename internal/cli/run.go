@@ -34,6 +34,10 @@ type runHost interface {
 	StagePayload(runContext, []manifestPayload) error
 }
 
+type artifactCollector interface {
+	CollectArtifacts(runContext, scenarioConfig) error
+}
+
 type sessionBroker interface {
 	RunScenario(runContext, scenarioConfig) (ScenarioResult, error)
 }
@@ -139,9 +143,6 @@ type validatorResult struct {
 }
 
 func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcome runOutcome, err error) {
-	if runtime.Host == nil {
-		runtime.Host = fakeHost{}
-	}
 	if runtime.Broker == nil {
 		runtime.Broker = fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "fake Scenario completed"}}
 	}
@@ -167,6 +168,9 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	host, err := selectHostForRun(repoDir, options)
 	if err != nil {
 		return runOutcome{}, err
+	}
+	if runtime.Host == nil {
+		runtime.Host = runHostForConfig(host.Config)
 	}
 	releaseHostLock := true
 	defer func() {
@@ -235,6 +239,11 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	result, err := runtime.Broker.RunScenario(context, scenario)
 	if err != nil {
 		return runOutcome{}, err
+	}
+	if collector, ok := runtime.Host.(artifactCollector); ok {
+		if err := collector.CollectArtifacts(context, scenario); err != nil {
+			return runOutcome{}, err
+		}
 	}
 	brokerResult := result
 	if err := validateScenarioResultPath(context, scenarioResultPath); err != nil {
@@ -448,6 +457,7 @@ func buildManifestPayload(payload runPayload) ([]manifestPayload, error) {
 			if err != nil {
 				return nil, err
 			}
+			cleanSource = filepath.ToSlash(cleanSource)
 			manifest = append(manifest, manifestPayload{
 				Kind:   item.kind,
 				Source: cleanSource,

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1102,6 +1103,65 @@ func TestDoctorReportsHostSpecificHealthLayers(t *testing.T) {
 	}
 }
 
+func TestDoctorRealSSHVerifiesConnectivityAndWritableWorkRoot(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sshLog := filepath.Join(dir, "ssh.log")
+	sshPath := writeFakeCommand(t, dir, "fake-ssh", sshLog, 0)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: fake-alpha
+        health: healthy
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          user: maya-runner
+          port: 2222
+          identityFile: ~/.ssh/maya-stall-ci
+          binary: `+strconv.Quote(sshPath)+`
+        workRoot: C:/maya-stall
+        broker: ok
+        mayaVersions: ["2025"]
+        visualEvidence: true
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("doctor exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"ssh: ok - reachable",
+		"work-root: ok - writable",
+		"session-broker: ok - reachable",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("doctor output missing %q:\n%s", want, stdout.String())
+		}
+	}
+	logBytes, err := os.ReadFile(sshLog)
+	if err != nil {
+		t.Fatalf("read ssh log: %v", err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{"-p", "2222", "-i", filepath.Join(os.Getenv("HOME"), ".ssh", "maya-stall-ci"), "maya-runner@maya-win-01", "powershell"} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("ssh command log missing %q:\n%s", want, log)
+		}
+	}
+	for _, want := range []string{"BatchMode=yes", "ConnectTimeout=10"} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("ssh command log missing noninteractive option %q:\n%s", want, log)
+		}
+	}
+}
+
 func TestDoctorScenarioValidatesInputsAndMayaVersion(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	hostConfigPath := writeLayeredHostConfig(t, dir)
@@ -1358,6 +1418,286 @@ hostPools:
 	}
 	if manifest.TargetProfile != "ci" || manifest.Host != "beta" {
 		t.Fatalf("manifest selected target/host = %q/%q, want ci/beta", manifest.TargetProfile, manifest.Host)
+	}
+}
+
+func TestRunScenarioRealSSHUploadsPayloadAndDownloadsDeclaredOutputs(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	configPath := filepath.Join(dir, ".maya-stall.yaml")
+	contentBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config fixture: %v", err)
+	}
+	content := strings.Replace(string(contentBytes), "files: []", "files:\n        - \"outputs/report.json\"", 1)
+	content = strings.Replace(content, "recording:\n        enabled: false", "recording:\n        enabled: false\n    validators:\n      - type: outputExists\n        path: \"outputs/report.json\"", 1)
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config fixture: %v", err)
+	}
+	sftpLog := filepath.Join(dir, "sftp.log")
+	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "host: alpha") || !strings.Contains(stdout.String(), "status: passed") {
+		t.Fatalf("run output missing selected real host/pass status:\n%s", stdout.String())
+	}
+	logBytes, err := os.ReadFile(sftpLog)
+	if err != nil {
+		t.Fatalf("read sftp log: %v", err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{
+		`-mkdir "C:/maya-stall"`,
+		`-mkdir "C:/maya-stall/runs"`,
+		`put -r `,
+		`maya/smoke.py`,
+		`C:/maya-stall/runs/`,
+		`payload/mayaScripts/maya/smoke.py`,
+		`-get -r `,
+		`workspace/outputs/report.json`,
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("sftp batch missing %q:\n%s", want, log)
+		}
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	if _, err := os.Stat(filepath.Join(evidence, "outputs", "report.json")); err != nil {
+		t.Fatalf("expected downloaded output in Evidence Bundle: %v", err)
+	}
+}
+
+func TestRunScenarioRealSSHRequiresDownloadedScenarioResult(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sftpPath := writeFailingGetSFTPCommand(t, dir)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "download declared outputs") {
+		t.Fatalf("run error did not report required Scenario Result download failure: %s", stderr.String())
+	}
+}
+
+func TestRunScenarioRealSSHDownloadsValidatorOnlyOutputs(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	configPath := filepath.Join(dir, ".maya-stall.yaml")
+	contentBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config fixture: %v", err)
+	}
+	content := strings.Replace(string(contentBytes), "recording:\n        enabled: false", "recording:\n        enabled: false\n    validators:\n      - type: jsonEquals\n        path: \"outputs/metrics.json\"\n        jsonPath: \"$.status\"\n        equals: passed", 1)
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config fixture: %v", err)
+	}
+	sftpLog := filepath.Join(dir, "sftp.log")
+	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	logBytes, err := os.ReadFile(sftpLog)
+	if err != nil {
+		t.Fatalf("read sftp log: %v", err)
+	}
+	if !strings.Contains(string(logBytes), "workspace/outputs/metrics.json") {
+		t.Fatalf("sftp batch did not download validator-only output:\n%s", string(logBytes))
+	}
+}
+
+func TestRunScenarioRealSSHRejectsNestedSymlinkPayload(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not consistently available on Windows test runners")
+	}
+	dir := t.TempDir()
+	outside := t.TempDir()
+	mustWriteFile(t, filepath.Join(outside, "leak.py"), "print('outside')\n")
+	if err := os.MkdirAll(filepath.Join(dir, "includes"), 0o755); err != nil {
+		t.Fatalf("create includes fixture: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "leak.py"), filepath.Join(dir, "includes", "leak.py")); err != nil {
+		t.Skipf("create symlink fixture: %v", err)
+	}
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload:
+      includePaths:
+        - "includes"
+    expectedOutputs:
+      scenarioResult: "outputs/result.json"
+`)
+	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "symlink") {
+		t.Fatalf("run error did not reject nested symlink payload: %s", stderr.String())
+	}
+}
+
+func TestRunScenarioRealSSHRejectsSFTPBatchControlCharacters(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "maya", "smoke.py"), "print('smoke')\n")
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), "version: 1\nscenarios:\n  smoke:\n    payload:\n      scripts:\n        - \"maya/smoke.py\"\n    expectedOutputs:\n      files:\n        - \"outputs/report.json\\nput /tmp/leak C:/maya-stall/leak\"\n      scenarioResult: \"outputs/result.json\"\n")
+	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "control characters") {
+		t.Fatalf("run error did not reject SFTP batch control characters: %s", stderr.String())
+	}
+}
+
+func TestRunScenarioRealSSHRejectsBackslashRemoteArtifactPath(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "maya", "smoke.py"), "print('smoke')\n")
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), "version: 1\nscenarios:\n  smoke:\n    payload:\n      scripts:\n        - \"maya/smoke.py\"\n    expectedOutputs:\n      files:\n        - \"..\\\\..\\\\Users\\\\maya-runner\\\\secret.json\"\n      scenarioResult: \"outputs/result.json\"\n")
+	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:\maya-stall
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "backslashes") {
+		t.Fatalf("run error did not reject backslash artifact path: %s", stderr.String())
+	}
+}
+
+func TestRunScenarioRealSSHRejectsSymlinkedDownloadDestination(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not consistently available on Windows test runners")
+	}
+	dir := writeRunConfigFixture(t)
+	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+`)
+	runtimeConfig := defaultRunRuntime()
+	runtimeConfig.Broker = symlinkOutputBroker{linkPath: "outputs", target: t.TempDir()}
+	var stdout, stderr bytes.Buffer
+
+	code := RunWithRuntime([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version", runtimeConfig)
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "symlink") {
+		t.Fatalf("run error did not reject symlinked download destination: %s", stderr.String())
 	}
 }
 
@@ -2846,6 +3186,61 @@ func mustWriteFile(t *testing.T, path string, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write fixture file: %v", err)
 	}
+}
+
+func writeFakeCommand(t *testing.T, dir string, name string, logPath string, exitCode int) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	content := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$0 $*\" >> %s\nexit %d\n", shellQuote(logPath), exitCode)
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write fake command: %v", err)
+	}
+	return path
+}
+
+func writeFakeSFTPCommand(t *testing.T, dir string, logPath string) string {
+	t.Helper()
+	path := filepath.Join(dir, "fake-sftp")
+	content := fmt.Sprintf(`#!/bin/sh
+while IFS= read -r line; do
+  printf '%%s\n' "$line" >> %s
+  case "$line" in
+    *get*)
+      local_path=${line##*\" \"}
+      local_path=${local_path%%\"}
+      local_path=${local_path##\"}
+      mkdir -p "$(dirname "$local_path")"
+      printf '{"status":"passed","summary":"downloaded by fake sftp"}\n' > "$local_path"
+      ;;
+  esac
+done
+exit 0
+`, shellQuote(logPath))
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write fake sftp command: %v", err)
+	}
+	return path
+}
+
+func writeFailingGetSFTPCommand(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, "fake-sftp-failing-get")
+	content := `#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    get*) exit 1 ;;
+  esac
+done
+exit 0
+`
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write failing fake sftp command: %v", err)
+	}
+	return path
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func onlyRunDir(t *testing.T, parent string) string {

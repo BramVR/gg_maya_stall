@@ -84,13 +84,18 @@ func runDoctor(repoDir string, options doctorOptions) doctorReport {
 	}
 	add(okCheck("host-pool", profile.HostPool))
 
-	if options.HostPin == "" && options.ScenarioName == "" {
+	if options.HostPin == "" && options.ScenarioName == "" && !hostPoolHasRealSSHHost(pool.Hosts) {
 		return report
 	}
 	host, err := selectDoctorHost(pool.Hosts, options.HostPin)
 	if err != nil {
 		add(failedCheck("host", err.Error(), "Choose a Maya Host from the selected Target Profile or repair Host Pool config. See docs/setup/windows-maya-host.md#target-profile-and-host-pool."))
 		return report
+	}
+	if options.HostPin == "" && options.ScenarioName == "" {
+		if realSSHHost, ok := firstHealthyRealSSHHost(pool.Hosts); ok {
+			host = realSSHHost
+		}
 	}
 	add(okCheck("host", host.ID))
 	checkHostLayers(repoDir, options, host, scenario, add)
@@ -126,6 +131,20 @@ func hostPoolHasHealthyHost(hosts []mayaHostConfig) bool {
 	return false
 }
 
+func hostPoolHasRealSSHHost(hosts []mayaHostConfig) bool {
+	_, ok := firstHealthyRealSSHHost(hosts)
+	return ok
+}
+
+func firstHealthyRealSSHHost(hosts []mayaHostConfig) (mayaHostConfig, bool) {
+	for _, host := range hosts {
+		if isHealthyHost(host) && host.usesRealSSH() {
+			return host, true
+		}
+	}
+	return mayaHostConfig{}, false
+}
+
 func selectDoctorHost(hosts []mayaHostConfig, hostPin string) (mayaHostConfig, error) {
 	for _, host := range hosts {
 		if err := validateHostID(host.ID); err != nil {
@@ -148,8 +167,13 @@ func selectDoctorHost(hosts []mayaHostConfig, hostPin string) (mayaHostConfig, e
 }
 
 func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig, scenario scenarioConfig, add func(doctorCheck)) {
-	add(statusLayer("fake-ssh", host.SSH, "reachable", []string{"", "ok", "healthy", "reachable"}, "Fix SSH reachability for this Maya Host. See docs/setup/windows-maya-host.md#openssh-reachability."))
-	add(statusLayer("work-root", host.WorkRoot, "writable", []string{"", "ok", "writable"}, "Fix the host work root path or permissions. See docs/setup/windows-maya-host.md#work-root."))
+	if host.usesRealSSH() {
+		add(realSSHLayer(host))
+		add(realWorkRootLayer(host))
+	} else {
+		add(statusLayer("fake-ssh", host.SSH.FakeStatus, "reachable", []string{"", "ok", "healthy", "reachable"}, "Fix SSH reachability for this Maya Host. See docs/setup/windows-maya-host.md#openssh-reachability."))
+		add(statusLayer("work-root", host.WorkRoot, "writable", []string{"", "ok", "writable"}, "Fix the host work root path or permissions. See docs/setup/windows-maya-host.md#work-root."))
+	}
 	add(statusLayer("session-broker", host.Broker, "reachable", []string{"", "ok", "healthy", "reachable"}, "Start or repair the Session Broker on this Maya Host. See docs/setup/windows-maya-host.md#session-broker."))
 	add(mayaVersionLayer(options, host, scenario))
 	if host.VisualEvidence != nil && !*host.VisualEvidence {

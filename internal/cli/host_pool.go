@@ -20,6 +20,7 @@ var hostIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 type hostRuntime struct {
 	TargetProfile string
 	HostID        string
+	Config        mayaHostConfig
 	release       func() error
 }
 
@@ -38,13 +39,38 @@ type hostPoolConfig struct {
 }
 
 type mayaHostConfig struct {
-	ID             string   `yaml:"id"`
-	Health         string   `yaml:"health"`
-	SSH            string   `yaml:"ssh"`
-	WorkRoot       string   `yaml:"workRoot"`
-	Broker         string   `yaml:"broker"`
-	MayaVersions   []string `yaml:"mayaVersions"`
-	VisualEvidence *bool    `yaml:"visualEvidence"`
+	ID             string    `yaml:"id"`
+	Health         string    `yaml:"health"`
+	Transport      string    `yaml:"transport"`
+	SSH            sshConfig `yaml:"ssh"`
+	WorkRoot       string    `yaml:"workRoot"`
+	Broker         string    `yaml:"broker"`
+	MayaVersions   []string  `yaml:"mayaVersions"`
+	VisualEvidence *bool     `yaml:"visualEvidence"`
+}
+
+type sshConfig struct {
+	FakeStatus   string
+	Host         string `yaml:"host"`
+	User         string `yaml:"user"`
+	Port         int    `yaml:"port"`
+	IdentityFile string `yaml:"identityFile"`
+	Binary       string `yaml:"binary"`
+	SFTPBinary   string `yaml:"sftpBinary"`
+}
+
+func (config *sshConfig) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		config.FakeStatus = value.Value
+		return nil
+	}
+	type sshConfigAlias sshConfig
+	var decoded sshConfigAlias
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*config = sshConfig(decoded)
+	return nil
 }
 
 func selectHostForRun(repoDir string, options runOptions) (hostRuntime, error) {
@@ -75,7 +101,7 @@ func selectHostForRun(repoDir string, options runOptions) (hostRuntime, error) {
 				sawLocked = true
 				continue
 			}
-			return hostRuntime{TargetProfile: options.TargetProfile, HostID: candidate.ID, release: release}, nil
+			return hostRuntime{TargetProfile: options.TargetProfile, HostID: candidate.ID, Config: candidate, release: release}, nil
 		}
 
 		if options.HostLockWait <= 0 || time.Now().After(deadline) {
@@ -158,6 +184,10 @@ func validateHostID(id string) error {
 func isHealthyHost(host mayaHostConfig) bool {
 	health := strings.ToLower(strings.TrimSpace(host.Health))
 	return health == "" || health == "healthy"
+}
+
+func (host mayaHostConfig) usesRealSSH() bool {
+	return strings.EqualFold(strings.TrimSpace(host.Transport), "ssh") || host.SSH.Host != ""
 }
 
 func acquireHostLock(repoDir string, hostID string) (func() error, bool, error) {

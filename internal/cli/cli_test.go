@@ -283,6 +283,22 @@ func TestRunScenarioRemovesStaleHostLock(t *testing.T) {
 	}
 }
 
+func TestRunScenarioRemovesMalformedHostLock(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := writeSingleHealthyHostConfig(t, dir)
+	lockPath := filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")
+	mustWriteFile(t, lockPath, "host: alpha\n")
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--host-lock-fail-fast", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "host: alpha") {
+		t.Fatalf("run output missing host after malformed lock removal:\n%s", stdout.String())
+	}
+}
+
 func TestRunScenarioHostPinSelectsRequestedHostOrFailsClearly(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -403,6 +419,22 @@ func TestRunScenarioHostLockWaitsForRelease(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("waiting run did not finish after lock release")
+	}
+}
+
+func TestRunScenarioReportsHostLockReleaseFailure(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := writeSingleHealthyHostConfig(t, dir)
+	var stdout, stderr bytes.Buffer
+	runtime := defaultRunRuntime()
+	runtime.Broker = lockCorruptingBroker{}
+
+	code := RunWithRuntime([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "release Host Lock for alpha") {
+		t.Fatalf("release failure error = %q", stderr.String())
 	}
 }
 
@@ -692,6 +724,25 @@ func (broker *blockingBroker) RunScenario(context runContext, scenario scenarioC
 		return ScenarioResult{}, err
 	}
 	return broker.result, nil
+}
+
+type lockCorruptingBroker struct{}
+
+func (lockCorruptingBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
+	lockPath := filepath.Join(context.RepoDir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")
+	if err := os.Remove(lockPath); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := os.Mkdir(lockPath, 0o755); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := os.WriteFile(filepath.Join(lockPath, "child"), []byte("blocks remove\n"), 0o644); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := os.WriteFile(context.LogPath, []byte("corrupted lock path\n"), 0o644); err != nil {
+		return ScenarioResult{}, err
+	}
+	return ScenarioResult{Status: "passed", Summary: "lock release should fail"}, nil
 }
 
 func mustWriteFile(t *testing.T, path string, content string) {

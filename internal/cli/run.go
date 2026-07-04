@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -78,7 +79,7 @@ type evidenceBundle struct {
 	Payload        []manifestPayload `json:"payload"`
 }
 
-func runScenario(repoDir string, options runOptions, runtime runRuntime) (runOutcome, error) {
+func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcome runOutcome, err error) {
 	if runtime.Host == nil {
 		runtime.Host = fakeHost{}
 	}
@@ -108,7 +109,11 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (runOut
 	if err != nil {
 		return runOutcome{}, err
 	}
-	defer host.release()
+	defer func() {
+		if releaseErr := host.release(); releaseErr != nil {
+			err = errors.Join(err, fmt.Errorf("release Host Lock for %s: %w", host.HostID, releaseErr))
+		}
+	}()
 
 	runID := runtime.Now().UTC().Format("20060102T150405.000000000Z")
 	stateDir := filepath.Join(repoDir, ".maya-stall", "state", "runs", runID)

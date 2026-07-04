@@ -167,8 +167,21 @@ func acquireHostLock(repoDir string, hostID string) (func() error, bool, error) 
 		return nil, false, err
 	}
 	lockPath := filepath.Join(lockDir, hostID+".lock")
+	tempFile, err := os.CreateTemp(lockDir, hostID+".*.tmp")
+	if err != nil {
+		return nil, false, err
+	}
+	tempPath := tempFile.Name()
+	defer os.Remove(tempPath)
+	if _, err := fmt.Fprintf(tempFile, "host: %s\npid: %d\n", hostID, os.Getpid()); err != nil {
+		tempFile.Close()
+		return nil, false, err
+	}
+	if err := tempFile.Close(); err != nil {
+		return nil, false, err
+	}
 	for {
-		file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		err := os.Link(tempPath, lockPath)
 		if errors.Is(err, os.ErrExist) {
 			stale, err := isStaleHostLock(lockPath)
 			if err != nil {
@@ -183,15 +196,6 @@ func acquireHostLock(repoDir string, hostID string) (func() error, bool, error) 
 			continue
 		}
 		if err != nil {
-			return nil, false, err
-		}
-		if _, err := fmt.Fprintf(file, "host: %s\npid: %d\n", hostID, os.Getpid()); err != nil {
-			file.Close()
-			_ = os.Remove(lockPath)
-			return nil, false, err
-		}
-		if err := file.Close(); err != nil {
-			_ = os.Remove(lockPath)
 			return nil, false, err
 		}
 		return func() error {
@@ -215,9 +219,9 @@ func isStaleHostLock(lockPath string) (bool, error) {
 		}
 		pid, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil {
-			return false, nil
+			return true, nil
 		}
 		return !processExists(pid), nil
 	}
-	return false, nil
+	return true, nil
 }

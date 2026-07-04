@@ -90,7 +90,7 @@ Usage:
   maya-stall [--help]
   maya-stall version
   maya-stall init
-  maya-stall run [--host-config <path>] [--target-profile <name>] [--host <id>] [--host-lock-wait <duration>] <scenario>
+  maya-stall run [--host-config <path>] [--target-profile <name>] [--host <id>] [--host-lock-wait <duration>|--host-lock-fail-fast] <scenario>
 
 Commands:
   init      write a repo-only sample .maya-stall.yaml

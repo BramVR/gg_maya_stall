@@ -193,6 +193,123 @@ func TestRunScenarioStagesPayloadAndWritesStateAndEvidence(t *testing.T) {
 	}
 }
 
+func TestRunScenarioProvidesScenarioResultPathInRunEnvironment(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+	broker := &environmentCheckingBroker{}
+	runtime := defaultRunRuntime()
+	runtime.Broker = broker
+
+	code := RunWithRuntime([]string{"run", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if broker.resultPath == "" {
+		t.Fatal("broker did not receive Scenario Result path")
+	}
+	wantSuffix := filepath.Join(".maya-stall", "state", "runs", broker.runID, "workspace", "outputs", "smoke-result.json")
+	if !strings.HasSuffix(broker.resultPath, wantSuffix) {
+		t.Fatalf("Scenario Result path = %q, want suffix %q", broker.resultPath, wantSuffix)
+	}
+	if broker.resultPath != broker.environment[scenarioResultEnvVar] {
+		t.Fatalf("run environment %s = %q, want %q", scenarioResultEnvVar, broker.environment[scenarioResultEnvVar], broker.resultPath)
+	}
+}
+
+func TestRunScenarioUsesScenarioAuthoredResultFile(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+	runtime := defaultRunRuntime()
+	runtime.Broker = scenarioResultFileBroker{}
+
+	code := RunWithRuntime([]string{"run", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "status: failed") {
+		t.Fatalf("run output missing file-authored failed status:\n%s", stdout.String())
+	}
+
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	scenarioResultBytes, err := os.ReadFile(filepath.Join(evidence, "scenario-result.json"))
+	if err != nil {
+		t.Fatalf("read evidence Scenario Result: %v", err)
+	}
+	var scenarioResult map[string]any
+	if err := json.Unmarshal(scenarioResultBytes, &scenarioResult); err != nil {
+		t.Fatalf("parse evidence Scenario Result: %v", err)
+	}
+	if scenarioResult["status"] != "failed" || scenarioResult["summary"] != "script wrote result" {
+		t.Fatalf("evidence Scenario Result status/summary = %#v", scenarioResult)
+	}
+	if !strings.Contains(string(scenarioResultBytes), `"largeNumber": 9007199254740993`) {
+		t.Fatalf("evidence Scenario Result rounded large number:\n%s", string(scenarioResultBytes))
+	}
+	assertions, ok := scenarioResult["assertions"].([]any)
+	if !ok || len(assertions) != 1 {
+		t.Fatalf("evidence Scenario Result lost assertions: %#v", scenarioResult)
+	}
+}
+
+func TestRunScenarioAuthoredResultWithoutStatusKeepsBrokerFailure(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+	runtime := defaultRunRuntime()
+	runtime.Broker = partialScenarioResultFileBroker{}
+
+	code := RunWithRuntime([]string{"run", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "status: failed") {
+		t.Fatalf("run output missing broker failure status:\n%s", stdout.String())
+	}
+
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	scenarioResultBytes, err := os.ReadFile(filepath.Join(evidence, "scenario-result.json"))
+	if err != nil {
+		t.Fatalf("read evidence Scenario Result: %v", err)
+	}
+	if !strings.Contains(string(scenarioResultBytes), `"status": "failed"`) {
+		t.Fatalf("evidence Scenario Result did not preserve broker failure:\n%s", string(scenarioResultBytes))
+	}
+	if !strings.Contains(string(scenarioResultBytes), `"summary": "script partial result"`) {
+		t.Fatalf("evidence Scenario Result lost authored summary:\n%s", string(scenarioResultBytes))
+	}
+}
+
+func TestRunScenarioRejectsScenarioResultWithTrailingJSON(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+	runtime := defaultRunRuntime()
+	runtime.Broker = trailingScenarioResultBroker{}
+
+	code := RunWithRuntime([]string{"run", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "parse Scenario Result") {
+		t.Fatalf("run error did not reject trailing JSON: %s", stderr.String())
+	}
+}
+
+func TestRunScenarioRejectsSymlinkedScenarioResult(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	outside := filepath.Join(t.TempDir(), "result.json")
+	mustWriteFile(t, outside, `{"status":"passed","summary":"outside"}`+"\n")
+	var stdout, stderr bytes.Buffer
+	runtime := defaultRunRuntime()
+	runtime.Broker = symlinkOutputBroker{linkPath: "outputs/smoke-result.json", target: outside}
+
+	code := RunWithRuntime([]string{"run", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Scenario Result path") || !strings.Contains(stderr.String(), "must not be or contain a symlink") {
+		t.Fatalf("run error did not reject symlinked Scenario Result: %s", stderr.String())
+	}
+}
+
 func TestRunScenarioStagesTypedPayloadIncludingExplicitIgnoredOutputs(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, ".gitignore"), "build/\n")
@@ -1376,6 +1493,94 @@ func (lockCorruptingBroker) RunScenario(context runContext, scenario scenarioCon
 type outputWritingBroker struct {
 	files          map[string]string
 	visualEvidence bool
+}
+
+type environmentCheckingBroker struct {
+	runID       string
+	resultPath  string
+	environment map[string]string
+}
+
+func (broker *environmentCheckingBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
+	broker.runID = filepath.Base(context.StateDir)
+	broker.resultPath = context.ScenarioResultPath
+	broker.environment = context.Environment
+	if err := appendEvent(context.EventsPath, "broker.session.started", scenario.MayaVersion); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := os.WriteFile(context.LogPath, []byte("checked run environment\n"), 0o644); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := appendEvent(context.EventsPath, "broker.session.finished", resultStatusPassed); err != nil {
+		return ScenarioResult{}, err
+	}
+	return ScenarioResult{Status: resultStatusPassed, Summary: "checked run environment"}, nil
+}
+
+type scenarioResultFileBroker struct{}
+
+func (scenarioResultFileBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
+	if err := appendEvent(context.EventsPath, "broker.session.started", scenario.MayaVersion); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := os.WriteFile(context.LogPath, []byte("script wrote scenario result\n"), 0o644); err != nil {
+		return ScenarioResult{}, err
+	}
+	result := map[string]any{
+		"status":      resultStatusFailed,
+		"summary":     "script wrote result",
+		"largeNumber": json.Number("9007199254740993"),
+		"assertions": []map[string]any{
+			{"name": "plugin loaded", "passed": false},
+		},
+	}
+	if err := writeJSONFile(context.ScenarioResultPath, result); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := appendEvent(context.EventsPath, "broker.session.finished", resultStatusFailed); err != nil {
+		return ScenarioResult{}, err
+	}
+	return ScenarioResult{Status: resultStatusPassed, Summary: "broker fallback"}, nil
+}
+
+type partialScenarioResultFileBroker struct{}
+
+func (partialScenarioResultFileBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
+	if err := appendEvent(context.EventsPath, "broker.session.started", scenario.MayaVersion); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := os.WriteFile(context.LogPath, []byte("script wrote partial scenario result\n"), 0o644); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := writeJSONFile(context.ScenarioResultPath, map[string]any{"summary": "script partial result"}); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := appendEvent(context.EventsPath, "broker.session.finished", resultStatusFailed); err != nil {
+		return ScenarioResult{}, err
+	}
+	return ScenarioResult{Status: resultStatusFailed, Summary: "broker failure"}, nil
+}
+
+type trailingScenarioResultBroker struct{}
+
+func (trailingScenarioResultBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
+	if err := appendEvent(context.EventsPath, "broker.session.started", scenario.MayaVersion); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := os.WriteFile(context.LogPath, []byte("script wrote malformed scenario result\n"), 0o644); err != nil {
+		return ScenarioResult{}, err
+	}
+	content := []byte(`{"status":"passed"}{"status":"failed"}`)
+	if err := os.MkdirAll(filepath.Dir(context.ScenarioResultPath), 0o755); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := os.WriteFile(context.ScenarioResultPath, content, 0o644); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := appendEvent(context.EventsPath, "broker.session.finished", resultStatusPassed); err != nil {
+		return ScenarioResult{}, err
+	}
+	return ScenarioResult{Status: resultStatusPassed, Summary: "broker fallback"}, nil
 }
 
 func (broker outputWritingBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {

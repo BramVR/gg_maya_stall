@@ -52,6 +52,43 @@ validators:
 
 Validator failures mark the run failed and are recorded in `evidence.json`.
 
+## Write a Scenario Result
+
+Maya Stall passes the Scenario Result path to the Maya Script environment as `MAYA_STALL_SCENARIO_RESULT`. Scripts can use the optional Python helper:
+
+```python
+import maya_stall
+
+maya_stall.write_result(
+    status="passed",
+    summary="Plugin loaded and smoke check completed.",
+    assertions=[
+        {"name": "plugin loaded", "passed": True},
+    ],
+    measurements={"solveMs": 12.5},
+    outputs={"report": "outputs/report.json"},
+)
+```
+
+The helper writes JSON to `MAYA_STALL_SCENARIO_RESULT`, creating parent directories as needed. It is intentionally small; Scenario authors can also emit the protocol directly:
+
+```python
+import json
+import os
+
+result = {
+    "status": "passed",
+    "summary": "Plugin loaded and smoke check completed.",
+    "assertions": [{"name": "plugin loaded", "passed": True}],
+}
+
+path = os.environ["MAYA_STALL_SCENARIO_RESULT"]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(result, handle, indent=2)
+    handle.write("\n")
+```
+
 Host Pools live outside repo config. A user or CI host config can map Target Profiles to Host Pools:
 
 ```yaml

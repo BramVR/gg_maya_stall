@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 
 const resultStatusPassed = "passed"
 const resultStatusFailed = "failed"
+const scenarioResultEnvVar = "MAYA_STALL_SCENARIO_RESULT"
 
 type runRuntime struct {
 	Host   runHost
@@ -32,12 +34,14 @@ type sessionBroker interface {
 }
 
 type runContext struct {
-	RepoDir     string
-	StateDir    string
-	EvidenceDir string
-	Workspace   string
-	EventsPath  string
-	LogPath     string
+	RepoDir            string
+	StateDir           string
+	EvidenceDir        string
+	Workspace          string
+	EventsPath         string
+	LogPath            string
+	ScenarioResultPath string
+	Environment        map[string]string
 }
 
 type runOutcome struct {
@@ -68,6 +72,11 @@ type manifestPayload struct {
 type ScenarioResult struct {
 	Status  string `json:"status"`
 	Summary string `json:"summary,omitempty"`
+}
+
+type scenarioResultDocument struct {
+	Result ScenarioResult
+	Fields map[string]any
 }
 
 type evidenceBundle struct {
@@ -129,13 +138,19 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	runID := runtime.Now().UTC().Format("20060102T150405.000000000Z")
 	stateDir := filepath.Join(repoDir, ".maya-stall", "state", "runs", runID)
 	evidenceDir := filepath.Join(repoDir, "artifacts", "maya-stall", runID)
+	workspace := filepath.Join(stateDir, "workspace")
+	workspaceScenarioResultPath := filepath.Join(workspace, scenarioResultPath)
 	context := runContext{
-		RepoDir:     repoDir,
-		StateDir:    stateDir,
-		EvidenceDir: evidenceDir,
-		Workspace:   filepath.Join(stateDir, "workspace"),
-		EventsPath:  filepath.Join(stateDir, "events.jsonl"),
-		LogPath:     filepath.Join(stateDir, "logs", "session.log"),
+		RepoDir:            repoDir,
+		StateDir:           stateDir,
+		EvidenceDir:        evidenceDir,
+		Workspace:          workspace,
+		EventsPath:         filepath.Join(stateDir, "events.jsonl"),
+		LogPath:            filepath.Join(stateDir, "logs", "session.log"),
+		ScenarioResultPath: workspaceScenarioResultPath,
+		Environment: map[string]string{
+			scenarioResultEnvVar: workspaceScenarioResultPath,
+		},
 	}
 	if err := createCleanRunDirs(context); err != nil {
 		return runOutcome{}, err
@@ -168,10 +183,30 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	if err != nil {
 		return runOutcome{}, err
 	}
+	brokerResult := result
+	if err := validateScenarioResultPath(context, scenarioResultPath); err != nil {
+		return runOutcome{}, err
+	}
+	resultDocument, found, err := readScenarioResultDocument(context.ScenarioResultPath)
+	if err != nil {
+		return runOutcome{}, err
+	}
+	if found {
+		result = resultDocument.Result
+		if result.Status == "" {
+			result.Status = brokerResult.Status
+		}
+		if result.Summary == "" {
+			result.Summary = brokerResult.Summary
+		}
+	} else {
+		resultDocument = newScenarioResultDocument(result)
+	}
 	if result.Status == "" {
 		result.Status = resultStatusPassed
 	}
-	if err := writeJSONFile(filepath.Join(context.Workspace, scenarioResultPath), result); err != nil {
+	resultDocument.setResult(result)
+	if err := writeScenarioResult(context, scenarioResultPath, resultDocument); err != nil {
 		return runOutcome{}, err
 	}
 	validatorResults, err := validateRunOutputs(context, scenario, result)
@@ -181,7 +216,8 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	if hasValidatorFailure(validatorResults) {
 		result.Status = resultStatusFailed
 	}
-	if err := writeScenarioResult(context, scenarioResultPath, result); err != nil {
+	resultDocument.setResult(result)
+	if err := writeScenarioResult(context, scenarioResultPath, resultDocument); err != nil {
 		return runOutcome{}, err
 	}
 	if err := appendEvent(context.EventsPath, "run.completed", result.Status); err != nil {
@@ -301,12 +337,60 @@ func isReservedPayloadPath(path string) bool {
 	return false
 }
 
-func writeScenarioResult(context runContext, resultPath string, result ScenarioResult) error {
-	workspaceResult := filepath.Join(context.Workspace, resultPath)
-	if err := writeJSONFile(workspaceResult, result); err != nil {
+func newScenarioResultDocument(result ScenarioResult) scenarioResultDocument {
+	document := scenarioResultDocument{Fields: make(map[string]any)}
+	document.setResult(result)
+	return document
+}
+
+func readScenarioResultDocument(path string) (scenarioResultDocument, bool, error) {
+	content, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return scenarioResultDocument{}, false, nil
+	}
+	if err != nil {
+		return scenarioResultDocument{}, false, err
+	}
+	var fields map[string]any
+	if err := decodeJSONUseNumber(content, &fields); err != nil {
+		return scenarioResultDocument{}, false, fmt.Errorf("parse Scenario Result %s: %w", path, err)
+	}
+	if fields == nil {
+		return scenarioResultDocument{}, false, fmt.Errorf("Scenario Result %s must be a JSON object", path)
+	}
+	var result ScenarioResult
+	if err := decodeJSONUseNumber(content, &result); err != nil {
+		return scenarioResultDocument{}, false, fmt.Errorf("parse Scenario Result %s: %w", path, err)
+	}
+	return scenarioResultDocument{Result: result, Fields: fields}, true, nil
+}
+
+func (document *scenarioResultDocument) setResult(result ScenarioResult) {
+	document.Result = result
+	document.Fields["status"] = result.Status
+	if result.Summary != "" {
+		document.Fields["summary"] = result.Summary
+	} else {
+		delete(document.Fields, "summary")
+	}
+}
+
+func writeScenarioResult(context runContext, resultPath string, result scenarioResultDocument) error {
+	if err := validateScenarioResultPath(context, resultPath); err != nil {
 		return err
 	}
-	return copyFile(workspaceResult, filepath.Join(context.EvidenceDir, "scenario-result.json"))
+	workspaceResult := filepath.Join(context.Workspace, resultPath)
+	if err := writeJSONFile(workspaceResult, result.Fields); err != nil {
+		return err
+	}
+	return writeJSONFile(filepath.Join(context.EvidenceDir, "scenario-result.json"), result.Fields)
+}
+
+func validateScenarioResultPath(context runContext, resultPath string) error {
+	if err := ensureWorkspacePathHasNoSymlinkAncestor(context.Workspace, resultPath); err != nil {
+		return fmt.Errorf("Scenario Result path %q: %w", resultPath, err)
+	}
+	return nil
 }
 
 func validateRunOutputs(context runContext, scenario scenarioConfig, result ScenarioResult) ([]validatorResult, error) {
@@ -480,7 +564,7 @@ func validatorJSONValue(context runContext, validator validatorConfig) (any, val
 		return nil, failedValidator(validator.Type, err.Error())
 	}
 	var document any
-	if err := json.Unmarshal(content, &document); err != nil {
+	if err := decodeJSONUseNumber(content, &document); err != nil {
 		return nil, failedValidator(validator.Type, fmt.Sprintf("parse JSON %q: %v", validator.Path, err))
 	}
 	value, ok := lookupJSONPath(document, validator.JSONPath)
@@ -691,6 +775,22 @@ func writeJSONFile(path string, value any) error {
 		return err
 	}
 	return os.WriteFile(path, append(content, '\n'), 0o644)
+}
+
+func decodeJSONUseNumber(content []byte, value any) error {
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.UseNumber()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
 
 type fakeHost struct{}

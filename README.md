@@ -52,6 +52,16 @@ validators:
 
 Validator failures mark the run failed and are recorded in `evidence.json`.
 
+## Collect Visual Evidence
+
+```sh
+maya-stall screenshot
+maya-stall record
+maya-stall evidence collect smoke
+```
+
+`maya-stall screenshot` and `maya-stall record` ask the fake Session Broker to capture a standalone screenshot or recording, then store a local Evidence Bundle under `artifacts/maya-stall/`. `maya-stall evidence collect <scenario>` runs the Scenario, captures configured Visual Evidence through the fake Session Broker, writes `evidence.json`, `manifest.json`, events, logs, Scenario Result, and visual artifacts, and prints validator failures such as missing required Visual Evidence.
+
 ## Write a Scenario Result
 
 Maya Stall passes the Scenario Result path to the Maya Script environment as `MAYA_STALL_SCENARIO_RESULT`. Scripts can use the optional Python helper:

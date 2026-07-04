@@ -1,17 +1,21 @@
 package cli
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 )
 
 const resultStatusPassed = "passed"
+const resultStatusFailed = "failed"
 
 type runRuntime struct {
 	Host   runHost
@@ -77,6 +81,13 @@ type evidenceBundle struct {
 	Log            string            `json:"log"`
 	ScenarioResult string            `json:"scenarioResult"`
 	Payload        []manifestPayload `json:"payload"`
+	Validators     []validatorResult `json:"validators,omitempty"`
+}
+
+type validatorResult struct {
+	Type    string `json:"type"`
+	Status  string `json:"status"`
+	Message string `json:"message"`
 }
 
 func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcome runOutcome, err error) {
@@ -160,13 +171,23 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	if result.Status == "" {
 		result.Status = resultStatusPassed
 	}
+	if err := writeJSONFile(filepath.Join(context.Workspace, scenarioResultPath), result); err != nil {
+		return runOutcome{}, err
+	}
+	validatorResults, err := validateRunOutputs(context, scenario, result)
+	if err != nil {
+		return runOutcome{}, err
+	}
+	if hasValidatorFailure(validatorResults) {
+		result.Status = resultStatusFailed
+	}
 	if err := writeScenarioResult(context, scenarioResultPath, result); err != nil {
 		return runOutcome{}, err
 	}
 	if err := appendEvent(context.EventsPath, "run.completed", result.Status); err != nil {
 		return runOutcome{}, err
 	}
-	if err := writeEvidenceBundle(context, manifest, result); err != nil {
+	if err := writeEvidenceBundle(context, manifest, result, validatorResults); err != nil {
 		return runOutcome{}, err
 	}
 
@@ -236,9 +257,11 @@ func buildManifestPayload(payload runPayload) ([]manifestPayload, error) {
 		kind  string
 		paths []string
 	}{
-		{kind: "scripts", paths: payload.Scripts},
+		{kind: "mayaScripts", paths: append(payload.MayaScripts, payload.Scripts...)},
 		{kind: "scenes", paths: payload.Scenes},
 		{kind: "pluginArtifacts", paths: payload.PluginArtifacts},
+		{kind: "expectedOutputs", paths: payload.ExpectedOutputs},
+		{kind: "includePaths", paths: payload.IncludePaths},
 	} {
 		for _, source := range item.paths {
 			cleanSource, err := cleanRepoRelativePath(source)
@@ -286,7 +309,328 @@ func writeScenarioResult(context runContext, resultPath string, result ScenarioR
 	return copyFile(workspaceResult, filepath.Join(context.EvidenceDir, "scenario-result.json"))
 }
 
-func writeEvidenceBundle(context runContext, manifest runManifest, result ScenarioResult) error {
+func validateRunOutputs(context runContext, scenario scenarioConfig, result ScenarioResult) ([]validatorResult, error) {
+	var results []validatorResult
+	for _, validator := range scenario.Validators {
+		switch validator.Type {
+		case "scenarioResultStatus":
+			want := validator.Status
+			if want == "" {
+				want = resultStatusPassed
+			}
+			if result.Status == want {
+				results = append(results, validatorResult{Type: validator.Type, Status: resultStatusPassed, Message: fmt.Sprintf("Scenario Result status is %q", result.Status)})
+			} else {
+				results = append(results, validatorResult{Type: validator.Type, Status: resultStatusFailed, Message: fmt.Sprintf("Scenario Result status %q, want %q", result.Status, want)})
+			}
+		case "outputExists":
+			results = append(results, validateOutputExists(context, validator))
+		case "jsonEquals":
+			results = append(results, validateJSONEquals(context, validator))
+		case "numericApprox":
+			results = append(results, validateNumericApprox(context, validator))
+		case "fileHash":
+			results = append(results, validateFileHash(context, validator))
+		case "visualEvidence":
+			results = append(results, validateVisualEvidence(context, validator))
+		default:
+			return nil, fmt.Errorf("unknown Validator type %q", validator.Type)
+		}
+	}
+	return results, nil
+}
+
+func validateOutputExists(context runContext, validator validatorConfig) validatorResult {
+	path, err := validatorWorkspacePath(context, validator)
+	if err != nil {
+		return failedValidator(validator.Type, err.Error())
+	}
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return failedValidator(validator.Type, fmt.Sprintf("required output %q is missing", validator.Path))
+	}
+	if err != nil {
+		return failedValidator(validator.Type, err.Error())
+	}
+	if info.IsDir() {
+		return failedValidator(validator.Type, fmt.Sprintf("required output %q is a directory", validator.Path))
+	}
+	return passedValidator(validator.Type, fmt.Sprintf("required output %q exists", validator.Path))
+}
+
+func validateJSONEquals(context runContext, validator validatorConfig) validatorResult {
+	value, result := validatorJSONValue(context, validator)
+	if result.Status == resultStatusFailed {
+		return result
+	}
+	if valuesEqual(value, validator.Equals) {
+		return passedValidator(validator.Type, fmt.Sprintf("%s equals expected value", validator.JSONPath))
+	}
+	return failedValidator(validator.Type, fmt.Sprintf("%s = %v, want %v", validator.JSONPath, value, validator.Equals))
+}
+
+func validateNumericApprox(context runContext, validator validatorConfig) validatorResult {
+	value, result := validatorJSONValue(context, validator)
+	if result.Status == resultStatusFailed {
+		return result
+	}
+	if got, want, ok := numericPair(value, validator.Equals); ok {
+		if math.Abs(got-want) <= validator.Tolerance {
+			return passedValidator(validator.Type, fmt.Sprintf("%s = %v within %v of %v", validator.JSONPath, got, validator.Tolerance, want))
+		}
+		return failedValidator(validator.Type, fmt.Sprintf("%s = %v, want %v +/- %v", validator.JSONPath, got, want, validator.Tolerance))
+	}
+	gotArray, gotOK := numericArray(value)
+	wantArray, wantOK := numericArray(validator.Equals)
+	if !gotOK || !wantOK {
+		return failedValidator(validator.Type, "numericApprox values must be numeric scalars or arrays")
+	}
+	if len(gotArray) != len(wantArray) {
+		return failedValidator(validator.Type, fmt.Sprintf("%s length = %d, want %d", validator.JSONPath, len(gotArray), len(wantArray)))
+	}
+	for index := range gotArray {
+		if math.Abs(gotArray[index]-wantArray[index]) > validator.Tolerance {
+			return failedValidator(validator.Type, fmt.Sprintf("%s[%d] = %v, want %v +/- %v", validator.JSONPath, index, gotArray[index], wantArray[index], validator.Tolerance))
+		}
+	}
+	return passedValidator(validator.Type, fmt.Sprintf("%s numeric array within %v", validator.JSONPath, validator.Tolerance))
+}
+
+func validateFileHash(context runContext, validator validatorConfig) validatorResult {
+	path, err := validatorWorkspacePath(context, validator)
+	if err != nil {
+		return failedValidator(validator.Type, err.Error())
+	}
+	content, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return failedValidator(validator.Type, fmt.Sprintf("hashed file %q is missing", validator.Path))
+	}
+	if err != nil {
+		return failedValidator(validator.Type, err.Error())
+	}
+	hash := fmt.Sprintf("%x", sha256.Sum256(content))
+	if strings.EqualFold(hash, validator.SHA256) {
+		return passedValidator(validator.Type, fmt.Sprintf("%q sha256 matches", validator.Path))
+	}
+	return failedValidator(validator.Type, fmt.Sprintf("%q sha256 %s, want %s", validator.Path, hash, validator.SHA256))
+}
+
+func validateVisualEvidence(context runContext, validator validatorConfig) validatorResult {
+	required := true
+	if validator.Required != nil {
+		required = *validator.Required
+	}
+	if !required {
+		return passedValidator(validator.Type, "Visual Evidence not required")
+	}
+	for _, dir := range []string{"screenshots", "recordings", "visual"} {
+		found, err := hasRegularFile(filepath.Join(context.EvidenceDir, dir))
+		if err != nil {
+			return failedValidator(validator.Type, err.Error())
+		}
+		if found {
+			return passedValidator(validator.Type, "Visual Evidence present")
+		}
+	}
+	return failedValidator(validator.Type, "Visual Evidence is missing")
+}
+
+func validatorWorkspacePath(context runContext, validator validatorConfig) (string, error) {
+	if validator.Path == "" {
+		return "", fmt.Errorf("%s Validator missing path", validator.Type)
+	}
+	path, err := cleanRepoRelativePath(validator.Path)
+	if err != nil {
+		return "", err
+	}
+	if err := ensureWorkspacePathHasNoSymlinkAncestor(context.Workspace, path); err != nil {
+		return "", err
+	}
+	return filepath.Join(context.Workspace, path), nil
+}
+
+func ensureWorkspacePathHasNoSymlinkAncestor(workspace string, relativePath string) error {
+	current := workspace
+	for _, part := range strings.Split(filepath.ToSlash(relativePath), "/") {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("Validator output path %s must not be or contain a symlink", current)
+		}
+	}
+	return nil
+}
+
+func validatorJSONValue(context runContext, validator validatorConfig) (any, validatorResult) {
+	path, err := validatorWorkspacePath(context, validator)
+	if err != nil {
+		return nil, failedValidator(validator.Type, err.Error())
+	}
+	content, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, failedValidator(validator.Type, fmt.Sprintf("JSON file %q is missing", validator.Path))
+	}
+	if err != nil {
+		return nil, failedValidator(validator.Type, err.Error())
+	}
+	var document any
+	if err := json.Unmarshal(content, &document); err != nil {
+		return nil, failedValidator(validator.Type, fmt.Sprintf("parse JSON %q: %v", validator.Path, err))
+	}
+	value, ok := lookupJSONPath(document, validator.JSONPath)
+	if !ok {
+		return nil, failedValidator(validator.Type, fmt.Sprintf("JSON path %q is missing", validator.JSONPath))
+	}
+	return value, passedValidator(validator.Type, "")
+}
+
+func lookupJSONPath(document any, path string) (any, bool) {
+	if path == "$" {
+		return document, true
+	}
+	if !strings.HasPrefix(path, "$.") {
+		return nil, false
+	}
+	current := document
+	for _, part := range strings.Split(strings.TrimPrefix(path, "$."), ".") {
+		object, ok := current.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		current, ok = object[part]
+		if !ok {
+			return nil, false
+		}
+	}
+	return current, true
+}
+
+func valuesEqual(got any, want any) bool {
+	gotNumber, gotNumeric := numberValue(got)
+	wantNumber, wantNumeric := numberValue(want)
+	if gotNumeric && wantNumeric {
+		return gotNumber == wantNumber
+	}
+	gotSlice, gotIsSlice := got.([]any)
+	wantSlice, wantIsSlice := want.([]any)
+	if gotIsSlice || wantIsSlice {
+		if !gotIsSlice || !wantIsSlice || len(gotSlice) != len(wantSlice) {
+			return false
+		}
+		for index := range gotSlice {
+			if !valuesEqual(gotSlice[index], wantSlice[index]) {
+				return false
+			}
+		}
+		return true
+	}
+	gotMap, gotIsMap := got.(map[string]any)
+	wantMap, wantIsMap := want.(map[string]any)
+	if gotIsMap || wantIsMap {
+		if !gotIsMap || !wantIsMap || len(gotMap) != len(wantMap) {
+			return false
+		}
+		for key, gotValue := range gotMap {
+			wantValue, ok := wantMap[key]
+			if !ok || !valuesEqual(gotValue, wantValue) {
+				return false
+			}
+		}
+		return true
+	}
+	return reflect.DeepEqual(got, want)
+}
+
+func numberValue(value any) (float64, bool) {
+	switch number := value.(type) {
+	case int:
+		return float64(number), true
+	case int64:
+		return float64(number), true
+	case float64:
+		return number, true
+	case float32:
+		return float64(number), true
+	case json.Number:
+		parsed, err := number.Float64()
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func numericPair(got any, want any) (float64, float64, bool) {
+	gotNumber, gotOK := numberValue(got)
+	wantNumber, wantOK := numberValue(want)
+	return gotNumber, wantNumber, gotOK && wantOK
+}
+
+func numericArray(value any) ([]float64, bool) {
+	items, ok := value.([]any)
+	if !ok {
+		return nil, false
+	}
+	numbers := make([]float64, 0, len(items))
+	for _, item := range items {
+		number, ok := numberValue(item)
+		if !ok {
+			return nil, false
+		}
+		numbers = append(numbers, number)
+	}
+	return numbers, true
+}
+
+func hasRegularFile(dir string) (bool, error) {
+	errFound := errors.New("found regular file")
+	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() {
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			if info.Mode().IsRegular() {
+				return errFound
+			}
+		}
+		return nil
+	})
+	if errors.Is(err, errFound) {
+		return true, nil
+	}
+	return false, err
+}
+
+func passedValidator(validatorType string, message string) validatorResult {
+	return validatorResult{Type: validatorType, Status: resultStatusPassed, Message: message}
+}
+
+func failedValidator(validatorType string, message string) validatorResult {
+	return validatorResult{Type: validatorType, Status: resultStatusFailed, Message: message}
+}
+
+func hasValidatorFailure(results []validatorResult) bool {
+	for _, result := range results {
+		if result.Status != resultStatusPassed {
+			return true
+		}
+	}
+	return false
+}
+
+func writeEvidenceBundle(context runContext, manifest runManifest, result ScenarioResult, validators []validatorResult) error {
 	if err := copyFile(filepath.Join(context.StateDir, "manifest.json"), filepath.Join(context.EvidenceDir, "manifest.json")); err != nil {
 		return err
 	}
@@ -307,6 +651,7 @@ func writeEvidenceBundle(context runContext, manifest runManifest, result Scenar
 		Log:            filepath.Join("logs", "session.log"),
 		ScenarioResult: "scenario-result.json",
 		Payload:        manifest.Payload,
+		Validators:     validators,
 	}
 	return writeJSONFile(filepath.Join(context.EvidenceDir, "evidence.json"), bundle)
 }
@@ -390,6 +735,15 @@ func (broker fakeSessionBroker) RunScenario(context runContext, scenario scenari
 	log := fmt.Sprintf("fake Session Broker ran Scenario for Maya %s\n", scenario.MayaVersion)
 	if err := os.WriteFile(context.LogPath, []byte(log), 0o644); err != nil {
 		return ScenarioResult{}, err
+	}
+	if scenario.Evidence.Screenshots.Enabled {
+		path := filepath.Join(context.EvidenceDir, "screenshots", "fake.png")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return ScenarioResult{}, err
+		}
+		if err := os.WriteFile(path, []byte("fake screenshot\n"), 0o644); err != nil {
+			return ScenarioResult{}, err
+		}
 	}
 	if err := appendEvent(context.EventsPath, "broker.session.finished", broker.Result.Status); err != nil {
 		return ScenarioResult{}, err

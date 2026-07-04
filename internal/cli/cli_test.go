@@ -2,7 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -153,7 +155,7 @@ func TestRunScenarioStagesPayloadAndWritesStateAndEvidence(t *testing.T) {
 		t.Fatalf("manifest scenario = %q, want smoke", manifest.Scenario)
 	}
 	wantPayload := map[string]string{
-		"scripts:maya/smoke.py":          filepath.Join("payload", "scripts", "maya", "smoke.py"),
+		"mayaScripts:maya/smoke.py":      filepath.Join("payload", "mayaScripts", "maya", "smoke.py"),
 		"scenes:scenes/start.ma":         filepath.Join("payload", "scenes", "scenes", "start.ma"),
 		"pluginArtifacts:build/demo.mll": filepath.Join("payload", "pluginArtifacts", "build", "demo.mll"),
 	}
@@ -188,6 +190,97 @@ func TestRunScenarioStagesPayloadAndWritesStateAndEvidence(t *testing.T) {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected run artifact %s: %v", path, err)
 		}
+	}
+}
+
+func TestRunScenarioStagesTypedPayloadIncludingExplicitIgnoredOutputs(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".gitignore"), "build/\n")
+	mustWriteFile(t, filepath.Join(dir, "maya", "smoke.py"), "print('smoke')\n")
+	mustWriteFile(t, filepath.Join(dir, "scenes", "start.ma"), "// fake maya scene\n")
+	mustWriteFile(t, filepath.Join(dir, "build", "demo.mll"), "fake ignored plugin artifact\n")
+	mustWriteFile(t, filepath.Join(dir, "golden", "expected.json"), `{"ok":true}`+"\n")
+	mustWriteFile(t, filepath.Join(dir, "includes", "helpers.py"), "def helper(): pass\n")
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    mayaVersion: "2025"
+    payload:
+      mayaScripts:
+        - "maya/smoke.py"
+      scenes:
+        - "scenes/start.ma"
+      pluginArtifacts:
+        - "build/demo.mll"
+      expectedOutputs:
+        - "golden/expected.json"
+      includePaths:
+        - "includes"
+    expectedOutputs:
+      scenarioResult: "outputs/smoke-result.json"
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	runState := onlyRunDir(t, filepath.Join(dir, ".maya-stall", "state", "runs"))
+	manifestBytes, err := os.ReadFile(filepath.Join(runState, "manifest.json"))
+	if err != nil {
+		t.Fatalf("read run manifest: %v", err)
+	}
+	var manifest struct {
+		Payload []manifestPayload `json:"payload"`
+	}
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatalf("parse run manifest: %v", err)
+	}
+	wantPayload := map[string]string{
+		"mayaScripts:maya/smoke.py":            filepath.Join("payload", "mayaScripts", "maya", "smoke.py"),
+		"scenes:scenes/start.ma":               filepath.Join("payload", "scenes", "scenes", "start.ma"),
+		"pluginArtifacts:build/demo.mll":       filepath.Join("payload", "pluginArtifacts", "build", "demo.mll"),
+		"expectedOutputs:golden/expected.json": filepath.Join("payload", "expectedOutputs", "golden", "expected.json"),
+		"includePaths:includes":                filepath.Join("payload", "includePaths", "includes"),
+	}
+	for _, item := range manifest.Payload {
+		key := item.Kind + ":" + item.Source
+		want, ok := wantPayload[key]
+		if !ok {
+			t.Fatalf("unexpected payload item: %+v", item)
+		}
+		if item.Staged != want {
+			t.Fatalf("staged path for %s = %q, want %q", key, item.Staged, want)
+		}
+		if _, err := os.Stat(filepath.Join(runState, item.Staged)); err != nil {
+			t.Fatalf("staged payload %s: %v", item.Staged, err)
+		}
+		delete(wantPayload, key)
+	}
+	if len(wantPayload) != 0 {
+		t.Fatalf("manifest missing payload items: %#v", wantPayload)
+	}
+}
+
+func TestRunScenarioReportsMissingTypedPayloadPath(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload:
+      includePaths:
+        - "missing/includes"
+    expectedOutputs:
+      scenarioResult: "outputs/result.json"
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "stage includePaths payload missing/includes") {
+		t.Fatalf("missing typed payload error = %q", stderr.String())
 	}
 }
 
@@ -732,6 +825,242 @@ func TestRunScenarioResultFailureDrivesExitCode(t *testing.T) {
 	}
 }
 
+func TestRunScenarioResultStatusValidatorFailureDrivesRunStatusAndEvidenceMetadata(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload: {}
+    expectedOutputs:
+      scenarioResult: "outputs/result.json"
+    validators:
+      - type: scenarioResultStatus
+        status: failed
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "status: failed") {
+		t.Fatalf("run output missing failed status:\n%s", stdout.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	bundle := readEvidenceBundle(t, evidence)
+	if bundle.Status != "failed" {
+		t.Fatalf("evidence status = %q, want failed", bundle.Status)
+	}
+	scenarioResultBytes, err := os.ReadFile(filepath.Join(evidence, bundle.ScenarioResult))
+	if err != nil {
+		t.Fatalf("read evidence Scenario Result: %v", err)
+	}
+	var scenarioResult ScenarioResult
+	if err := json.Unmarshal(scenarioResultBytes, &scenarioResult); err != nil {
+		t.Fatalf("parse evidence Scenario Result: %v", err)
+	}
+	if scenarioResult.Status != "failed" {
+		t.Fatalf("evidence Scenario Result status = %q, want failed", scenarioResult.Status)
+	}
+	if len(bundle.Validators) != 1 {
+		t.Fatalf("validator result count = %d, want 1", len(bundle.Validators))
+	}
+	got := bundle.Validators[0]
+	if got.Type != "scenarioResultStatus" || got.Status != "failed" || !strings.Contains(got.Message, `status "passed"`) {
+		t.Fatalf("validator metadata = %+v", got)
+	}
+}
+
+func TestRunScenarioValidatorsCanInspectScenarioResultOutput(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload: {}
+    expectedOutputs:
+      scenarioResult: "outputs/result.json"
+    validators:
+      - type: jsonEquals
+        path: "outputs/result.json"
+        jsonPath: "$.status"
+        equals: passed
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	bundle := readEvidenceBundle(t, evidence)
+	if len(bundle.Validators) != 1 || bundle.Validators[0].Status != "passed" {
+		t.Fatalf("validator metadata = %+v", bundle.Validators)
+	}
+}
+
+func TestRunScenarioValidatorsCoverOutputsJSONHashesAndVisualEvidence(t *testing.T) {
+	reportHash := sha256.Sum256([]byte("hash me\n"))
+	tests := []struct {
+		name      string
+		validator string
+		broker    sessionBroker
+	}{
+		{
+			name: "required output existence",
+			validator: `      - type: outputExists
+        path: "outputs/report.txt"
+`,
+			broker: outputWritingBroker{files: map[string]string{"outputs/report.txt": "exists\n"}},
+		},
+		{
+			name: "json path equality",
+			validator: `      - type: jsonEquals
+        path: "outputs/metrics.json"
+        jsonPath: "$.plugin.loaded"
+        equals: true
+`,
+			broker: outputWritingBroker{files: map[string]string{"outputs/metrics.json": `{"plugin":{"loaded":true}}` + "\n"}},
+		},
+		{
+			name: "json path equality normalizes nested numbers",
+			validator: `      - type: jsonEquals
+        path: "outputs/metrics.json"
+        jsonPath: "$.mesh"
+        equals:
+          bounds: [1, 2, 3]
+          vertexCount: 4
+`,
+			broker: outputWritingBroker{files: map[string]string{"outputs/metrics.json": `{"mesh":{"bounds":[1,2,3],"vertexCount":4}}` + "\n"}},
+		},
+		{
+			name: "numeric approximate equality",
+			validator: `      - type: numericApprox
+        path: "outputs/metrics.json"
+        jsonPath: "$.timings.solveMs"
+        equals: 12.5
+        tolerance: 0.1
+`,
+			broker: outputWritingBroker{files: map[string]string{"outputs/metrics.json": `{"timings":{"solveMs":12.45}}` + "\n"}},
+		},
+		{
+			name: "numeric array approximate equality",
+			validator: `      - type: numericApprox
+        path: "outputs/metrics.json"
+        jsonPath: "$.mesh.bounds"
+        equals: [1.0, 2.0, 3.0]
+        tolerance: 0.1
+`,
+			broker: outputWritingBroker{files: map[string]string{"outputs/metrics.json": `{"mesh":{"bounds":[1.01,1.99,3.05]}}` + "\n"}},
+		},
+		{
+			name: "file hash",
+			validator: fmt.Sprintf(`      - type: fileHash
+        path: "outputs/report.txt"
+        sha256: "%x"
+`, reportHash),
+			broker: outputWritingBroker{files: map[string]string{"outputs/report.txt": "hash me\n"}},
+		},
+		{
+			name: "visual evidence",
+			validator: `      - type: visualEvidence
+        required: true
+`,
+			broker: outputWritingBroker{visualEvidence: true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload: {}
+    expectedOutputs:
+      scenarioResult: "outputs/result.json"
+    validators:
+`+tt.validator)
+			var stdout, stderr bytes.Buffer
+			runtime := defaultRunRuntime()
+			runtime.Broker = tt.broker
+
+			code := RunWithRuntime([]string{"run", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+			if code != 0 {
+				t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+			}
+			evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+			bundle := readEvidenceBundle(t, evidence)
+			if bundle.Status != "passed" {
+				t.Fatalf("evidence status = %q, want passed", bundle.Status)
+			}
+			if len(bundle.Validators) != 1 || bundle.Validators[0].Status != "passed" {
+				t.Fatalf("validator metadata = %+v", bundle.Validators)
+			}
+		})
+	}
+}
+
+func TestRunScenarioRequiredOutputValidatorReportsMissingPath(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload: {}
+    expectedOutputs:
+      scenarioResult: "outputs/result.json"
+    validators:
+      - type: outputExists
+        path: "outputs/missing.txt"
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	bundle := readEvidenceBundle(t, evidence)
+	if bundle.Status != "failed" {
+		t.Fatalf("evidence status = %q, want failed", bundle.Status)
+	}
+	if len(bundle.Validators) != 1 || bundle.Validators[0].Status != "failed" || !strings.Contains(bundle.Validators[0].Message, "missing") {
+		t.Fatalf("validator metadata = %+v", bundle.Validators)
+	}
+}
+
+func TestRunScenarioValidatorsRejectSymlinkedOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not consistently available on Windows test runners")
+	}
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.json")
+	mustWriteFile(t, outside, `{"token":"outside"}`+"\n")
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload: {}
+    expectedOutputs:
+      scenarioResult: "outputs/result.json"
+    validators:
+      - type: jsonEquals
+        path: "outputs/secret.json"
+        jsonPath: "$.token"
+        equals: outside
+`)
+	var stdout, stderr bytes.Buffer
+	runtimeConfig := defaultRunRuntime()
+	runtimeConfig.Broker = symlinkOutputBroker{linkPath: "outputs/secret.json", target: outside}
+
+	code := RunWithRuntime([]string{"run", "smoke"}, &stdout, &stderr, dir, "test-version", runtimeConfig)
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	bundle := readEvidenceBundle(t, evidence)
+	if len(bundle.Validators) != 1 || bundle.Validators[0].Status != "failed" || !strings.Contains(bundle.Validators[0].Message, "symlink") {
+		t.Fatalf("validator metadata = %+v", bundle.Validators)
+	}
+}
+
 func TestRunScenarioRequiresKnownScenario(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	var stdout, stderr bytes.Buffer
@@ -1044,6 +1373,67 @@ func (lockCorruptingBroker) RunScenario(context runContext, scenario scenarioCon
 	return ScenarioResult{Status: "passed", Summary: "lock release should fail"}, nil
 }
 
+type outputWritingBroker struct {
+	files          map[string]string
+	visualEvidence bool
+}
+
+func (broker outputWritingBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
+	if err := appendEvent(context.EventsPath, "broker.session.started", scenario.MayaVersion); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := os.WriteFile(context.LogPath, []byte("output-writing fake Session Broker completed\n"), 0o644); err != nil {
+		return ScenarioResult{}, err
+	}
+	for relativePath, content := range broker.files {
+		path := filepath.Join(context.Workspace, relativePath)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return ScenarioResult{}, err
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return ScenarioResult{}, err
+		}
+	}
+	if broker.visualEvidence {
+		path := filepath.Join(context.EvidenceDir, "screenshots", "smoke.png")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return ScenarioResult{}, err
+		}
+		if err := os.WriteFile(path, []byte("fake png\n"), 0o644); err != nil {
+			return ScenarioResult{}, err
+		}
+	}
+	if err := appendEvent(context.EventsPath, "broker.session.finished", resultStatusPassed); err != nil {
+		return ScenarioResult{}, err
+	}
+	return ScenarioResult{Status: resultStatusPassed, Summary: "outputs written"}, nil
+}
+
+type symlinkOutputBroker struct {
+	linkPath string
+	target   string
+}
+
+func (broker symlinkOutputBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
+	if err := appendEvent(context.EventsPath, "broker.session.started", scenario.MayaVersion); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := os.WriteFile(context.LogPath, []byte("symlink fake Session Broker completed\n"), 0o644); err != nil {
+		return ScenarioResult{}, err
+	}
+	linkPath := filepath.Join(context.Workspace, broker.linkPath)
+	if err := os.MkdirAll(filepath.Dir(linkPath), 0o755); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := os.Symlink(broker.target, linkPath); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := appendEvent(context.EventsPath, "broker.session.finished", resultStatusPassed); err != nil {
+		return ScenarioResult{}, err
+	}
+	return ScenarioResult{Status: resultStatusPassed, Summary: "symlink output written"}, nil
+}
+
 func mustWriteFile(t *testing.T, path string, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -1067,4 +1457,17 @@ func onlyRunDir(t *testing.T, parent string) string {
 		t.Fatalf("run entry %s is not a directory", entries[0].Name())
 	}
 	return filepath.Join(parent, entries[0].Name())
+}
+
+func readEvidenceBundle(t *testing.T, evidenceDir string) evidenceBundle {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join(evidenceDir, "evidence.json"))
+	if err != nil {
+		t.Fatalf("read evidence bundle: %v", err)
+	}
+	var bundle evidenceBundle
+	if err := json.Unmarshal(content, &bundle); err != nil {
+		t.Fatalf("parse evidence bundle: %v", err)
+	}
+	return bundle
 }

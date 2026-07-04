@@ -27,10 +27,33 @@ Doctor layer:
 - Configure a non-interactive SSH identity for the user or CI runner that owns the Maya Stall run.
 - Confirm SSH reaches the expected Windows account and does not expose passwords or private keys in repo config.
 - Keep host aliases and private network addresses in operator config such as SSH config, CI secrets, or host config.
+- Enable real SSH transport only in user or CI host config, not in `.maya-stall.yaml`:
+
+```yaml
+version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: maya-win-01
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          user: maya-runner
+          port: 22
+          identityFile: ~/.ssh/maya-stall-ci
+        workRoot: C:/maya-stall
+        broker: ok
+        mayaVersions: ["2025"]
+        visualEvidence: true
+```
 
 Doctor layer:
 
-- `fake-ssh`: SSH reachability would fail for the selected Maya Host. Repair host networking, SSH service state, keys, or host config before retrying.
+- `fake-ssh`: fake/local SSH reachability status would fail for deterministic default tests.
+- `ssh`: real SSH reachability failed for a `transport: ssh` Maya Host. Repair host networking, SSH service state, keys, or host config before retrying.
 
 ### Work Root
 
@@ -38,6 +61,7 @@ Doctor layer:
 - Reserve subdirectories for staged Run Payloads, clean per-run workspaces, Session Broker state, logs, and transient artifacts.
 - Confirm the SSH user and Session Broker user can read and write the same work root.
 - Plan retention for old run workspaces and Kept Sessions so Host Locks do not hide disk pressure.
+- With `transport: ssh`, `maya-stall run` uploads declared Run Payload entries to `workRoot/runs/<run-id>/payload/` and downloads declared `expectedOutputs.scenarioResult` and `expectedOutputs.files` from `workRoot/runs/<run-id>/workspace/` back into the local Evidence Bundle.
 
 Doctor layer:
 
@@ -148,12 +172,26 @@ Doctor layer:
 - `host-pool`: see [Target Profile And Host Pool](#target-profile-and-host-pool).
 - `host`: see [Target Profile And Host Pool](#target-profile-and-host-pool).
 - `fake-ssh`: see [OpenSSH Reachability](#openssh-reachability).
+- `ssh`: see [OpenSSH Reachability](#openssh-reachability).
 - `work-root`: see [Work Root](#work-root).
 - `session-broker`: see [Interactive Desktop](#interactive-desktop) and [Session Broker](#session-broker).
 - `maya-version`: see [Autodesk Maya](#autodesk-maya).
 - `visual-evidence`: see [Visual Evidence](#visual-evidence).
 - `host-lock`: see [Host Lock And Retention](#host-lock-and-retention).
 - `scenario-inputs`: see [Scenario Inputs](#scenario-inputs).
+
+## Opt-In Live Smoke
+
+Default tests never require SSH secrets or a real Windows host. To smoke the real SSH doctor path, set only these exact env vars:
+
+```sh
+MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml go test ./internal/cli -run TestOptInRealSSHDoctorSmoke -count=1
+```
+
+Optional:
+
+- `MAYA_STALL_SMOKE_TARGET_PROFILE`: Target Profile; default `default`.
+- `MAYA_STALL_SMOKE_HOST`: pinned Maya Host id.
 
 ## Not The CLI's Job
 

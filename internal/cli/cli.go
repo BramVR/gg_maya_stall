@@ -306,13 +306,13 @@ Usage:
 
 Commands:
   attach   print kept run events and logs
-  doctor   check local config, Target Profile, and fake Host Health layers
+  doctor   check local config, Target Profile, and Host Health layers
   evidence collect   run a Scenario and write a complete Evidence Bundle
   evidence publish   copy an Evidence Bundle to a filesystem Evidence Store
   init      write a repo-only sample .maya-stall.yaml
   record    capture a fake Session Broker recording artifact
   review-comment   create or update a GitHub PR or GitLab MR Review Comment
-  run       run a named Scenario with the fake runtime
+  run       run a named Scenario with fake or configured SSH transport
   screenshot   capture a fake Session Broker screenshot artifact
   status   show kept run state
   stop     stop a kept run and release its Host Lock
@@ -482,7 +482,6 @@ func newUsageError(format string, args ...any) error {
 
 func defaultRunRuntime() runRuntime {
 	return runRuntime{
-		Host:   fakeHost{},
 		Broker: fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "fake Scenario completed"}},
 		Now:    time.Now,
 	}

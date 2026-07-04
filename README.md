@@ -180,3 +180,41 @@ hostPools:
         mayaVersions: ["2025"]
         visualEvidence: true
 ```
+
+## Opt in to real SSH transport
+
+Default tests and default commands still use fake/local transport. Real SSH is enabled only by user or CI host config outside the consuming repo:
+
+```yaml
+version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: maya-win-01
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          user: maya-runner
+          port: 22
+          identityFile: ~/.ssh/maya-stall-ci
+        workRoot: C:/maya-stall
+        broker: ok
+        mayaVersions: ["2025"]
+        visualEvidence: true
+```
+
+With `transport: ssh`, `maya-stall doctor` runs real SSH connectivity and writable work-root checks. `maya-stall run` uploads declared Run Payload paths with `sftp` into a clean remote run workspace under `workRoot/runs/<run-id>/`, then downloads declared `expectedOutputs.scenarioResult` and `expectedOutputs.files` back into the local Evidence Bundle path. Session Broker launch remains a separate layer.
+
+Opt-in live smoke is skipped unless the exact host config env var is set:
+
+```sh
+MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml go test ./internal/cli -run TestOptInRealSSHDoctorSmoke -count=1
+```
+
+Optional smoke env vars:
+
+- `MAYA_STALL_SMOKE_TARGET_PROFILE`: Target Profile; default `default`.
+- `MAYA_STALL_SMOKE_HOST`: pinned Maya Host id.

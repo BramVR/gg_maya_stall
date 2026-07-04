@@ -1146,7 +1146,7 @@ hostPools:
 			args:       []string{"--target-profile", "missing"},
 			wantLayer:  "target-profile: fail",
 			wantDetail: `unknown Target Profile "missing"`,
-			wantHint:   "Choose a configured Target Profile",
+			wantHint:   "Choose a configured Target Profile or add it to the host config. See docs/setup/windows-maya-host.md#target-profile-and-host-pool.",
 		},
 		{
 			name: "host pool",
@@ -1160,7 +1160,7 @@ hostPools:
 `,
 			wantLayer:  "host-pool: fail",
 			wantDetail: "has no Maya Hosts",
-			wantHint:   "Add at least one Maya Host",
+			wantHint:   "Add at least one Maya Host to the Host Pool. See docs/setup/windows-maya-host.md#target-profile-and-host-pool.",
 		},
 		{
 			name: "fake ssh",
@@ -1176,7 +1176,7 @@ hostPools:
 `,
 			wantLayer:  "fake-ssh: fail",
 			wantDetail: "down",
-			wantHint:   "Fix SSH reachability",
+			wantHint:   "Fix SSH reachability for this Maya Host. See docs/setup/windows-maya-host.md#openssh-reachability.",
 		},
 		{
 			name: "work root",
@@ -1192,7 +1192,7 @@ hostPools:
 `,
 			wantLayer:  "work-root: fail",
 			wantDetail: "unwritable",
-			wantHint:   "Fix the host work root",
+			wantHint:   "Fix the host work root path or permissions. See docs/setup/windows-maya-host.md#work-root.",
 		},
 		{
 			name: "session broker",
@@ -1208,7 +1208,7 @@ hostPools:
 `,
 			wantLayer:  "session-broker: fail",
 			wantDetail: "down",
-			wantHint:   "Start or repair the Session Broker",
+			wantHint:   "Start or repair the Session Broker on this Maya Host. See docs/setup/windows-maya-host.md#session-broker.",
 		},
 		{
 			name: "maya version",
@@ -1225,7 +1225,7 @@ hostPools:
 			args:       []string{"--scenario", "smoke"},
 			wantLayer:  "maya-version: fail",
 			wantDetail: "needs 2025",
-			wantHint:   "Install a compatible Autodesk Maya version",
+			wantHint:   "Install a compatible Autodesk Maya version or choose another Maya Host. See docs/setup/windows-maya-host.md#autodesk-maya.",
 		},
 		{
 			name: "visual evidence",
@@ -1241,7 +1241,7 @@ hostPools:
 `,
 			wantLayer:  "visual-evidence: fail",
 			wantDetail: "unavailable",
-			wantHint:   "Enable screenshot or recording capture",
+			wantHint:   "Enable screenshot or recording capture through the Session Broker. See docs/setup/windows-maya-host.md#visual-evidence.",
 		},
 		{
 			name: "host lock",
@@ -1257,7 +1257,7 @@ hostPools:
 			lockHost:   "alpha",
 			wantLayer:  "host-lock: fail",
 			wantDetail: "locked",
-			wantHint:   "Wait for the active Fresh Run",
+			wantHint:   "Wait for the active Fresh Run or clear the stale Host Lock after verifying no run is active. See docs/setup/windows-maya-host.md#host-lock-and-retention.",
 		},
 		{
 			name: "scenario inputs",
@@ -1273,7 +1273,7 @@ hostPools:
 			args:       []string{"--scenario", "smoke"},
 			wantLayer:  "scenario-inputs: fail",
 			wantDetail: "missing.py",
-			wantHint:   "Fix the Scenario payload paths",
+			wantHint:   "Fix the Scenario payload paths and expectedOutputs.scenarioResult in repo config. See docs/setup/windows-maya-host.md#scenario-inputs.",
 		},
 	}
 	for _, tt := range tests {

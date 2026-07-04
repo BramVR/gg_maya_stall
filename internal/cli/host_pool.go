@@ -209,6 +209,37 @@ func acquireHostLock(repoDir string, hostID string) (func() error, bool, error) 
 	}
 }
 
+func markHostLockKept(repoDir string, hostID string, runID string) error {
+	if err := validateHostID(hostID); err != nil {
+		return err
+	}
+	lockDir := filepath.Join(repoDir, ".maya-stall", "state", "locks", "hosts")
+	if err := ensureOutputPathHasNoSymlinkParent(repoDir, filepath.Join(".maya-stall", "state", "locks", "hosts")); err != nil {
+		return err
+	}
+	lockPath := filepath.Join(lockDir, hostID+".lock")
+	if info, err := os.Lstat(lockPath); err != nil {
+		return err
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("Host Lock %s must not be a symlink", lockPath)
+	}
+	content := fmt.Sprintf("host: %s\nkeptRun: %s\n", hostID, runID)
+	tempFile, err := os.CreateTemp(lockDir, hostID+".kept.*.tmp")
+	if err != nil {
+		return err
+	}
+	tempPath := tempFile.Name()
+	defer os.Remove(tempPath)
+	if _, err := tempFile.WriteString(content); err != nil {
+		tempFile.Close()
+		return err
+	}
+	if err := tempFile.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, lockPath)
+}
+
 func isStaleHostLock(lockPath string) (bool, error) {
 	content, err := os.ReadFile(lockPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -220,6 +251,9 @@ func isStaleHostLock(lockPath string) (bool, error) {
 	for _, line := range strings.Split(string(content), "\n") {
 		key, value, ok := strings.Cut(line, ":")
 		if !ok || strings.TrimSpace(key) != "pid" {
+			if ok && strings.TrimSpace(key) == "keptRun" && strings.TrimSpace(value) != "" {
+				return false, nil
+			}
 			continue
 		}
 		pid, err := strconv.Atoi(strings.TrimSpace(value))

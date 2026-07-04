@@ -18,6 +18,10 @@ import (
 const resultStatusPassed = "passed"
 const resultStatusFailed = "failed"
 const scenarioResultEnvVar = "MAYA_STALL_SCENARIO_RESULT"
+const stopAfterSuccess = "success"
+const stopAfterFailure = "failure"
+const stopAfterAlways = "always"
+const stopAfterNever = "never"
 
 type runRuntime struct {
 	Host   runHost
@@ -45,13 +49,15 @@ type runContext struct {
 }
 
 type runOutcome struct {
-	RunID         string
-	Scenario      string
-	TargetProfile string
-	Host          string
-	StateDir      string
-	EvidenceDir   string
-	Result        ScenarioResult
+	RunID            string
+	Scenario         string
+	TargetProfile    string
+	Host             string
+	StateDir         string
+	EvidenceDir      string
+	Result           ScenarioResult
+	StopPolicy       string
+	FollowUpCommands []string
 }
 
 type runManifest struct {
@@ -129,13 +135,27 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	if err != nil {
 		return runOutcome{}, err
 	}
+	releaseHostLock := true
 	defer func() {
-		if releaseErr := host.release(); releaseErr != nil {
-			err = errors.Join(err, fmt.Errorf("release Host Lock for %s: %w", host.HostID, releaseErr))
+		if releaseHostLock {
+			if releaseErr := host.release(); releaseErr != nil {
+				err = errors.Join(err, fmt.Errorf("release Host Lock for %s: %w", host.HostID, releaseErr))
+			}
+		}
+	}()
+	defer func() {
+		if err == nil && outcome.StopPolicy == "stopped" {
+			if cleanupErr := cleanupRunState(repoDir, outcome.RunID); cleanupErr != nil {
+				err = fmt.Errorf("clean up Fresh Run state for %s: %w", outcome.RunID, cleanupErr)
+			}
 		}
 	}()
 
 	runID := runtime.Now().UTC().Format("20060102T150405.000000000Z")
+	if host.release == nil {
+		host.release = func() error { return nil }
+	}
+
 	stateDir := filepath.Join(repoDir, ".maya-stall", "state", "runs", runID)
 	evidenceDir := filepath.Join(repoDir, "artifacts", "maya-stall", runID)
 	workspace := filepath.Join(stateDir, "workspace")
@@ -220,22 +240,64 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	if err := writeScenarioResult(context, scenarioResultPath, resultDocument); err != nil {
 		return runOutcome{}, err
 	}
+	stopPolicy := "stopped"
+	followUpCommands := []string(nil)
+	if !shouldStopAfter(options.StopAfter, result.Status) {
+		stopPolicy = "kept"
+		followUpCommands = append(followUpCommands,
+			fmt.Sprintf("maya-stall status --run %s", runID),
+			fmt.Sprintf("maya-stall attach %s", runID),
+			fmt.Sprintf("maya-stall stop %s", runID),
+		)
+	}
 	if err := appendEvent(context.EventsPath, "run.completed", result.Status); err != nil {
 		return runOutcome{}, err
 	}
 	if err := writeEvidenceBundle(context, manifest, result, validatorResults); err != nil {
 		return runOutcome{}, err
 	}
+	if stopPolicy == "kept" {
+		if err := markHostLockKept(repoDir, host.HostID, runID); err != nil {
+			return runOutcome{}, err
+		}
+		releaseHostLock = false
+	}
 
 	return runOutcome{
-		RunID:         runID,
-		Scenario:      options.ScenarioName,
-		TargetProfile: host.TargetProfile,
-		Host:          host.HostID,
-		StateDir:      stateDir,
-		EvidenceDir:   evidenceDir,
-		Result:        result,
+		RunID:            runID,
+		Scenario:         options.ScenarioName,
+		TargetProfile:    host.TargetProfile,
+		Host:             host.HostID,
+		StateDir:         stateDir,
+		EvidenceDir:      evidenceDir,
+		Result:           result,
+		StopPolicy:       stopPolicy,
+		FollowUpCommands: followUpCommands,
 	}, nil
+}
+
+func isValidStopAfter(value string) bool {
+	switch value {
+	case stopAfterSuccess, stopAfterFailure, stopAfterAlways, stopAfterNever:
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldStopAfter(stopAfter string, status string) bool {
+	switch stopAfter {
+	case stopAfterSuccess:
+		return status == resultStatusPassed
+	case stopAfterFailure:
+		return status != resultStatusPassed
+	case stopAfterNever:
+		return false
+	case stopAfterAlways, "":
+		return true
+	default:
+		return true
+	}
 }
 
 func createCleanRunDirs(context runContext) error {

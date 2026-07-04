@@ -26,11 +26,13 @@ type publishedEvidence struct {
 }
 
 type publishedArtifactManifest struct {
-	RunID     string              `json:"runId"`
-	Scenario  string              `json:"scenario"`
-	Status    string              `json:"status"`
-	BaseURL   string              `json:"baseUrl"`
-	Artifacts []publishedArtifact `json:"artifacts"`
+	RunID         string              `json:"runId"`
+	Scenario      string              `json:"scenario"`
+	Status        string              `json:"status"`
+	TargetProfile string              `json:"targetProfile"`
+	Host          string              `json:"host"`
+	BaseURL       string              `json:"baseUrl"`
+	Artifacts     []publishedArtifact `json:"artifacts"`
 }
 
 type publishedArtifact struct {
@@ -254,11 +256,13 @@ func buildPublishedArtifactManifest(publishedDir string, bundle evidenceBundle, 
 		return artifacts[i].Path < artifacts[j].Path
 	})
 	return publishedArtifactManifest{
-		RunID:     bundle.RunID,
-		Scenario:  bundle.Scenario,
-		Status:    bundle.Status,
-		BaseURL:   baseURL,
-		Artifacts: artifacts,
+		RunID:         bundle.RunID,
+		Scenario:      bundle.Scenario,
+		Status:        bundle.Status,
+		TargetProfile: bundle.TargetProfile,
+		Host:          bundle.Host,
+		BaseURL:       baseURL,
+		Artifacts:     artifacts,
 	}, nil
 }
 
@@ -294,13 +298,24 @@ func discoverPublishedOutputs(publishedDir string) ([]outputArtifact, error) {
 }
 
 func renderReviewMarkdown(bundle evidenceBundle, manifest publishedArtifactManifest) string {
+	if manifest.TargetProfile == "" {
+		manifest.TargetProfile = bundle.TargetProfile
+	}
+	if manifest.Host == "" {
+		manifest.Host = bundle.Host
+	}
+	return renderReviewMarkdownFromManifest(manifest)
+}
+
+func renderReviewMarkdownFromManifest(manifest publishedArtifactManifest) string {
 	var builder strings.Builder
+	fmt.Fprintf(&builder, "<!-- maya-stall:evidence-comment -->\n")
 	fmt.Fprintf(&builder, "## Maya Stall Evidence\n\n")
-	fmt.Fprintf(&builder, "status: %s\n", markdownText(bundle.Status))
-	fmt.Fprintf(&builder, "run: %s\n", markdownText(bundle.RunID))
-	fmt.Fprintf(&builder, "scenario: %s\n", markdownText(bundle.Scenario))
-	fmt.Fprintf(&builder, "targetProfile: %s\n", markdownText(bundle.TargetProfile))
-	fmt.Fprintf(&builder, "host: %s\n\n", markdownText(bundle.Host))
+	fmt.Fprintf(&builder, "status: %s\n", markdownText(manifest.Status))
+	fmt.Fprintf(&builder, "run: %s\n", markdownText(manifest.RunID))
+	fmt.Fprintf(&builder, "scenario: %s\n", markdownText(manifest.Scenario))
+	fmt.Fprintf(&builder, "targetProfile: %s\n", markdownText(manifest.TargetProfile))
+	fmt.Fprintf(&builder, "host: %s\n\n", markdownText(manifest.Host))
 	for _, artifact := range manifest.Artifacts {
 		fmt.Fprintf(&builder, "- %s: [%s](<%s>)\n", markdownText(artifact.Label), markdownLinkText(artifact.Path), markdownLinkDestination(artifact.URL))
 	}

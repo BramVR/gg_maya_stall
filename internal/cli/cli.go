@@ -176,6 +176,35 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 			fmt.Fprintf(stderr, "maya-stall evidence: expected collect or publish\n")
 			return 2
 		}
+	case "review-comment":
+		options, err := parseReviewCommentArgs(args[1:], os.LookupEnv)
+		if err != nil {
+			fmt.Fprintf(stderr, "maya-stall review-comment: %v\n", err)
+			return 2
+		}
+		result, markdownPath, err := postReviewComment(workDir, options, nil)
+		if err != nil {
+			var userErr *usageError
+			if errors.As(err, &userErr) {
+				fmt.Fprintf(stderr, "maya-stall review-comment: %v\n", err)
+				return 2
+			}
+			fmt.Fprintf(stderr, "maya-stall review-comment: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "platform: %s\n", result.Platform)
+		fmt.Fprintf(stdout, "operation: %s\n", result.Operation)
+		switch options.Platform {
+		case "github":
+			fmt.Fprintf(stdout, "target: %s#%d\n", options.GitHub.Repo, options.GitHub.PullRequest)
+		case "gitlab":
+			fmt.Fprintf(stdout, "target: %s!%d\n", options.GitLab.Project, options.GitLab.MergeRequest)
+		}
+		if result.CommentID != "" {
+			fmt.Fprintf(stdout, "comment: %s\n", result.CommentID)
+		}
+		fmt.Fprintf(stdout, "reviewComment: %s\n", markdownPath)
+		return 0
 	case "status":
 		options, err := parseStatusArgs(args[1:])
 		if err != nil {
@@ -269,6 +298,8 @@ Usage:
   maya-stall record [--host-config <path>] [--target-profile <name>] [--host <id>]
   maya-stall evidence collect [--host-config <path>] [--target-profile <name>] [--host <id>] <scenario>
   maya-stall evidence publish --destination <path> --base-url <url> <evidence-bundle-dir>
+  maya-stall review-comment github --repo <owner/name> --pr <number> [--token-env <name>] [--api-url <url>] [--dry-run] <published-evidence-dir>
+  maya-stall review-comment gitlab --project <path-or-id> --merge-request <iid> [--token-env <name>] [--base-url <url>] [--dry-run] <published-evidence-dir>
   maya-stall status [--run <run-id>]
   maya-stall attach <run-id>
   maya-stall stop <run-id>
@@ -280,6 +311,7 @@ Commands:
   evidence publish   copy an Evidence Bundle to a filesystem Evidence Store
   init      write a repo-only sample .maya-stall.yaml
   record    capture a fake Session Broker recording artifact
+  review-comment   create or update a GitHub PR or GitLab MR Review Comment
   run       run a named Scenario with the fake runtime
   screenshot   capture a fake Session Broker screenshot artifact
   status   show kept run state

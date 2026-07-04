@@ -98,7 +98,7 @@ func printKeptRunStatus(stdout io.Writer, run keptRun) {
 }
 
 func attachRun(repoDir string, runID string, stdout io.Writer) error {
-	run, err := readKeptRun(repoDir, runID)
+	run, err := readKeptRunState(repoDir, runID)
 	if err != nil {
 		return err
 	}
@@ -210,6 +210,9 @@ func cleanupRunState(repoDir string, runID string) error {
 }
 
 func listKeptRuns(repoDir string) ([]keptRun, error) {
+	if err := ensureOutputPathHasNoSymlinkParent(repoDir, filepath.Join(".maya-stall", "state", "locks", "hosts")); err != nil {
+		return nil, err
+	}
 	lockDir := filepath.Join(repoDir, ".maya-stall", "state", "locks", "hosts")
 	entries, err := os.ReadDir(lockDir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -240,11 +243,11 @@ func listKeptRuns(repoDir string) ([]keptRun, error) {
 }
 
 func readKeptRun(repoDir string, runID string) (keptRun, error) {
-	manifest, stateDir, err := readKeptRunManifest(repoDir, runID)
+	run, err := readKeptRunState(repoDir, runID)
 	if err != nil {
 		return keptRun{}, err
 	}
-	if err := ensureRunHasKeptLock(repoDir, manifest, runID); err != nil {
+	if err := ensureOutputPathHasNoSymlinkParent(repoDir, filepath.Join("artifacts", "maya-stall", runID)); err != nil {
 		return keptRun{}, err
 	}
 	evidenceBytes, err := os.ReadFile(filepath.Join(repoDir, "artifacts", "maya-stall", runID, "evidence.json"))
@@ -255,7 +258,19 @@ func readKeptRun(repoDir string, runID string) (keptRun, error) {
 	if err := json.Unmarshal(evidenceBytes, &bundle); err != nil {
 		return keptRun{}, fmt.Errorf("parse kept run evidence: %w", err)
 	}
-	return keptRun{RunID: runID, StateDir: stateDir, Manifest: manifest, Bundle: bundle}, nil
+	run.Bundle = bundle
+	return run, nil
+}
+
+func readKeptRunState(repoDir string, runID string) (keptRun, error) {
+	manifest, stateDir, err := readKeptRunManifest(repoDir, runID)
+	if err != nil {
+		return keptRun{}, err
+	}
+	if err := ensureRunHasKeptLock(repoDir, manifest, runID); err != nil {
+		return keptRun{}, err
+	}
+	return keptRun{RunID: runID, StateDir: stateDir, Manifest: manifest}, nil
 }
 
 func readKeptRunManifest(repoDir string, runID string) (runManifest, string, error) {

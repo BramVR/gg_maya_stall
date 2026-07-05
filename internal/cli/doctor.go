@@ -219,7 +219,7 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 		} else {
 			defer func() {
 				if err := release(); err != nil {
-					add(failedCheck("host-lock", fmt.Sprintf("release doctor probe lock for %s: %v", host.ID, err), "Inspect the Host Lock state directory and permissions. See docs/setup/windows-maya-host.md#host-lock-and-retention."))
+					add(failedCheck("host-lock-release", fmt.Sprintf("release doctor probe lock for %s: %v", host.ID, err), "Inspect the Host Lock state directory and permissions. See docs/setup/windows-maya-host.md#host-lock-and-retention."))
 				}
 			}()
 		}

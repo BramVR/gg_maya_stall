@@ -53,11 +53,21 @@ scenarios:
       pluginArtifacts:
         - build/plugin.mll
       expectedOutputs:
-        scenarioResult: outputs/result.json
-        files:
-          - outputs/report.json
-    visualEvidence:
-      required: true
+        - golden/expected.json
+    expectedOutputs:
+      scenarioResult: outputs/result.json
+      files:
+        - outputs/report.json
+    evidence:
+      screenshots:
+        enabled: true
+      recording:
+        enabled: false
+    validators:
+      - type: scenarioResultStatus
+        status: passed
+      - type: visualEvidence
+        required: true
 ```
 
 ## Step 3. Run The Fake Smoke
@@ -199,7 +209,6 @@ hostPools:
           user: maya-runner
           port: 22
           identityFile: ~/.ssh/maya-stall-ci
-          sftpTimeout: 30m
         workRoot: C:/maya-stall
         broker:
           type: gg-mayasessiond

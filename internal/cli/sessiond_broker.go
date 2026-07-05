@@ -49,14 +49,8 @@ func sessionBrokerForConfig(host mayaHostConfig) sessionBroker {
 	if host.Broker.isGGMayaSessiond() {
 		return ggMayaSessiondBroker{host: host}
 	}
-	if host.Broker.missingStructuredType() {
-		return invalidSessionBroker{err: fmt.Errorf("broker.type is required for structured broker config")}
-	}
-	if strings.TrimSpace(host.Broker.Type) != "" {
-		return invalidSessionBroker{err: fmt.Errorf("unknown broker.type %q", host.Broker.Type)}
-	}
-	if !host.Broker.isLegacyFakeStatus() {
-		return invalidSessionBroker{err: fmt.Errorf("unknown broker status %q", host.Broker.FakeStatus)}
+	if reason := host.Broker.invalidReason(); reason != "" {
+		return invalidSessionBroker{err: fmt.Errorf("%s", reason)}
 	}
 	return fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "fake Scenario completed"}}
 }

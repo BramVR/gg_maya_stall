@@ -175,26 +175,46 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 		add(statusLayer("fake-ssh", host.SSH.FakeStatus, "reachable", []string{"", "ok", "healthy", "reachable"}, "Fix SSH reachability for this Maya Host. See docs/setup/windows-maya-host.md#openssh-reachability."))
 		add(statusLayer("work-root", host.WorkRoot, "writable", []string{"", "ok", "writable"}, "Fix the host work root path or permissions. See docs/setup/windows-maya-host.md#work-root."))
 	}
+	lockCheck := hostLockLayer(repoDir, host.ID)
+	add(lockCheck)
+	brokerInvalidReason := host.Broker.invalidReason()
+	brokerLayerInvalidReason := ""
+	if host.Broker.missingStructuredType() || strings.TrimSpace(host.Broker.Type) != "" {
+		brokerLayerInvalidReason = brokerInvalidReason
+	}
 	if host.Broker.isGGMayaSessiond() {
-		add(realSessionBrokerLayer(host))
-	} else if host.Broker.missingStructuredType() {
-		add(failedCheck("session-broker", "broker.type is required for structured broker config", "Use broker.type: gg-mayasessiond or a legacy fake broker status. See docs/setup/windows-maya-host.md#session-broker."))
-	} else if strings.TrimSpace(host.Broker.Type) != "" {
-		add(failedCheck("session-broker", fmt.Sprintf("unknown broker.type %q", host.Broker.Type), "Use broker.type: gg-mayasessiond or a legacy fake broker status. See docs/setup/windows-maya-host.md#session-broker."))
+		broker := ggMayaSessiondBroker{host: host}
+		if err := broker.validate(); err != nil {
+			add(failedCheck("session-broker", err.Error(), "Configure gg_mayasessiond paths in host config. See docs/setup/windows-maya-host.md#session-broker."))
+		} else if lockCheck.Status == "ok" {
+			add(realSessionBrokerLayer(host))
+		} else {
+			add(failedCheck("session-broker", "skipped because Host Lock is not clear", "Wait for the active Fresh Run or clear the stale Host Lock before probing gg_mayasessiond. See docs/setup/windows-maya-host.md#host-lock-and-retention."))
+		}
+	} else if brokerLayerInvalidReason != "" {
+		add(failedCheck("session-broker", brokerLayerInvalidReason, "Use broker.type: gg-mayasessiond or a legacy fake broker status. See docs/setup/windows-maya-host.md#session-broker."))
 	} else {
 		add(statusLayer("session-broker", host.Broker.fakeStatus(), "reachable", []string{"", "ok", "healthy", "reachable"}, "Start or repair the Session Broker on this Maya Host. See docs/setup/windows-maya-host.md#session-broker."))
 	}
 	add(mayaVersionLayer(options, host, scenario))
 	if host.VisualEvidence != nil && !*host.VisualEvidence {
 		add(failedCheck("visual-evidence", "unavailable", "Enable screenshot or recording capture through the Session Broker. See docs/setup/windows-maya-host.md#visual-evidence."))
+	} else if brokerInvalidReason != "" {
+		add(failedCheck("visual-evidence", "unavailable: "+brokerInvalidReason, "Use a valid Session Broker before checking screenshot or recording capture. See docs/setup/windows-maya-host.md#visual-evidence."))
 	} else if host.Broker.isGGMayaSessiond() && scenario.Evidence.Recording.Enabled {
 		add(failedCheck("visual-evidence", "gg_mayasessiond recording capture unsupported", "Disable recording evidence or use screenshot/viewport capture. See docs/setup/windows-maya-host.md#visual-evidence."))
 	} else if host.Broker.isGGMayaSessiond() {
-		add(realSessionBrokerVisualEvidenceLayer(host))
+		broker := ggMayaSessiondBroker{host: host}
+		if err := broker.validate(); err != nil {
+			add(failedCheck("visual-evidence", "unavailable: "+err.Error(), "Configure gg_mayasessiond paths before checking screenshot capture. See docs/setup/windows-maya-host.md#visual-evidence."))
+		} else if lockCheck.Status == "ok" {
+			add(realSessionBrokerVisualEvidenceLayer(host))
+		} else {
+			add(failedCheck("visual-evidence", "skipped because Host Lock is not clear", "Wait for the active Fresh Run or clear the stale Host Lock before probing viewport.capture. See docs/setup/windows-maya-host.md#host-lock-and-retention."))
+		}
 	} else {
 		add(okCheck("visual-evidence", "available"))
 	}
-	add(hostLockLayer(repoDir, host.ID))
 }
 
 type sessiondDoctorOutput struct {

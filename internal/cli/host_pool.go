@@ -98,6 +98,22 @@ func (config brokerConfig) missingStructuredType() bool {
 	return config.Structured && strings.TrimSpace(config.Type) == ""
 }
 
+func (config brokerConfig) invalidReason() string {
+	if config.isGGMayaSessiond() {
+		return ""
+	}
+	if config.missingStructuredType() {
+		return "broker.type is required for structured broker config"
+	}
+	if strings.TrimSpace(config.Type) != "" {
+		return fmt.Sprintf("unknown broker.type %q", config.Type)
+	}
+	if !config.isLegacyFakeStatus() {
+		return fmt.Sprintf("unknown broker status %q", config.FakeStatus)
+	}
+	return ""
+}
+
 type sshConfig struct {
 	FakeStatus   string
 	Host         string `yaml:"host"`

@@ -1419,6 +1419,142 @@ hostPools:
 	if !strings.Contains(stdout.String(), "session-broker: fail - broker.type is required for structured broker config") {
 		t.Fatalf("doctor did not reject structured broker without type:\n%s", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "visual-evidence: fail - unavailable: broker.type is required for structured broker config") {
+		t.Fatalf("doctor reported Visual Evidence as available for invalid broker config:\n%s", stdout.String())
+	}
+}
+
+func TestDoctorRejectsScalarBrokerStatusForVisualEvidence(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        broker: gg-mayasessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `session-broker: fail - gg-mayasessiond`) {
+		t.Fatalf("doctor did not report scalar broker status failure:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), `visual-evidence: fail - unavailable: unknown broker status "gg-mayasessiond"`) {
+		t.Fatalf("doctor reported Visual Evidence as available for invalid scalar broker:\n%s", stdout.String())
+	}
+}
+
+func TestDoctorGGMayaSessiondSkipsLiveProbesWhenHostLocked(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	release, locked, err := acquireHostLock(dir, "alpha")
+	if err != nil {
+		t.Fatalf("pre-lock host: %v", err)
+	}
+	if locked {
+		t.Fatal("host was already locked")
+	}
+	defer release()
+	sshLog := filepath.Join(dir, "ssh.log")
+	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{``, ``})
+	sftpLog := filepath.Join(dir, "sftp.log")
+	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/PROJECTS/GG/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"host-lock: fail - alpha locked",
+		"session-broker: fail - skipped because Host Lock is not clear",
+		"visual-evidence: fail - skipped because Host Lock is not clear",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("doctor output missing %q:\n%s", want, stdout.String())
+		}
+	}
+	sshBytes, err := os.ReadFile(sshLog)
+	if err != nil {
+		t.Fatalf("read ssh log: %v", err)
+	}
+	if got := strings.Count(string(sshBytes), "CALL "); got != 2 {
+		t.Fatalf("doctor should only check ssh/work-root when host is locked, got %d SSH calls:\n%s", got, string(sshBytes))
+	}
+	if _, err := os.Stat(sftpLog); !os.IsNotExist(err) {
+		t.Fatalf("locked doctor should not stage script.execute probe, stat err = %v", err)
+	}
+}
+
+func TestDoctorGGMayaSessiondValidatesConfigWhenHostLocked(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	release, locked, err := acquireHostLock(dir, "alpha")
+	if err != nil {
+		t.Fatalf("pre-lock host: %v", err)
+	}
+	if locked {
+		t.Fatal("host was already locked")
+	}
+	defer release()
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{``, ``})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          repo: C:/PROJECTS/GG/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "session-broker: fail - gg_mayasessiond broker requires broker.python") {
+		t.Fatalf("doctor hid static broker config error behind Host Lock:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "visual-evidence: fail - unavailable: gg_mayasessiond broker requires broker.python") {
+		t.Fatalf("doctor Visual Evidence did not report static broker config error:\n%s", stdout.String())
+	}
 }
 
 func TestDoctorScenarioValidatesInputsAndMayaVersion(t *testing.T) {

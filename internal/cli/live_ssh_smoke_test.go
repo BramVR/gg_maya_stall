@@ -19,6 +19,9 @@ func TestOptInRealSSHDoctorSmoke(t *testing.T) {
 		return
 	}
 	dir := writeRunConfigFixture(t)
+	report := runDoctor(dir, options.doctorOptions())
+	assertLiveHostHealthProof(t, report)
+	t.Logf("Host Health: %s", formatHostHealthReport(report))
 	var stdout, stderr bytes.Buffer
 
 	code := Run(options.doctorArgs(), &stdout, &stderr, dir, "test-version")
@@ -34,11 +37,11 @@ func TestOptInRealSSHRunSmoke(t *testing.T) {
 	}
 	dir := writeLiveRunConfigFixture(t)
 
-	var doctorStdout, doctorStderr bytes.Buffer
-	doctorCode := Run(options.doctorArgs("--scenario", "smoke"), &doctorStdout, &doctorStderr, dir, "test-version")
-	if doctorCode != 0 {
-		t.Fatalf("real SSH smoke doctor exit code = %d, want 0; stdout: %s stderr: %s", doctorCode, doctorStdout.String(), doctorStderr.String())
-	}
+	doctorOptions := options.doctorOptions()
+	doctorOptions.ScenarioName = "smoke"
+	report := runDoctor(dir, doctorOptions)
+	assertLiveHostHealthProof(t, report)
+	t.Logf("Host Health: %s", formatHostHealthReport(report))
 
 	var runStdout, runStderr bytes.Buffer
 	runCode := Run(options.runArgs("smoke"), &runStdout, &runStderr, dir, "test-version")
@@ -83,12 +86,34 @@ func (options realSSHSmokeOptions) doctorArgs(extra ...string) []string {
 	return append(args, extra...)
 }
 
+func (options realSSHSmokeOptions) doctorOptions() doctorOptions {
+	return doctorOptions{HostConfig: options.HostConfig, TargetProfile: options.TargetProfile, HostPin: options.Host}
+}
+
 func (options realSSHSmokeOptions) runArgs(scenario string) []string {
 	args := []string{"run", "--host-config", options.HostConfig, "--target-profile", options.TargetProfile}
 	if options.Host != "" {
 		args = append(args, "--host", options.Host)
 	}
 	return append(args, scenario)
+}
+
+func assertLiveHostHealthProof(t *testing.T, report hostHealthReport) {
+	t.Helper()
+	if !report.Healthy {
+		t.Fatalf("Host Health is not healthy: %s", formatHostHealthReport(report))
+	}
+	if report.Runtime.Profile != "ssh-sessiond" || report.Runtime.HostAdapter != "ssh" || report.Runtime.BrokerAdapter != "gg-mayasessiond" || !report.Runtime.LiveProofEligible {
+		t.Fatalf("Host Health runtime = %+v, want live-proof-eligible ssh-sessiond", report.Runtime)
+	}
+	broker := requireHostHealthLayer(t, report, "session-broker")
+	if broker.Status != "ok" || broker.Source != "gg-mayasessiond" || !broker.InteractiveDesktop {
+		t.Fatalf("session-broker Host Health = %+v, want interactive gg_mayasessiond", broker)
+	}
+	visual := requireHostHealthLayer(t, report, "visual-evidence")
+	if visual.Status != "ok" || visual.Source != "session-broker" || !strings.Contains(visual.Detail, "viewport.capture") {
+		t.Fatalf("visual-evidence Host Health = %+v, want broker-backed viewport.capture", visual)
+	}
 }
 
 func writeLiveRunConfigFixture(t *testing.T) string {

@@ -5,6 +5,11 @@ Health layers before a run. It is fast and diagnostic. The fake/local path does
 not create host resources; live `gg_mayasessiond` checks briefly stage, execute,
 and remove a probe under the configured work root.
 
+Doctor builds one stable Host Health report before rendering text. The report
+records Target Profile, Host Pool, selected Maya Host, runtime profile, layer
+statuses, Host Lock state, Session Broker source, interactive desktop proof, and
+Visual Evidence source.
+
 ```sh
 maya-stall doctor
 maya-stall doctor --scenario smoke
@@ -38,7 +43,8 @@ With `broker.type: gg-mayasessiond`, doctor runs the daemon `doctor` and
 `status` commands, checks that `maya.exe` is in the interactive desktop session,
 stages and executes a tiny `script.execute` probe under `workRoot/runs/doctor-*`,
 checks `viewport.capture`, and fails if Maya is running in Windows Services
-session `0`.
+session `0`. Visual Evidence readiness is reported from that same Session Broker
+probe, not from the static host config alone.
 
 ## When To Run
 

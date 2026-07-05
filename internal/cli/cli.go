@@ -56,12 +56,7 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 			return 2
 		}
 		report := runDoctor(workDir, options)
-		for _, check := range report.Checks {
-			fmt.Fprintf(stdout, "%s: %s - %s\n", check.Layer, check.Status, check.Detail)
-			if check.Hint != "" {
-				fmt.Fprintf(stdout, "hint: %s\n", check.Hint)
-			}
-		}
+		printHostHealthReport(stdout, report)
 		if report.Healthy {
 			return 0
 		}

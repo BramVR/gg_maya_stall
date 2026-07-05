@@ -343,7 +343,8 @@ func sessiondDoctorArgs(host mayaHostConfig) []string {
 }
 
 func mayaProcessSessions(host mayaHostConfig) ([]windowsProcessSession, error) {
-	script := `Get-CimInstance Win32_Process -Filter "Name = 'maya.exe'" | Select-Object ProcessId,SessionId,Name | ConvertTo-Json -Compress`
+	script := `$ErrorActionPreference = 'Stop'
+Get-CimInstance Win32_Process -Filter "Name = 'maya.exe'" | Select-Object ProcessId,SessionId,Name | ConvertTo-Json -Compress`
 	raw, err := runSSHCommandOutput(host, encodedPowerShellCommand(script), sessiondCommandTimeout)
 	if err != nil {
 		return nil, err

@@ -2239,8 +2239,10 @@ func TestGGMayaSessiondScenarioWrapperPreservesFailingScenarioResult(t *testing.
 		"previous_cwd = os.getcwd()",
 		"previous_sys_path = list(sys.path)",
 		"def _maya_stall_clear_run_modules():",
+		"class _MayaStallStopScenario(Exception):",
 		"try:\n    os.environ[",
 		"for include_path in reversed(",
+		"Scenario exited before running all scripts",
 		"sys.path[:] = previous_sys_path",
 		"os.chdir(previous_cwd)",
 		"_maya_stall_write_result('failed', str(exc), traceback.format_exc(), overwrite=_maya_stall_should_overwrite_failure())",
@@ -2258,21 +2260,78 @@ func TestGGMayaSessiondScenarioWrapperPreservesFailingScenarioResult(t *testing.
 	assertPythonParses(t, wrapper)
 }
 
+func TestGGMayaSessiondScenarioWrapperFailsEarlyZeroSystemExit(t *testing.T) {
+	python := pythonInterpreter(t)
+	root := filepath.ToSlash(t.TempDir())
+	remoteRunRoot := root + "/runs/run-1"
+	remoteWorkspace := remoteRunRoot + "/workspace"
+	scriptDir := filepath.FromSlash(remoteRunRoot + "/payload/mayaScripts/maya")
+	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+		t.Fatalf("create staged script dir: %v", err)
+	}
+	mustWriteFile(t, filepath.Join(scriptDir, "first.py"), "import sys\nsys.exit(0)\n")
+	mustWriteFile(t, filepath.Join(scriptDir, "second.py"), "from pathlib import Path\nPath('second-ran.txt').write_text('ran', encoding='utf-8')\n")
+	broker := ggMayaSessiondBroker{host: mayaHostConfig{
+		WorkRoot: root,
+		Broker: brokerConfig{
+			Type:     "gg-mayasessiond",
+			StateDir: root + "/state",
+			Python:   python,
+			Repo:     root + "/repo",
+		},
+	}}
+	scenario := scenarioConfig{
+		Payload: runPayload{Scripts: []string{"maya/first.py", "maya/second.py"}},
+		ExpectedOutputs: expectedOutputs{
+			ScenarioResult: "outputs/result.json",
+		},
+	}
+	wrapper, err := broker.scenarioWrapper(runContext{}, scenario, remoteRunRoot, remoteWorkspace)
+	if err != nil {
+		t.Fatalf("build wrapper: %v", err)
+	}
+	command := exec.Command(python, "-c", wrapper)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run wrapper: %v\n%s\n%s", err, string(output), wrapper)
+	}
+	resultBytes, err := os.ReadFile(filepath.FromSlash(remoteWorkspace + "/outputs/result.json"))
+	if err != nil {
+		t.Fatalf("read wrapper Scenario Result: %v", err)
+	}
+	var result ScenarioResult
+	if err := json.Unmarshal(resultBytes, &result); err != nil {
+		t.Fatalf("parse wrapper Scenario Result: %v", err)
+	}
+	if result.Status != resultStatusFailed || !strings.Contains(result.Summary, "before running all scripts") {
+		t.Fatalf("wrapper Scenario Result = %+v, want failed early-exit result", result)
+	}
+	if _, err := os.Stat(filepath.FromSlash(remoteWorkspace + "/second-ran.txt")); !os.IsNotExist(err) {
+		t.Fatalf("second script should not run after early SystemExit, stat err = %v", err)
+	}
+}
+
 func assertPythonParses(t *testing.T, source string) {
 	t.Helper()
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		python, err = exec.LookPath("python")
-	}
-	if err != nil {
-		t.Skip("python interpreter not available for wrapper parse check")
-	}
+	python := pythonInterpreter(t)
 	command := exec.Command(python, "-c", "import ast, sys\nast.parse(sys.stdin.read())\n")
 	command.Stdin = strings.NewReader(source)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("generated wrapper did not parse as Python: %v\n%s\n%s", err, string(output), source)
 	}
+}
+
+func pythonInterpreter(t *testing.T) string {
+	t.Helper()
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		python, err = exec.LookPath("python")
+	}
+	if err != nil {
+		t.Skip("python interpreter not available for wrapper check")
+	}
+	return python
 }
 
 func TestGGMayaSessiondScenarioWrapperRejectsBackslashScenarioResultPath(t *testing.T) {

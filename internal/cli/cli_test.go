@@ -1851,6 +1851,8 @@ hostPools:
 
 func TestRunScenarioRejectsStructuredBrokerWithoutType(t *testing.T) {
 	dir := writeRunConfigFixture(t)
+	sftpLog := filepath.Join(dir, "sftp.log")
+	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
 	mustWriteFile(t, hostConfigPath, `version: 1
 targetProfiles:
@@ -1860,6 +1862,11 @@ hostPools:
   windows-maya:
     hosts:
       - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
         broker:
           stateDir: C:/maya-stall/sessiond-ui
           python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
@@ -1873,6 +1880,12 @@ hostPools:
 	}
 	if !strings.Contains(stderr.String(), "broker.type is required for structured broker config") {
 		t.Fatalf("run error did not reject structured broker without type: %s", stderr.String())
+	}
+	if _, err := os.Stat(sftpLog); !os.IsNotExist(err) {
+		t.Fatalf("invalid broker config should fail before SFTP staging, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")); !os.IsNotExist(err) {
+		t.Fatalf("host lock was not released after broker fail-fast, stat err = %v", err)
 	}
 }
 

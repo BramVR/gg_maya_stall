@@ -180,6 +180,9 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 			}
 		}
 	}()
+	if err := rejectInvalidSessionBroker(runtime.Broker); err != nil {
+		return runOutcome{}, err
+	}
 	if err := rejectUnsupportedEvidenceConfig(runtime.Broker, scenario); err != nil {
 		return runOutcome{}, err
 	}
@@ -331,6 +334,13 @@ func rejectUnsupportedEvidenceConfig(broker sessionBroker, scenario scenarioConf
 		if _, ok := broker.(ggMayaSessiondBroker); ok {
 			return fmt.Errorf("gg_mayasessiond does not expose recording capture; disable recording evidence or use screenshot/viewport capture")
 		}
+	}
+	return nil
+}
+
+func rejectInvalidSessionBroker(broker sessionBroker) error {
+	if broker, ok := broker.(invalidSessionBroker); ok {
+		return broker.err
 	}
 	return nil
 }

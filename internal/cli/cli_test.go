@@ -1945,6 +1945,22 @@ func TestGGMayaSessiondScreenshotNameFollowsDaemonMediaType(t *testing.T) {
 	if got := visualEvidenceNameForMediaType("smoke.jpg", "image/png"); got != "smoke.png" {
 		t.Fatalf("png screenshot name = %q, want smoke.png", got)
 	}
+	if got := visualEvidenceNameForMediaType("smoke.png", "image/webp"); got != "smoke.bin" {
+		t.Fatalf("unknown media type screenshot name = %q, want smoke.bin", got)
+	}
+}
+
+func TestVisualEvidenceBundlePrefersCapturedMediaType(t *testing.T) {
+	got := mergeVisualEvidence(
+		[]visualEvidenceArtifact{{Kind: "screenshot", Path: "screenshots/smoke.bin", MediaType: "image/webp"}},
+		[]visualEvidenceArtifact{{Kind: "screenshot", Path: "screenshots/smoke.bin", MediaType: "application/octet-stream"}},
+	)
+	if len(got) != 1 {
+		t.Fatalf("merged Visual Evidence count = %d, want 1", len(got))
+	}
+	if got[0].MediaType != "image/webp" {
+		t.Fatalf("merged Visual Evidence media type = %q, want image/webp", got[0].MediaType)
+	}
 }
 
 func TestGGMayaSessiondScenarioWrapperPreservesFailingScenarioResult(t *testing.T) {
@@ -1972,6 +1988,7 @@ func TestGGMayaSessiondScenarioWrapperPreservesFailingScenarioResult(t *testing.
 		"previous_cwd = os.getcwd()",
 		"previous_sys_path = list(sys.path)",
 		"def _maya_stall_clear_run_modules():",
+		"try:\n    os.environ[",
 		"sys.path[:] = previous_sys_path",
 		"os.chdir(previous_cwd)",
 		"_maya_stall_write_result('failed', str(exc), traceback.format_exc(), overwrite=_maya_stall_should_overwrite_failure())",

@@ -270,7 +270,8 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	if result.Status == "" {
 		result.Status = resultStatusPassed
 	}
-	if err := collectScenarioVisualEvidence(runtime.Broker, context, options.ScenarioName, scenario.Evidence); err != nil {
+	visualEvidence, err := collectScenarioVisualEvidence(runtime.Broker, context, options.ScenarioName, scenario.Evidence)
+	if err != nil {
 		return runOutcome{}, err
 	}
 	resultDocument.setResult(result)
@@ -301,7 +302,7 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	if err := appendEvent(context.EventsPath, "run.completed", result.Status); err != nil {
 		return runOutcome{}, err
 	}
-	if err := writeEvidenceBundle(context, manifest, scenario, result, validatorResults); err != nil {
+	if err := writeEvidenceBundle(context, manifest, scenario, result, visualEvidence, validatorResults); err != nil {
 		return runOutcome{}, err
 	}
 	if stopPolicy == "kept" {
@@ -334,26 +335,31 @@ func rejectUnsupportedEvidenceConfig(broker sessionBroker, scenario scenarioConf
 	return nil
 }
 
-func collectScenarioVisualEvidence(broker sessionBroker, context runContext, scenarioName string, config evidenceConfig) error {
+func collectScenarioVisualEvidence(broker sessionBroker, context runContext, scenarioName string, config evidenceConfig) ([]visualEvidenceArtifact, error) {
+	var artifacts []visualEvidenceArtifact
 	if config.Screenshots.Enabled {
 		capturer, ok := broker.(screenshotCapturer)
 		if !ok {
-			return fmt.Errorf("Session Broker does not support screenshot capture")
+			return nil, fmt.Errorf("Session Broker does not support screenshot capture")
 		}
-		if _, err := capturer.CaptureScreenshot(context, screenshotRequest{Name: visualEvidenceFileName(scenarioName, ".png")}); err != nil {
-			return err
+		artifact, err := capturer.CaptureScreenshot(context, screenshotRequest{Name: visualEvidenceFileName(scenarioName, ".png")})
+		if err != nil {
+			return nil, err
 		}
+		artifacts = append(artifacts, artifact)
 	}
 	if config.Recording.Enabled {
 		capturer, ok := broker.(recordingCapturer)
 		if !ok {
-			return fmt.Errorf("Session Broker does not support recording capture")
+			return nil, fmt.Errorf("Session Broker does not support recording capture")
 		}
-		if _, err := capturer.CaptureRecording(context, recordingRequest{Name: visualEvidenceFileName(scenarioName, ".mp4"), Duration: defaultRecordingDuration, FPS: defaultRecordingFPS}); err != nil {
-			return err
+		artifact, err := capturer.CaptureRecording(context, recordingRequest{Name: visualEvidenceFileName(scenarioName, ".mp4"), Duration: defaultRecordingDuration, FPS: defaultRecordingFPS})
+		if err != nil {
+			return nil, err
 		}
+		artifacts = append(artifacts, artifact)
 	}
-	return nil
+	return artifacts, nil
 }
 
 func visualEvidenceFileName(name string, extension string) string {
@@ -880,7 +886,7 @@ func hasValidatorFailure(results []validatorResult) bool {
 	return false
 }
 
-func writeEvidenceBundle(context runContext, manifest runManifest, scenario scenarioConfig, result ScenarioResult, validators []validatorResult) error {
+func writeEvidenceBundle(context runContext, manifest runManifest, scenario scenarioConfig, result ScenarioResult, capturedVisualEvidence []visualEvidenceArtifact, validators []validatorResult) error {
 	outputs, err := copyEvidenceOutputs(context, scenario)
 	if err != nil {
 		return err
@@ -898,6 +904,7 @@ func writeEvidenceBundle(context runContext, manifest runManifest, scenario scen
 	if err != nil {
 		return err
 	}
+	visualEvidence = mergeVisualEvidence(capturedVisualEvidence, visualEvidence)
 	bundle := evidenceBundle{
 		RunID:          manifest.RunID,
 		Scenario:       manifest.Scenario,
@@ -914,6 +921,29 @@ func writeEvidenceBundle(context runContext, manifest runManifest, scenario scen
 		Validators:     validators,
 	}
 	return writeJSONFile(filepath.Join(context.EvidenceDir, "evidence.json"), bundle)
+}
+
+func mergeVisualEvidence(preferred []visualEvidenceArtifact, discovered []visualEvidenceArtifact) []visualEvidenceArtifact {
+	seen := make(map[string]bool)
+	artifacts := make([]visualEvidenceArtifact, 0, len(preferred)+len(discovered))
+	add := func(artifact visualEvidenceArtifact) {
+		artifact.Path = filepath.ToSlash(artifact.Path)
+		if artifact.Path == "" || seen[artifact.Path] {
+			return
+		}
+		seen[artifact.Path] = true
+		artifacts = append(artifacts, artifact)
+	}
+	for _, artifact := range preferred {
+		add(artifact)
+	}
+	for _, artifact := range discovered {
+		add(artifact)
+	}
+	sort.Slice(artifacts, func(i, j int) bool {
+		return artifacts[i].Path < artifacts[j].Path
+	})
+	return artifacts
 }
 
 func copyEvidenceOutputs(context runContext, scenario scenarioConfig) ([]outputArtifact, error) {

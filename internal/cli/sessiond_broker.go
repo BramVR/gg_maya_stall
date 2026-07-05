@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -174,13 +175,6 @@ func (broker ggMayaSessiondBroker) scenarioWrapper(context runContext, scenario 
 	builder.WriteString("previous_result_env = os.environ.get(")
 	builder.WriteString(pythonString(scenarioResultEnvVar))
 	builder.WriteString(")\n")
-	builder.WriteString("os.environ[")
-	builder.WriteString(pythonString(scenarioResultEnvVar))
-	builder.WriteString("] = result_path\n")
-	builder.WriteString("os.makedirs(os.path.dirname(result_path), exist_ok=True)\n")
-	builder.WriteString("os.chdir(")
-	builder.WriteString(pythonString(remoteWorkspace))
-	builder.WriteString(")\n")
 	builder.WriteString("def _maya_stall_write_result(status, summary, traceback_text=None, overwrite=False):\n")
 	builder.WriteString("    if os.path.exists(result_path) and not overwrite:\n")
 	builder.WriteString("        return\n")
@@ -211,11 +205,18 @@ func (broker ggMayaSessiondBroker) scenarioWrapper(context runContext, scenario 
 	builder.WriteString("            continue\n")
 	builder.WriteString("        if module_path.startswith(root + os.sep):\n")
 	builder.WriteString("            sys.modules.pop(name, None)\n")
-	builder.WriteString("_maya_stall_clear_run_modules()\n")
-	builder.WriteString("for include_path in ")
-	builder.WriteString(pythonStringList(includePaths))
-	builder.WriteString(":\n    sys.path.insert(0, include_path)\n")
 	builder.WriteString("try:\n")
+	builder.WriteString("    os.environ[")
+	builder.WriteString(pythonString(scenarioResultEnvVar))
+	builder.WriteString("] = result_path\n")
+	builder.WriteString("    os.makedirs(os.path.dirname(result_path), exist_ok=True)\n")
+	builder.WriteString("    os.chdir(")
+	builder.WriteString(pythonString(remoteWorkspace))
+	builder.WriteString(")\n")
+	builder.WriteString("    _maya_stall_clear_run_modules()\n")
+	builder.WriteString("    for include_path in ")
+	builder.WriteString(pythonStringList(includePaths))
+	builder.WriteString(":\n        sys.path.insert(0, include_path)\n")
 	builder.WriteString("    for script_path in ")
 	builder.WriteString(pythonStringList(scripts))
 	builder.WriteString(":\n        runpy.run_path(script_path, run_name='__main__')\n")
@@ -354,14 +355,23 @@ func (broker ggMayaSessiondBroker) stageRemoteFile(path string, content []byte) 
 	return runSFTPBatch(broker.host, batch.String())
 }
 
-func (broker ggMayaSessiondBroker) probeScriptExecute() error {
+func (broker ggMayaSessiondBroker) probeScriptExecute() (err error) {
 	runID := fmt.Sprintf("doctor-%d", time.Now().UTC().UnixNano())
 	probeRoot := remoteJoin(broker.host.WorkRoot, "runs", runID)
 	probePath := remoteJoin(probeRoot, "workspace", ".maya-stall-doctor.py")
 	if err := broker.stageRemoteFile(probePath, []byte("print('maya-stall doctor script.execute ok')\n")); err != nil {
 		return fmt.Errorf("stage gg_mayasessiond script.execute probe: %w", err)
 	}
-	defer broker.removeRemotePath(probeRoot)
+	defer func() {
+		if cleanupErr := broker.removeRemotePath(probeRoot); cleanupErr != nil {
+			cleanupErr = fmt.Errorf("cleanup gg_mayasessiond script.execute probe: %w", cleanupErr)
+			if err == nil {
+				err = cleanupErr
+			} else {
+				err = errors.Join(err, cleanupErr)
+			}
+		}
+	}()
 	result, err := broker.callTool("script.execute", []string{
 		"file_path=" + probePath,
 		"timeout=30",
@@ -377,7 +387,7 @@ func (broker ggMayaSessiondBroker) probeScriptExecute() error {
 
 func (broker ggMayaSessiondBroker) removeRemotePath(path string) error {
 	script := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
-Remove-Item -LiteralPath %s -Recurse -Force -ErrorAction SilentlyContinue`, powerShellSingleQuoted(path))
+Remove-Item -LiteralPath %s -Recurse -Force`, powerShellSingleQuoted(path))
 	_, err := runSSHCommandOutput(broker.host, encodedPowerShellCommand(script), sessiondCommandTimeout)
 	return err
 }
@@ -414,10 +424,7 @@ func visualEvidenceNameForMediaType(name string, mediaType string) string {
 	case "image/jpeg", "":
 		extension = ".jpg"
 	default:
-		if filepath.Ext(name) != "" {
-			return name
-		}
-		return name + ".bin"
+		extension = ".bin"
 	}
 	base := strings.TrimSuffix(name, filepath.Ext(name))
 	if base == "" || base == "." || base == ".." {

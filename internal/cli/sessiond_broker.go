@@ -49,6 +49,9 @@ func sessionBrokerForConfig(host mayaHostConfig) sessionBroker {
 	if host.Broker.isGGMayaSessiond() {
 		return ggMayaSessiondBroker{host: host}
 	}
+	if host.Broker.missingStructuredType() {
+		return invalidSessionBroker{err: fmt.Errorf("broker.type is required for structured broker config")}
+	}
 	if strings.TrimSpace(host.Broker.Type) != "" {
 		return invalidSessionBroker{err: fmt.Errorf("unknown broker.type %q", host.Broker.Type)}
 	}
@@ -214,9 +217,9 @@ func (broker ggMayaSessiondBroker) scenarioWrapper(context runContext, scenario 
 	builder.WriteString(pythonString(remoteWorkspace))
 	builder.WriteString(")\n")
 	builder.WriteString("    _maya_stall_clear_run_modules()\n")
-	builder.WriteString("    for include_path in ")
+	builder.WriteString("    for include_path in reversed(")
 	builder.WriteString(pythonStringList(includePaths))
-	builder.WriteString(":\n        sys.path.insert(0, include_path)\n")
+	builder.WriteString("):\n        sys.path.insert(0, include_path)\n")
 	builder.WriteString("    for script_path in ")
 	builder.WriteString(pythonStringList(scripts))
 	builder.WriteString(":\n        runpy.run_path(script_path, run_name='__main__')\n")
@@ -459,6 +462,10 @@ func sessiondJSONFromFailedOutput(raw []byte) ([]byte, bool) {
 		return nil, false
 	}
 	if _, ok := object["ok"]; !ok {
+		return nil, false
+	}
+	okValue, ok := object["ok"].(bool)
+	if !ok || okValue {
 		return nil, false
 	}
 	return jsonOutput, true

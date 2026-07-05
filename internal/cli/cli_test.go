@@ -1394,6 +1394,33 @@ hostPools:
 	}
 }
 
+func TestDoctorRejectsStructuredBrokerWithoutType(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        broker:
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/PROJECTS/GG/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "session-broker: fail - broker.type is required for structured broker config") {
+		t.Fatalf("doctor did not reject structured broker without type:\n%s", stdout.String())
+	}
+}
+
 func TestDoctorScenarioValidatesInputsAndMayaVersion(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	hostConfigPath := writeLayeredHostConfig(t, dir)
@@ -1822,6 +1849,33 @@ hostPools:
 	}
 }
 
+func TestRunScenarioRejectsStructuredBrokerWithoutType(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        broker:
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/PROJECTS/GG/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "broker.type is required for structured broker config") {
+		t.Fatalf("run error did not reject structured broker without type: %s", stderr.String())
+	}
+}
+
 func TestRunScenarioRejectsUnknownScalarBrokerStatus(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -1989,6 +2043,7 @@ func TestGGMayaSessiondScenarioWrapperPreservesFailingScenarioResult(t *testing.
 		"previous_sys_path = list(sys.path)",
 		"def _maya_stall_clear_run_modules():",
 		"try:\n    os.environ[",
+		"for include_path in reversed(",
 		"sys.path[:] = previous_sys_path",
 		"os.chdir(previous_cwd)",
 		"_maya_stall_write_result('failed', str(exc), traceback.format_exc(), overwrite=_maya_stall_should_overwrite_failure())",
@@ -2002,6 +2057,24 @@ func TestGGMayaSessiondScenarioWrapperPreservesFailingScenarioResult(t *testing.
 	}
 	if strings.Contains(wrapper, "\n    raise\n") {
 		t.Fatalf("wrapper re-raises after writing failed Scenario Result:\n%s", wrapper)
+	}
+	assertPythonParses(t, wrapper)
+}
+
+func assertPythonParses(t *testing.T, source string) {
+	t.Helper()
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		python, err = exec.LookPath("python")
+	}
+	if err != nil {
+		t.Skip("python interpreter not available for wrapper parse check")
+	}
+	command := exec.Command(python, "-c", "import ast, sys\nast.parse(sys.stdin.read())\n")
+	command.Stdin = strings.NewReader(source)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("generated wrapper did not parse as Python: %v\n%s\n%s", err, string(output), source)
 	}
 }
 
@@ -2053,6 +2126,7 @@ func TestSessiondJSONFromFailedOutputRequiresCompleteCLIJSON(t *testing.T) {
 		[]byte("ssh failed before JSON"),
 		[]byte("traceback {'not': 'json'}"),
 		[]byte(`{"error":"missing ok"}`),
+		[]byte(`{"ok":true,"tool":"script.execute"}`),
 	} {
 		if got, ok := sessiondJSONFromFailedOutput(raw); ok {
 			t.Fatalf("sessiondJSONFromFailedOutput accepted %q as %s", string(raw), string(got))

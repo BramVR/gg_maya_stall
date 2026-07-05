@@ -50,7 +50,8 @@ type mayaHostConfig struct {
 }
 
 type brokerConfig struct {
-	FakeStatus string
+	FakeStatus string `yaml:"-"`
+	Structured bool   `yaml:"-"`
 	Type       string `yaml:"type"`
 	StateDir   string `yaml:"stateDir"`
 	Python     string `yaml:"python"`
@@ -69,6 +70,7 @@ func (config *brokerConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	*config = brokerConfig(decoded)
+	config.Structured = true
 	return nil
 }
 
@@ -90,6 +92,10 @@ func (config brokerConfig) isLegacyFakeStatus() bool {
 	default:
 		return false
 	}
+}
+
+func (config brokerConfig) missingStructuredType() bool {
+	return config.Structured && strings.TrimSpace(config.Type) == ""
 }
 
 type sshConfig struct {

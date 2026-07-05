@@ -160,8 +160,35 @@ func assertLiveSmokeEvidenceBundle(t *testing.T, evidenceDir string) {
 		if artifact.Kind == "" || artifact.Path == "" || artifact.MediaType == "" {
 			t.Fatalf("Visual Evidence artifact incomplete: %+v", artifact)
 		}
-		if _, err := os.Stat(filepath.Join(evidenceDir, filepath.FromSlash(artifact.Path))); err != nil {
+		visualPath := filepath.Join(evidenceDir, filepath.FromSlash(artifact.Path))
+		content, err := os.ReadFile(visualPath)
+		if err != nil {
 			t.Fatalf("Visual Evidence artifact missing %s: %v", artifact.Path, err)
 		}
+		if len(content) == 0 {
+			t.Fatalf("Visual Evidence artifact %s is empty", artifact.Path)
+		}
+		if !looksLikeImageBytes(artifact.MediaType, content) {
+			t.Fatalf("Visual Evidence artifact %s does not match media type %s", artifact.Path, artifact.MediaType)
+		}
+	}
+}
+
+func looksLikeImageBytes(mediaType string, content []byte) bool {
+	switch mediaType {
+	case "image/jpeg":
+		return len(content) >= 3 && content[0] == 0xff && content[1] == 0xd8 && content[2] == 0xff
+	case "image/png":
+		return len(content) >= 8 &&
+			content[0] == 0x89 &&
+			content[1] == 'P' &&
+			content[2] == 'N' &&
+			content[3] == 'G' &&
+			content[4] == '\r' &&
+			content[5] == '\n' &&
+			content[6] == 0x1a &&
+			content[7] == '\n'
+	default:
+		return len(content) > 0
 	}
 }

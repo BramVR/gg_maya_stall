@@ -120,6 +120,7 @@ Pick whichever matches your intent:
   [ADRs](adr/), [Source map](source-map.md).
 - **Help agents work here:** [Domain docs](agents/domain.md),
   [Issue tracker](agents/issue-tracker.md),
+  [PR and merge proof](agents/pr-merge.md),
   [Windows Maya Host agent notes](agents/windows-maya-host.md).
 
 ## About These Docs

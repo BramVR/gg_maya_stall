@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "description": "Changed-path policy for live Maya proof. Any matching path marks live_maya_required=true.",
+  "rules": [
+    {
+      "id": "proof-gate",
+      "reason": "proof gate policy, scripts, or workflow changed",
+      "paths": [
+        ".github/workflows/proof.yml",
+        "proof/live-maya-policy.json"
+      ],
+      "prefixes": [
+        "scripts/proof/"
+      ]
+    },
+    {
+      "id": "host-config-selection",
+      "reason": "Target Profile, Host Pool, or Maya Host selection changed",
+      "paths": [
+        "internal/cli/config.go",
+        "internal/cli/host_pool.go"
+      ]
+    },
+    {
+      "id": "ssh-windows-host",
+      "reason": "SSH, SFTP, or Windows Maya Host execution changed",
+      "paths": [
+        "internal/cli/ssh_transport.go",
+        "internal/cli/process_posix.go",
+        "internal/cli/process_windows.go"
+      ]
+    },
+    {
+      "id": "session-broker",
+      "reason": "Session Broker adapter or gg_mayasessiond behavior changed",
+      "paths": [
+        "internal/cli/sessiond_broker.go"
+      ]
+    },
+    {
+      "id": "doctor-host-health",
+      "reason": "doctor Host Health checks changed",
+      "paths": [
+        "internal/cli/doctor.go"
+      ]
+    },
+    {
+      "id": "live-command-surface",
+      "reason": "doctor, run, status, stop, attach, screenshot, or record command behavior changed",
+      "paths": [
+        "internal/cli/cli.go",
+        "internal/cli/run.go",
+        "internal/cli/run_state.go",
+        "internal/cli/visual_evidence.go"
+      ]
+    },
+    {
+      "id": "evidence-bundle",
+      "reason": "Evidence Bundle, manifest, logs, publishing, or Review Comment proof changed",
+      "paths": [
+        "internal/cli/publish.go",
+        "internal/cli/review_comment.go"
+      ]
+    },
+    {
+      "id": "consuming-repo-smoke",
+      "reason": "opt-in live smoke wiring changed",
+      "paths": [
+        "internal/cli/live_ssh_smoke_test.go"
+      ]
+    },
+    {
+      "id": "live-product-source",
+      "reason": "live product source changed",
+      "prefixes": [
+        "cmd/maya-stall/",
+        "internal/cli/"
+      ]
+    },
+    {
+      "id": "live-proof-contract-docs",
+      "reason": "live Maya proof contract docs changed",
+      "paths": [
+        "docs/agents/windows-maya-host.md",
+        "docs/agents/pr-merge.md",
+        "docs/setup/windows-maya-host.md",
+        "docs/prd/0001-maya-stall-v1.md",
+        "docs/adr/0036-require-an-interactive-windows-desktop.md",
+        "docs/adr/0040-use-fake-first-tests-and-opt-in-live-smoke.md",
+        "docs/adr/0041-test-v1-machinery-with-fakes.md",
+        "docs/adr/0042-install-non-skippable-live-maya-proof-gate.md"
+      ]
+    }
+  ]
+}

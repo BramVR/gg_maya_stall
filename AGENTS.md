@@ -17,6 +17,9 @@ Single-context repo: root `CONTEXT.md` plus ADRs in `docs/adr/`. See `docs/agent
 ### Windows Maya dev host
 Use `docs/agents/windows-maya-host.md` before changing live SSH, `gg_mayasessiond`, broker, screenshot, recording, or opt-in smoke behavior. The current Bram dev fixture is `desktop-mtiofol`.
 
+### PR proof
+Use `docs/agents/pr-merge.md` before preparing or landing a PR. Live-touching changes need the Proof Manifest and non-skippable live Maya gate; fake/default tests alone are not enough.
+
 ## Project Structure & Module Organization
 
 Maya Stall is a Go CLI plus an optional Python helper for Maya scripts. The CLI entrypoint is `cmd/maya-stall`, with implementation and Go tests in `internal/cli`. Python helper source lives in `helpers/python/maya_stall`, with tests in `helpers/python/tests`. Documentation lives in `docs/`; command docs are under `docs/commands`, setup runbooks under `docs/setup`, agent routing notes under `docs/agents`, ADRs under `docs/adr`, and PRDs under `docs/prd`. Generated outputs such as `bin/`, `dist/`, `.maya-stall/state/`, and `artifacts/maya-stall/` should not be edited by hand.

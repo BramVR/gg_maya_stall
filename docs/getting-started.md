@@ -22,12 +22,12 @@ Verify the binary:
 
 ```sh
 maya-stall version
-maya-stall doctor
+maya-stall --help
 ```
 
-`doctor` prints local and Host Health checks. With no real host config, the
-default path stays fake/local and should not require Autodesk Maya, private
-hosts, or secrets.
+`doctor` needs repo config, so run it after `maya-stall init` in the next steps.
+With no real host config, the default path stays fake/local and should not
+require Autodesk Maya, private hosts, or secrets.
 
 ## Step 2. Add Repo Config
 

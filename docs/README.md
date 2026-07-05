@@ -74,7 +74,7 @@ Then verify the command surface:
 
 ```sh
 maya-stall version
-maya-stall doctor
+maya-stall --help
 ```
 
 ## Quick Start

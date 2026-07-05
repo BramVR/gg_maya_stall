@@ -1,8 +1,9 @@
 # doctor
 
 `maya-stall doctor` checks local config, Target Profile selection, and Host
-Health layers before a run. It is fast, diagnostic, and should not create or
-delete host resources.
+Health layers before a run. It is fast and diagnostic. The fake/local path does
+not create host resources; live `gg_mayasessiond` checks briefly stage, execute,
+and remove a probe under the configured work root.
 
 ```sh
 maya-stall doctor

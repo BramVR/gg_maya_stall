@@ -67,14 +67,14 @@ This repo currently builds from source:
 
 ```sh
 go test ./...
-go build ./cmd/maya-stall
+go build -o bin/maya-stall ./cmd/maya-stall
 ```
 
 Then verify the command surface:
 
 ```sh
-maya-stall version
-maya-stall --help
+./bin/maya-stall version
+./bin/maya-stall --help
 ```
 
 ## Quick Start

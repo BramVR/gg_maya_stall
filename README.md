@@ -63,7 +63,8 @@ Crabbox binary at runtime.
 
 ```sh
 go test ./...
-go build ./cmd/maya-stall
+go build -o bin/maya-stall ./cmd/maya-stall
+./bin/maya-stall --help
 ```
 
 Create repo-only config:

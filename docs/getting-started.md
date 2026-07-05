@@ -15,14 +15,14 @@ From this repository:
 
 ```sh
 go test ./...
-go build ./cmd/maya-stall
+go build -o bin/maya-stall ./cmd/maya-stall
 ```
 
 Verify the binary:
 
 ```sh
-maya-stall version
-maya-stall --help
+./bin/maya-stall version
+./bin/maya-stall --help
 ```
 
 `doctor` needs repo config, so run it after `maya-stall init` in the next steps.

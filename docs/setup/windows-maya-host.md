@@ -105,13 +105,26 @@ Doctor layer:
 ### Session Broker
 
 - Install and configure `gg_mayasessiond` as the v1 Session Broker for the Maya Host.
+- Run `gg_mayasessiond` on the Windows Maya Host and reach it through SSH/Tailscale from Maya Stall. Do not configure Maya Stall to look for a Mac-local daemon.
 - Run the Session Broker from the interactive desktop path, not as a headless service-only Maya launcher.
 - Give it access to the work root, Maya executable, MCP or helper code it needs, and any configured state directory.
 - Keep host-specific paths in host-managed config; do not bake them into consuming repos.
+- Configure the broker as a structured host-config block:
+
+```yaml
+broker:
+  type: gg-mayasessiond
+  stateDir: C:/maya-stall/sessiond-ui
+  python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+  repo: C:/PROJECTS/GG/GG_MayaSessiond
+  mcpSource: C:/PROJECTS/GG/GG_MayaMCP
+```
+
+Maya Stall invokes `gg_maya_sessiond.cli` on the Windows host through the same SSH transport. Runs stage declared payloads under `workRoot/runs/<run-id>/`, execute a staged wrapper with `script.execute`, download declared outputs from the remote workspace, and capture screenshots with `viewport.capture`.
 
 Doctor layer:
 
-- `session-broker`: broker unreachable, unhealthy, misconfigured, or launching Maya outside the interactive desktop.
+- `session-broker`: broker unreachable, unhealthy, misconfigured, stale, missing `maya.exe`, or launching Maya in Windows Services session `0` instead of the interactive desktop.
 
 ### Visual Evidence
 

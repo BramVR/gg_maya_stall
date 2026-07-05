@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -174,14 +175,144 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 		add(statusLayer("fake-ssh", host.SSH.FakeStatus, "reachable", []string{"", "ok", "healthy", "reachable"}, "Fix SSH reachability for this Maya Host. See docs/setup/windows-maya-host.md#openssh-reachability."))
 		add(statusLayer("work-root", host.WorkRoot, "writable", []string{"", "ok", "writable"}, "Fix the host work root path or permissions. See docs/setup/windows-maya-host.md#work-root."))
 	}
-	add(statusLayer("session-broker", host.Broker, "reachable", []string{"", "ok", "healthy", "reachable"}, "Start or repair the Session Broker on this Maya Host. See docs/setup/windows-maya-host.md#session-broker."))
+	if host.Broker.isGGMayaSessiond() {
+		add(realSessionBrokerLayer(host))
+	} else {
+		add(statusLayer("session-broker", host.Broker.fakeStatus(), "reachable", []string{"", "ok", "healthy", "reachable"}, "Start or repair the Session Broker on this Maya Host. See docs/setup/windows-maya-host.md#session-broker."))
+	}
 	add(mayaVersionLayer(options, host, scenario))
 	if host.VisualEvidence != nil && !*host.VisualEvidence {
 		add(failedCheck("visual-evidence", "unavailable", "Enable screenshot or recording capture through the Session Broker. See docs/setup/windows-maya-host.md#visual-evidence."))
+	} else if host.Broker.isGGMayaSessiond() {
+		add(realSessionBrokerVisualEvidenceLayer(host))
 	} else {
 		add(okCheck("visual-evidence", "available"))
 	}
 	add(hostLockLayer(repoDir, host.ID))
+}
+
+type sessiondDoctorOutput struct {
+	OK     bool `json:"ok"`
+	Checks []struct {
+		ID string `json:"id"`
+		OK bool   `json:"ok"`
+	} `json:"checks"`
+}
+
+type sessiondStatusOutput struct {
+	State struct {
+		Status          string `json:"status"`
+		MayaAlive       bool   `json:"maya_alive"`
+		MCPAlive        bool   `json:"mcp_alive"`
+		CallServerReady bool   `json:"call_server_ready"`
+	} `json:"state"`
+	DerivedStatus string `json:"derived_status"`
+}
+
+type windowsProcessSession struct {
+	ProcessID int    `json:"ProcessId"`
+	SessionID int    `json:"SessionId"`
+	Name      string `json:"Name"`
+}
+
+func realSessionBrokerLayer(host mayaHostConfig) doctorCheck {
+	broker := ggMayaSessiondBroker{host: host}
+	if err := broker.validate(); err != nil {
+		return failedCheck("session-broker", err.Error(), "Configure gg_mayasessiond paths in host config. See docs/setup/windows-maya-host.md#session-broker.")
+	}
+	doctorRaw, err := broker.runSessiondCLI(sessiondDoctorArgs(host), sessiondCommandTimeout)
+	if err != nil {
+		return failedCheck("session-broker", err.Error(), "Start or repair gg_mayasessiond on this Maya Host. See docs/setup/windows-maya-host.md#session-broker.")
+	}
+	var doctor sessiondDoctorOutput
+	if err := json.Unmarshal(doctorRaw, &doctor); err != nil {
+		return failedCheck("session-broker", "invalid doctor JSON", "Update gg_mayasessiond or fix its CLI JSON output. See docs/setup/windows-maya-host.md#session-broker.")
+	}
+	if !doctor.OK {
+		return failedCheck("session-broker", "gg_mayasessiond doctor failed", "Repair the failing gg_mayasessiond doctor check. See docs/setup/windows-maya-host.md#session-broker.")
+	}
+	statusRaw, err := broker.runSessiondCLI([]string{"status", "--state-dir", host.Broker.StateDir, "--json"}, sessiondCommandTimeout)
+	if err != nil {
+		return failedCheck("session-broker", err.Error(), "Start or repair gg_mayasessiond on this Maya Host. See docs/setup/windows-maya-host.md#session-broker.")
+	}
+	var status sessiondStatusOutput
+	if err := json.Unmarshal(statusRaw, &status); err != nil {
+		return failedCheck("session-broker", "invalid status JSON", "Update gg_mayasessiond or fix its CLI JSON output. See docs/setup/windows-maya-host.md#session-broker.")
+	}
+	effectiveStatus := status.DerivedStatus
+	if effectiveStatus == "" {
+		effectiveStatus = status.State.Status
+	}
+	if effectiveStatus != "running" {
+		return failedCheck("session-broker", "gg_mayasessiond is not running", "Start the interactive gg_mayasessiond broker. See docs/setup/windows-maya-host.md#session-broker.")
+	}
+	if !status.State.CallServerReady {
+		return failedCheck("session-broker", "gg_mayasessiond call server is not ready", "Repair Maya MCP startup for gg_mayasessiond. See docs/setup/windows-maya-host.md#session-broker.")
+	}
+	processes, err := mayaProcessSessions(host)
+	if err != nil {
+		return failedCheck("session-broker", err.Error(), "Check Maya process state from the Windows host. See docs/setup/windows-maya-host.md#interactive-desktop.")
+	}
+	if len(processes) == 0 {
+		return failedCheck("session-broker", "maya.exe is not running", "Start gg_mayasessiond from the interactive Windows desktop. See docs/setup/windows-maya-host.md#interactive-desktop.")
+	}
+	for _, process := range processes {
+		if process.SessionID == 0 {
+			return failedCheck("session-broker", "maya.exe is running in Windows Services session 0", "Restart gg_mayasessiond from the interactive Windows desktop. See docs/setup/windows-maya-host.md#interactive-desktop.")
+		}
+	}
+	if err := broker.probeScriptExecute(); err != nil {
+		return failedCheck("session-broker", err.Error(), "Repair gg_mayasessiond script.execute access to the Maya Stall work root. See docs/setup/windows-maya-host.md#session-broker.")
+	}
+	return okCheck("session-broker", "gg_mayasessiond reachable; Maya UI is interactive")
+}
+
+func realSessionBrokerVisualEvidenceLayer(host mayaHostConfig) doctorCheck {
+	broker := ggMayaSessiondBroker{host: host}
+	result, err := broker.callCapture()
+	if err != nil {
+		return failedCheck("visual-evidence", err.Error(), "Repair viewport.capture in gg_mayasessiond. See docs/setup/windows-maya-host.md#visual-evidence.")
+	}
+	if !result.OK {
+		return failedCheck("visual-evidence", result.Error, "Repair viewport.capture in gg_mayasessiond. See docs/setup/windows-maya-host.md#visual-evidence.")
+	}
+	if _, _, err := captureImageData(result); err != nil {
+		return failedCheck("visual-evidence", err.Error(), "Repair viewport.capture in gg_mayasessiond. See docs/setup/windows-maya-host.md#visual-evidence.")
+	}
+	return okCheck("visual-evidence", "viewport.capture available")
+}
+
+func sessiondDoctorArgs(host mayaHostConfig) []string {
+	args := []string{"doctor", "--state-dir", host.Broker.StateDir}
+	if host.Broker.MCPSource != "" {
+		args = append(args, "--mcp-src", host.Broker.MCPSource)
+	}
+	args = append(args, "--json")
+	return args
+}
+
+func mayaProcessSessions(host mayaHostConfig) ([]windowsProcessSession, error) {
+	script := `Get-CimInstance Win32_Process -Filter "Name = 'maya.exe'" | Select-Object ProcessId,SessionId,Name | ConvertTo-Json -Compress`
+	raw, err := runSSHCommandOutput(host, encodedPowerShellCommand(script), sessiondCommandTimeout)
+	if err != nil {
+		return nil, err
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return nil, nil
+	}
+	if strings.HasPrefix(trimmed, "[") {
+		var processes []windowsProcessSession
+		if err := json.Unmarshal([]byte(trimmed), &processes); err != nil {
+			return nil, fmt.Errorf("parse maya.exe process JSON: %w", err)
+		}
+		return processes, nil
+	}
+	var process windowsProcessSession
+	if err := json.Unmarshal([]byte(trimmed), &process); err != nil {
+		return nil, fmt.Errorf("parse maya.exe process JSON: %w", err)
+	}
+	return []windowsProcessSession{process}, nil
 }
 
 func statusLayer(layer string, value string, okDetail string, okValues []string, hint string) doctorCheck {

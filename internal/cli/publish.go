@@ -414,6 +414,8 @@ func mediaTypeForPath(path string) string {
 		return "text/plain"
 	case ".png":
 		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
 	case ".mp4":
 		return "video/mp4"
 	default:

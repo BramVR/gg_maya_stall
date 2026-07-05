@@ -45,9 +45,6 @@ func parseVisualEvidenceArgs(args []string) (visualEvidenceOptions, error) {
 }
 
 func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptions, runtime runRuntime, kind string) (outcome runOutcome, artifact visualEvidenceArtifact, err error) {
-	if runtime.Broker == nil {
-		runtime.Broker = fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "fake Visual Evidence captured"}}
-	}
 	if runtime.Now == nil {
 		runtime.Now = time.Now
 	}
@@ -58,6 +55,9 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 	})
 	if err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
+	}
+	if runtime.Broker == nil {
+		runtime.Broker = sessionBrokerForConfig(host.Config)
 	}
 	defer func() {
 		if host.release != nil {

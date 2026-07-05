@@ -143,9 +143,6 @@ type validatorResult struct {
 }
 
 func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcome runOutcome, err error) {
-	if runtime.Broker == nil {
-		runtime.Broker = fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "fake Scenario completed"}}
-	}
 	if runtime.Now == nil {
 		runtime.Now = time.Now
 	}
@@ -171,6 +168,9 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	}
 	if runtime.Host == nil {
 		runtime.Host = runHostForConfig(host.Config)
+	}
+	if runtime.Broker == nil {
+		runtime.Broker = sessionBrokerForConfig(host.Config)
 	}
 	releaseHostLock := true
 	defer func() {
@@ -1041,7 +1041,7 @@ func discoverVisualEvidence(evidenceDir string) ([]visualEvidenceArtifact, error
 		kind      string
 		mediaType string
 	}{
-		{dir: "screenshots", kind: "screenshot", mediaType: "image/png"},
+		{dir: "screenshots", kind: "screenshot"},
 		{dir: "recordings", kind: "recording", mediaType: "video/mp4"},
 	} {
 		root := filepath.Join(evidenceDir, spec.dir)
@@ -1066,7 +1066,7 @@ func discoverVisualEvidence(evidenceDir string) ([]visualEvidenceArtifact, error
 			artifacts = append(artifacts, visualEvidenceArtifact{
 				Kind:      spec.kind,
 				Path:      filepath.ToSlash(relative),
-				MediaType: spec.mediaType,
+				MediaType: visualEvidenceMediaType(spec.mediaType, relative),
 			})
 			return nil
 		})
@@ -1075,6 +1075,13 @@ func discoverVisualEvidence(evidenceDir string) ([]visualEvidenceArtifact, error
 		}
 	}
 	return artifacts, nil
+}
+
+func visualEvidenceMediaType(defaultType string, relativePath string) string {
+	if defaultType != "" {
+		return defaultType
+	}
+	return mediaTypeForPath(relativePath)
 }
 
 func repoRelativePath(repoDir string, path string) string {

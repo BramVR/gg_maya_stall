@@ -39,14 +39,48 @@ type hostPoolConfig struct {
 }
 
 type mayaHostConfig struct {
-	ID             string    `yaml:"id"`
-	Health         string    `yaml:"health"`
-	Transport      string    `yaml:"transport"`
-	SSH            sshConfig `yaml:"ssh"`
-	WorkRoot       string    `yaml:"workRoot"`
-	Broker         string    `yaml:"broker"`
-	MayaVersions   []string  `yaml:"mayaVersions"`
-	VisualEvidence *bool     `yaml:"visualEvidence"`
+	ID             string       `yaml:"id"`
+	Health         string       `yaml:"health"`
+	Transport      string       `yaml:"transport"`
+	SSH            sshConfig    `yaml:"ssh"`
+	WorkRoot       string       `yaml:"workRoot"`
+	Broker         brokerConfig `yaml:"broker"`
+	MayaVersions   []string     `yaml:"mayaVersions"`
+	VisualEvidence *bool        `yaml:"visualEvidence"`
+}
+
+type brokerConfig struct {
+	FakeStatus string
+	Type       string `yaml:"type"`
+	StateDir   string `yaml:"stateDir"`
+	Python     string `yaml:"python"`
+	Repo       string `yaml:"repo"`
+	MCPSource  string `yaml:"mcpSource"`
+}
+
+func (config *brokerConfig) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		config.FakeStatus = value.Value
+		return nil
+	}
+	type brokerConfigAlias brokerConfig
+	var decoded brokerConfigAlias
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*config = brokerConfig(decoded)
+	return nil
+}
+
+func (config brokerConfig) isGGMayaSessiond() bool {
+	return strings.EqualFold(strings.TrimSpace(config.Type), "gg-mayasessiond")
+}
+
+func (config brokerConfig) fakeStatus() string {
+	if config.Type != "" {
+		return config.Type
+	}
+	return config.FakeStatus
 }
 
 type sshConfig struct {

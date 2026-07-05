@@ -482,8 +482,7 @@ func newUsageError(format string, args ...any) error {
 
 func defaultRunRuntime() runRuntime {
 	return runRuntime{
-		Broker: fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "fake Scenario completed"}},
-		Now:    time.Now,
+		Now: time.Now,
 	}
 }
 

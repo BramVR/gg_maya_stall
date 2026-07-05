@@ -63,7 +63,7 @@ maya-stall review-comment github --repo owner/repo --pr 123 /mnt/evidence/maya-s
 maya-stall review-comment gitlab --project group/project --merge-request 123 /mnt/evidence/maya-stall/<run-id>
 ```
 
-`maya-stall screenshot` and `maya-stall record` ask the fake Session Broker to capture a standalone screenshot or recording, then store a local Evidence Bundle under `artifacts/maya-stall/`. `maya-stall evidence collect <scenario>` runs the Scenario, captures configured Visual Evidence through the fake Session Broker, writes `evidence.json`, `manifest.json`, events, logs, Scenario Result, and visual artifacts, and prints validator failures such as missing required Visual Evidence.
+`maya-stall screenshot` and `maya-stall record` ask the selected Session Broker to capture standalone Visual Evidence, then store a local Evidence Bundle under `artifacts/maya-stall/`. `maya-stall evidence collect <scenario>` runs the Scenario, captures configured Visual Evidence through the selected Session Broker, writes `evidence.json`, `manifest.json`, events, logs, Scenario Result, and visual artifacts, and prints validator failures such as missing required Visual Evidence. The fake broker supports screenshots and recordings. The `gg_mayasessiond` broker captures screenshots through `viewport.capture`; recording reports an actionable unsupported error until the daemon exposes a recording tool.
 
 Visual Evidence recording defaults follow the selected Crabbox timing slice: normal recordings use 10 seconds at 15 fps. Other Crabbox-like timing defaults stay in the ADRs until Maya Stall needs that behavior. See `docs/adr/0024-vendor-useful-crabbox-code.md` for source attribution.
 
@@ -209,6 +209,35 @@ hostPools:
 ```
 
 With `transport: ssh`, `maya-stall doctor` runs real SSH connectivity and writable work-root checks. `maya-stall run` uploads declared Run Payload paths with `sftp` into a clean remote run workspace under `workRoot/runs/<run-id>/`, then downloads declared `expectedOutputs.scenarioResult` and `expectedOutputs.files` back into the local Evidence Bundle path. Session Broker launch remains a separate layer.
+
+To use the real v1 Session Broker, configure the Windows-hosted `gg_mayasessiond` CLI in the same user or CI host config. Maya Stall invokes the daemon CLI on the Windows Maya Host through SSH; it does not run or connect to `gg_mayasessiond` on the Mac:
+
+```yaml
+version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: maya-win-01
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          user: maya-runner
+          identityFile: ~/.ssh/maya-stall-ci
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/PROJECTS/GG/GG_MayaSessiond
+          mcpSource: C:/PROJECTS/GG/GG_MayaMCP
+        mayaVersions: ["2025"]
+        visualEvidence: true
+```
+
+With `broker.type: gg-mayasessiond`, `maya-stall run` stages declared payloads under `workRoot/runs/<run-id>/`, writes a small Scenario wrapper into the remote workspace, executes it through `gg_maya_sessiond.cli call ... script.execute file_path=<wrapper>`, downloads declared outputs, and captures screenshots through `viewport.capture`. `maya-stall doctor` runs daemon `doctor` and `status`, checks for an interactive `maya.exe`, and fails if Maya is in Windows Services session `0`.
 
 Opt-in live smoke is skipped unless the exact host config env var is set:
 

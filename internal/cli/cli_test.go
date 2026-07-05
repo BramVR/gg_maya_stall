@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -1171,6 +1172,148 @@ hostPools:
 	}
 }
 
+func TestDoctorGGMayaSessiondRejectsMayaInWindowsServicesSession(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sshLog := filepath.Join(dir, "ssh.log")
+	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
+		``,
+		``,
+		`{"ok":true,"checks":[{"id":"state_dir","ok":true}]}`,
+		`{"derived_status":"running","state":{"status":"running","call_server_ready":true,"maya_alive":true,"mcp_alive":true}}`,
+		`{"ProcessId":1234,"SessionId":0,"Name":"maya.exe"}`,
+		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/PROJECTS/GG/GG_MayaSessiond
+          mcpSource: C:/PROJECTS/GG/GG_MayaMCP
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"session-broker: fail - maya.exe is running in Windows Services session 0",
+		"hint: Restart gg_mayasessiond from the interactive Windows desktop.",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("doctor output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestDoctorGGMayaSessiondVerifiesScriptExecuteProbe(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sshLog := filepath.Join(dir, "ssh.log")
+	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
+		``,
+		``,
+		`{"ok":true,"checks":[{"id":"state_dir","ok":true}]}`,
+		`{"derived_status":"running","state":{"status":"running","call_server_ready":true,"maya_alive":true,"mcp_alive":true}}`,
+		`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
+		``,
+		`{"ok":true,"tool":"script.execute"}`,
+		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/PROJECTS/GG/GG_MayaSessiond
+          mcpSource: C:/PROJECTS/GG/GG_MayaMCP
+        visualEvidence: true
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("doctor exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "session-broker: ok - gg_mayasessiond reachable; Maya UI is interactive") {
+		t.Fatalf("doctor output missing broker ok:\n%s", stdout.String())
+	}
+	logBytes, err := os.ReadFile(sshLog)
+	if err != nil {
+		t.Fatalf("read ssh log: %v", err)
+	}
+	if !strings.Contains(string(logBytes), "maya-win-01") {
+		t.Fatalf("ssh log missing host target:\n%s", string(logBytes))
+	}
+}
+
+func TestDoctorGGMayaSessiondRejectsStaleDerivedStatus(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		``,
+		``,
+		`{"ok":true,"checks":[{"id":"state_dir","ok":true}]}`,
+		`{"derived_status":"stale","state":{"status":"running","call_server_ready":true,"maya_alive":true,"mcp_alive":true}}`,
+		`[]`,
+		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/PROJECTS/GG/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "session-broker: fail - gg_mayasessiond is not running") {
+		t.Fatalf("doctor did not reject stale derived status:\n%s", stdout.String())
+	}
+}
+
 func TestDoctorScenarioValidatesInputsAndMayaVersion(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	hostConfigPath := writeLayeredHostConfig(t, dir)
@@ -1490,6 +1633,128 @@ hostPools:
 	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
 	if _, err := os.Stat(filepath.Join(evidence, "outputs", "report.json")); err != nil {
 		t.Fatalf("expected downloaded output in Evidence Bundle: %v", err)
+	}
+}
+
+func TestRunScenarioGGMayaSessiondBrokerExecutesRemoteScenarioAndCapturesScreenshot(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	configPath := filepath.Join(dir, ".maya-stall.yaml")
+	contentBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config fixture: %v", err)
+	}
+	content := strings.Replace(string(contentBytes), "screenshots:\n        enabled: false", "screenshots:\n        enabled: true", 1)
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config fixture: %v", err)
+	}
+	sftpLog := filepath.Join(dir, "sftp.log")
+	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
+	sshLog := filepath.Join(dir, "ssh.log")
+	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
+		``,
+		`{"ok":true,"tool":"script.execute"}`,
+		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}],"output":{"mime_type":"image/jpeg"}}`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/PROJECTS/GG/GG_MayaSessiond
+          mcpSource: C:/PROJECTS/GG/GG_MayaMCP
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "host: alpha") || !strings.Contains(stdout.String(), "status: passed") {
+		t.Fatalf("run output missing selected real broker host/pass status:\n%s", stdout.String())
+	}
+	sshBytes, err := os.ReadFile(sshLog)
+	if err != nil {
+		t.Fatalf("read ssh log: %v", err)
+	}
+	sshLogContent := string(sshBytes)
+	for _, want := range []string{"powershell", "maya-win-01"} {
+		if !strings.Contains(sshLogContent, want) {
+			t.Fatalf("ssh log missing %q:\n%s", want, sshLogContent)
+		}
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	screenshotPath := filepath.Join(evidence, "screenshots", "smoke.jpg")
+	screenshotBytes, err := os.ReadFile(screenshotPath)
+	if err != nil {
+		t.Fatalf("read sessiond screenshot: %v", err)
+	}
+	if string(screenshotBytes) != "jpeg proof" {
+		t.Fatalf("sessiond screenshot bytes = %q, want jpeg proof", string(screenshotBytes))
+	}
+	bundle := readEvidenceBundle(t, evidence)
+	if len(bundle.VisualEvidence) != 1 || bundle.VisualEvidence[0].MediaType != "image/jpeg" {
+		t.Fatalf("sessiond screenshot metadata = %+v, want image/jpeg", bundle.VisualEvidence)
+	}
+}
+
+func TestGGMayaSessiondScenarioWrapperPreservesFailingScenarioResult(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	broker := ggMayaSessiondBroker{host: mayaHostConfig{
+		WorkRoot: "C:/maya-stall",
+		Broker: brokerConfig{
+			Type:     "gg-mayasessiond",
+			StateDir: "C:/maya-stall/sessiond-ui",
+			Python:   "C:/maya-stall/sessiond-venv311/Scripts/python.exe",
+			Repo:     "C:/PROJECTS/GG/GG_MayaSessiond",
+		},
+	}}
+	config, _, err := loadRepoRunConfig(dir)
+	if err != nil {
+		t.Fatalf("load fixture config: %v", err)
+	}
+	wrapper, err := broker.scenarioWrapper(runContext{}, config.Scenarios["smoke"], "C:/maya-stall/runs/run-1", "C:/maya-stall/runs/run-1/workspace")
+	if err != nil {
+		t.Fatalf("build wrapper: %v", err)
+	}
+	for _, want := range []string{
+		"_maya_stall_write_result('failed', str(exc), traceback.format_exc())",
+		"except SystemExit as exc:",
+		"_maya_stall_write_result('failed', 'Scenario exited with code %s' % code)",
+		"run_name='__main__'",
+	} {
+		if !strings.Contains(wrapper, want) {
+			t.Fatalf("wrapper missing failure result field %q:\n%s", want, wrapper)
+		}
+	}
+	if strings.Contains(wrapper, "\n    raise\n") {
+		t.Fatalf("wrapper re-raises after writing failed Scenario Result:\n%s", wrapper)
+	}
+}
+
+func TestGGMayaSessiondScenarioWrapperRejectsBackslashScenarioResultPath(t *testing.T) {
+	broker := ggMayaSessiondBroker{}
+	scenario := scenarioConfig{ExpectedOutputs: expectedOutputs{ScenarioResult: `..\..\Users\maya-runner\result.json`}}
+
+	_, err := broker.scenarioWrapper(runContext{}, scenario, "C:/maya-stall/runs/run-1", "C:/maya-stall/runs/run-1/workspace")
+	if err == nil {
+		t.Fatal("scenarioWrapper returned nil error for backslash Scenario Result path")
+	}
+	if !strings.Contains(err.Error(), "forward slashes") {
+		t.Fatalf("backslash Scenario Result error = %v", err)
 	}
 }
 
@@ -3203,6 +3468,36 @@ func writeFakeCommand(t *testing.T, dir string, name string, logPath string, exi
 	content := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$0 $*\" >> %s\nexit %d\n", shellQuote(logPath), exitCode)
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("write fake command: %v", err)
+	}
+	return path
+}
+
+func writeSequencedFakeSSHCommand(t *testing.T, dir string, logPath string, outputs []string) string {
+	t.Helper()
+	path := filepath.Join(dir, "fake-ssh-sequenced")
+	countPath := filepath.Join(dir, "fake-ssh-sequenced.count")
+	var cases strings.Builder
+	for index, output := range outputs {
+		if output == "" {
+			continue
+		}
+		fmt.Fprintf(&cases, "%d) cat <<'JSON'\n%s\nJSON\n;;\n", index+1, output)
+	}
+	content := fmt.Sprintf(`#!/bin/sh
+count=0
+if [ -f %[1]s ]; then
+  count=$(cat %[1]s)
+fi
+count=$((count + 1))
+printf '%%s\n' "$count" > %[1]s
+printf 'CALL %%s %%s\n' "$count" "$*" >> %[2]s
+case "$count" in
+%[3]s
+esac
+exit 0
+`, shellQuote(countPath), shellQuote(logPath), cases.String())
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write sequenced fake ssh command: %v", err)
 	}
 	return path
 }

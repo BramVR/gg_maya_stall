@@ -497,6 +497,9 @@ func buildManifestPayload(payload runPayload) ([]manifestPayload, error) {
 }
 
 func cleanRepoRelativePath(path string) (string, error) {
+	if strings.Contains(path, `\`) {
+		return "", fmt.Errorf("repo path %q must use forward slashes, not backslashes", path)
+	}
 	clean := filepath.Clean(path)
 	if clean == "." || filepath.IsAbs(clean) || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || clean == ".." {
 		return "", fmt.Errorf("repo path %q must be repo-relative", path)

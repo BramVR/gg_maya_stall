@@ -257,11 +257,11 @@ func remotePayloadScripts(remoteRunRoot string, payload runPayload) ([]string, e
 	paths = append(paths, payload.Scripts...)
 	remote := make([]string, 0, len(paths))
 	for _, source := range paths {
-		clean, err := cleanRepoRelativePath(source)
+		remotePath, err := windowsRemoteRepoPath(remoteJoin(remoteRunRoot, "payload", "mayaScripts"), source)
 		if err != nil {
 			return nil, err
 		}
-		remote = append(remote, remoteJoin(remoteRunRoot, "payload", "mayaScripts", clean))
+		remote = append(remote, remotePath)
 	}
 	return remote, nil
 }
@@ -269,11 +269,11 @@ func remotePayloadScripts(remoteRunRoot string, payload runPayload) ([]string, e
 func remotePayloadIncludePaths(remoteRunRoot string, payload runPayload) ([]string, error) {
 	remote := make([]string, 0, len(payload.IncludePaths))
 	for _, source := range payload.IncludePaths {
-		clean, err := cleanRepoRelativePath(source)
+		remotePath, err := windowsRemoteRepoPath(remoteJoin(remoteRunRoot, "payload", "includePaths"), source)
 		if err != nil {
 			return nil, err
 		}
-		remote = append(remote, remoteJoin(remoteRunRoot, "payload", "includePaths", clean))
+		remote = append(remote, remotePath)
 	}
 	return remote, nil
 }

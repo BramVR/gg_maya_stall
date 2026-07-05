@@ -182,6 +182,7 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 	if host.Broker.missingStructuredType() || strings.TrimSpace(host.Broker.Type) != "" {
 		brokerLayerInvalidReason = brokerInvalidReason
 	}
+	sessionBrokerOK := false
 	probeLockDetail := ""
 	if host.Broker.isGGMayaSessiond() && lockCheck.Status == "ok" {
 		release, locked, err := acquireHostLock(repoDir, host.ID)
@@ -199,15 +200,18 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 	}
 	if host.Broker.isGGMayaSessiond() {
 		broker := ggMayaSessiondBroker{host: host}
+		var check doctorCheck
 		if err := broker.validate(); err != nil {
-			add(failedCheck("session-broker", err.Error(), "Configure gg_mayasessiond paths in host config. See docs/setup/windows-maya-host.md#session-broker."))
+			check = failedCheck("session-broker", err.Error(), "Configure gg_mayasessiond paths in host config. See docs/setup/windows-maya-host.md#session-broker.")
 		} else if probeLockDetail != "" {
-			add(failedCheck("session-broker", "skipped because Host Lock is not clear: "+probeLockDetail, "Wait for the active Fresh Run or clear the stale Host Lock before probing gg_mayasessiond. See docs/setup/windows-maya-host.md#host-lock-and-retention."))
+			check = failedCheck("session-broker", "skipped because Host Lock is not clear: "+probeLockDetail, "Wait for the active Fresh Run or clear the stale Host Lock before probing gg_mayasessiond. See docs/setup/windows-maya-host.md#host-lock-and-retention.")
 		} else if lockCheck.Status == "ok" {
-			add(realSessionBrokerLayer(host))
+			check = realSessionBrokerLayer(host)
 		} else {
-			add(failedCheck("session-broker", "skipped because Host Lock is not clear", "Wait for the active Fresh Run or clear the stale Host Lock before probing gg_mayasessiond. See docs/setup/windows-maya-host.md#host-lock-and-retention."))
+			check = failedCheck("session-broker", "skipped because Host Lock is not clear", "Wait for the active Fresh Run or clear the stale Host Lock before probing gg_mayasessiond. See docs/setup/windows-maya-host.md#host-lock-and-retention.")
 		}
+		sessionBrokerOK = check.Status == "ok"
+		add(check)
 	} else if brokerLayerInvalidReason != "" {
 		add(failedCheck("session-broker", brokerLayerInvalidReason, "Use broker.type: gg-mayasessiond or a legacy fake broker status. See docs/setup/windows-maya-host.md#session-broker."))
 	} else {
@@ -226,6 +230,10 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 			add(failedCheck("visual-evidence", "unavailable: "+err.Error(), "Configure gg_mayasessiond paths before checking screenshot capture. See docs/setup/windows-maya-host.md#visual-evidence."))
 		} else if probeLockDetail != "" {
 			add(failedCheck("visual-evidence", "skipped because Host Lock is not clear: "+probeLockDetail, "Wait for the active Fresh Run or clear the stale Host Lock before probing viewport.capture. See docs/setup/windows-maya-host.md#host-lock-and-retention."))
+		} else if lockCheck.Status != "ok" {
+			add(failedCheck("visual-evidence", "skipped because Host Lock is not clear", "Wait for the active Fresh Run or clear the stale Host Lock before probing viewport.capture. See docs/setup/windows-maya-host.md#host-lock-and-retention."))
+		} else if !sessionBrokerOK {
+			add(failedCheck("visual-evidence", "skipped because session-broker is not healthy", "Repair the gg_mayasessiond session-broker layer before probing viewport.capture. See docs/setup/windows-maya-host.md#visual-evidence."))
 		} else if lockCheck.Status == "ok" {
 			add(realSessionBrokerVisualEvidenceLayer(host))
 		} else {

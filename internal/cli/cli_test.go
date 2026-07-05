@@ -1213,10 +1213,18 @@ hostPools:
 	for _, want := range []string{
 		"session-broker: fail - maya.exe is running in Windows Services session 0",
 		"hint: Restart gg_mayasessiond from the interactive Windows desktop.",
+		"visual-evidence: fail - skipped because session-broker is not healthy",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("doctor output missing %q:\n%s", want, stdout.String())
 		}
+	}
+	logBytes, err := os.ReadFile(sshLog)
+	if err != nil {
+		t.Fatalf("read ssh log: %v", err)
+	}
+	if got := strings.Count(string(logBytes), "CALL "); got != 5 {
+		t.Fatalf("doctor should not probe viewport.capture after session-broker failure, got %d SSH calls:\n%s", got, string(logBytes))
 	}
 }
 
@@ -2344,6 +2352,28 @@ func TestGGMayaSessiondScenarioWrapperRejectsBackslashScenarioResultPath(t *test
 	}
 	if !strings.Contains(err.Error(), "forward slashes") {
 		t.Fatalf("backslash Scenario Result error = %v", err)
+	}
+}
+
+func TestGGMayaSessiondScenarioWrapperRejectsBackslashPayloadPaths(t *testing.T) {
+	broker := ggMayaSessiondBroker{}
+	for _, scenario := range []scenarioConfig{
+		{
+			Payload:         runPayload{Scripts: []string{`maya\..\..\evil.py`}},
+			ExpectedOutputs: expectedOutputs{ScenarioResult: "outputs/result.json"},
+		},
+		{
+			Payload:         runPayload{IncludePaths: []string{`includes\..\..\evil`}},
+			ExpectedOutputs: expectedOutputs{ScenarioResult: "outputs/result.json"},
+		},
+	} {
+		_, err := broker.scenarioWrapper(runContext{}, scenario, "C:/maya-stall/runs/run-1", "C:/maya-stall/runs/run-1/workspace")
+		if err == nil {
+			t.Fatal("scenarioWrapper returned nil error for backslash payload path")
+		}
+		if !strings.Contains(err.Error(), "forward slashes") {
+			t.Fatalf("backslash payload path error = %v, want forward slashes", err)
+		}
 	}
 }
 
@@ -3674,6 +3704,16 @@ func TestPayloadPathValidationRejectsReservedPathCaseVariants(t *testing.T) {
 				t.Fatalf("reserved path error = %q", err.Error())
 			}
 		})
+	}
+}
+
+func TestPayloadPathValidationRejectsBackslashesBeforeStaging(t *testing.T) {
+	_, err := cleanRepoRelativePath(`maya\..\..\evil.py`)
+	if err == nil {
+		t.Fatal("cleanRepoRelativePath returned nil error for backslash path")
+	}
+	if !strings.Contains(err.Error(), "forward slashes") {
+		t.Fatalf("backslash path error = %q", err.Error())
 	}
 }
 

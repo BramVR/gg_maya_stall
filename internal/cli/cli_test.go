@@ -2531,6 +2531,41 @@ func TestTrimToJSONSkipsBracketedLogNoise(t *testing.T) {
 	}
 }
 
+func TestTrimToJSONSkipsStructuredJSONLogNoise(t *testing.T) {
+	got := trimToJSON([]byte("{\"level\":\"info\",\"msg\":\"connecting\"}\n{\"ok\":true,\"tool\":\"status\"}\n"))
+	if string(got) != `{"ok":true,"tool":"status"}` {
+		t.Fatalf("trimToJSON = %q, want sessiond JSON after structured log noise", string(got))
+	}
+}
+
+func TestTrimToJSONSkipsNestedStructuredJSONLogNoise(t *testing.T) {
+	got := trimToJSON([]byte("{\"level\":\"info\",\"payload\":{\"ok\":true}}\n{\"ok\":false,\"error\":\"tool failed\"}\n"))
+	if string(got) != `{"ok":false,"error":"tool failed"}` {
+		t.Fatalf("trimToJSON = %q, want sessiond JSON after nested structured log noise", string(got))
+	}
+}
+
+func TestTrimToJSONSkipsStructuredLogWithResultLikeKeys(t *testing.T) {
+	got := trimToJSON([]byte("{\"level\":\"info\",\"state\":\"connecting\",\"ok\":\"soon\"}\n{\"ok\":false,\"error\":\"tool failed\"}\n"))
+	if string(got) != `{"ok":false,"error":"tool failed"}` {
+		t.Fatalf("trimToJSON = %q, want sessiond JSON after result-like structured log", string(got))
+	}
+}
+
+func TestTrimToJSONSkipsStructuredLogWithBooleanOK(t *testing.T) {
+	got := trimToJSON([]byte("{\"level\":\"info\",\"ok\":true,\"msg\":\"connected\"}\n{\"ok\":true,\"tool\":\"status\"}\n"))
+	if string(got) != `{"ok":true,"tool":"status"}` {
+		t.Fatalf("trimToJSON = %q, want sessiond JSON after boolean ok structured log", string(got))
+	}
+}
+
+func TestTrimToJSONSkipsStructuredLogWithObjectState(t *testing.T) {
+	got := trimToJSON([]byte("{\"level\":\"info\",\"msg\":\"connecting\",\"state\":{\"phase\":\"startup\"}}\n{\"derived_status\":\"running\",\"state\":{\"status\":\"running\"}}\n"))
+	if string(got) != `{"derived_status":"running","state":{"status":"running"}}` {
+		t.Fatalf("trimToJSON = %q, want sessiond status JSON after object state structured log", string(got))
+	}
+}
+
 func TestTrimToJSONPreservesArrayDocuments(t *testing.T) {
 	got := trimToJSON([]byte(`[{"ok":true,"tool":"status"}]`))
 	if string(got) != `[{"ok":true,"tool":"status"}]` {
@@ -2542,6 +2577,16 @@ func TestSessiondJSONFromFailedOutputSkipsBracketedLogNoise(t *testing.T) {
 	got, ok := sessiondJSONFromFailedOutput([]byte("[ERROR] loading {state}\n{\"ok\":false,\"error\":\"tool failed\"}\n"))
 	if !ok {
 		t.Fatal("sessiondJSONFromFailedOutput rejected JSON after bracketed log noise")
+	}
+	if !strings.Contains(string(got), `"ok":false`) {
+		t.Fatalf("sessiond JSON = %s", string(got))
+	}
+}
+
+func TestSessiondJSONFromFailedOutputSkipsStructuredJSONLogNoise(t *testing.T) {
+	got, ok := sessiondJSONFromFailedOutput([]byte("{\"level\":\"error\",\"msg\":\"tool failed\"}\n{\"ok\":false,\"error\":\"tool failed\"}\n"))
+	if !ok {
+		t.Fatal("sessiondJSONFromFailedOutput rejected sessiond JSON after structured log noise")
 	}
 	if !strings.Contains(string(got), `"ok":false`) {
 		t.Fatalf("sessiond JSON = %s", string(got))

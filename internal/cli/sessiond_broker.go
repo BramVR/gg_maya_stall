@@ -459,20 +459,69 @@ func pythonStringList(values []string) string {
 
 func trimToJSON(raw []byte) []byte {
 	trimmed := bytes.TrimSpace(raw)
+	var firstDocument json.RawMessage
 	for start := bytes.IndexAny(trimmed, "{["); start >= 0; {
 		jsonOutput := trimmed[start:]
 		var document json.RawMessage
 		decoder := json.NewDecoder(bytes.NewReader(jsonOutput))
+		advance := 1
 		if err := decoder.Decode(&document); err == nil {
-			return bytes.TrimSpace(document)
+			if offset := int(decoder.InputOffset()); offset > 0 {
+				advance = offset
+			}
+			document = bytes.TrimSpace(document)
+			if firstDocument == nil {
+				firstDocument = append(json.RawMessage(nil), document...)
+			}
+			if isSessiondJSONDocument(document) {
+				return document
+			}
+			if len(document) > 0 && document[0] == '[' {
+				return document
+			}
 		}
-		next := bytes.IndexAny(trimmed[start+1:], "{[")
+		next := bytes.IndexAny(trimmed[start+advance:], "{[")
 		if next < 0 {
 			break
 		}
-		start += next + 1
+		start += advance + next
+	}
+	if firstDocument != nil {
+		return firstDocument
 	}
 	return trimmed
+}
+
+func isSessiondJSONDocument(document []byte) bool {
+	if len(document) == 0 || document[0] != '{' {
+		return false
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(document, &object); err != nil {
+		return false
+	}
+	if raw, ok := object["ok"]; ok {
+		var okValue bool
+		if err := json.Unmarshal(raw, &okValue); err == nil && !hasAnyJSONKey(object, "level", "msg") {
+			return hasAnyJSONKey(object, "tool", "checks", "content", "output", "error")
+		}
+	}
+	if raw, ok := object["state"]; ok && !hasAnyJSONKey(object, "level", "msg") {
+		var state map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &state); err == nil {
+			return hasAnyJSONKey(state, "status")
+		}
+	}
+	return false
+}
+
+func hasAnyJSONKey(object map[string]json.RawMessage, keys ...string) bool {
+	for _, key := range keys {
+		if _, ok := object[key]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func sessiondJSONFromFailedOutput(raw []byte) ([]byte, bool) {

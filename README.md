@@ -245,6 +245,14 @@ Opt-in live smoke is skipped unless the exact host config env var is set:
 MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml go test ./internal/cli -run TestOptInRealSSHDoctorSmoke -count=1
 ```
 
+To run the full live smoke, use:
+
+```sh
+MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run)Smoke' -count=1
+```
+
+`TestOptInRealSSHRunSmoke` first runs `doctor --scenario smoke`, then runs one generated `smoke` Scenario through the configured `gg_mayasessiond` Session Broker, requires screenshot Visual Evidence, and asserts that the local Evidence Bundle contains `evidence.json`, logs, events, Scenario Result, and the captured screenshot. The test fails if `maya.exe` is not in the interactive Windows desktop session because the doctor session-broker layer rejects Services session `0`.
+
 Optional smoke env vars:
 
 - `MAYA_STALL_SMOKE_TARGET_PROFILE`: Target Profile; default `default`.

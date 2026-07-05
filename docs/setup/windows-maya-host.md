@@ -203,6 +203,14 @@ Default tests never require SSH secrets or a real Windows host. To smoke the rea
 MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml go test ./internal/cli -run TestOptInRealSSHDoctorSmoke -count=1
 ```
 
+To run the full live smoke, use:
+
+```sh
+MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run)Smoke' -count=1
+```
+
+`TestOptInRealSSHRunSmoke` first runs `doctor --scenario smoke`, then runs one generated `smoke` Scenario through the configured `gg_mayasessiond` Session Broker, requires screenshot Visual Evidence, and checks that the local Evidence Bundle contains `evidence.json`, events, logs, Scenario Result, and the captured screenshot. Recording is not required for this smoke while `gg_mayasessiond` exposes screenshot capture but not recording capture.
+
 Optional:
 
 - `MAYA_STALL_SMOKE_TARGET_PROFILE`: Target Profile; default `default`.

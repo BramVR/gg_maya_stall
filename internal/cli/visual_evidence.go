@@ -45,9 +45,6 @@ func parseVisualEvidenceArgs(args []string) (visualEvidenceOptions, error) {
 }
 
 func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptions, runtime runRuntime, kind string) (outcome runOutcome, artifact visualEvidenceArtifact, err error) {
-	if runtime.Broker == nil {
-		runtime.Broker = fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "fake Visual Evidence captured"}}
-	}
 	if runtime.Now == nil {
 		runtime.Now = time.Now
 	}
@@ -58,6 +55,9 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 	})
 	if err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
+	}
+	if runtime.Broker == nil {
+		runtime.Broker = sessionBrokerForConfig(host.Config)
 	}
 	defer func() {
 		if host.release != nil {
@@ -82,9 +82,13 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}
 	cleanupState := true
+	cleanupEvidence := true
 	defer func() {
 		if cleanupState {
 			_ = cleanupRunState(repoDir, runID)
+			if err != nil && cleanupEvidence {
+				_ = os.RemoveAll(evidenceDir)
+			}
 		}
 	}()
 
@@ -103,7 +107,8 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 	if err := appendEvent(context.EventsPath, "visual-evidence.started", kind); err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}
-	if err := os.WriteFile(context.LogPath, []byte("fake Session Broker captured Visual Evidence\n"), 0o644); err != nil {
+	brokerName := sessionBrokerDisplayName(runtime.Broker)
+	if err := os.WriteFile(context.LogPath, []byte(brokerName+" captured Visual Evidence\n"), 0o644); err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}
 
@@ -126,16 +131,17 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 	if err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}
-	result := ScenarioResult{Status: resultStatusPassed, Summary: "fake Visual Evidence captured"}
+	result := ScenarioResult{Status: resultStatusPassed, Summary: brokerName + " Visual Evidence captured"}
 	if err := writeJSONFile(filepath.Join(evidenceDir, "scenario-result.json"), result); err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}
 	if err := appendEvent(context.EventsPath, "visual-evidence.completed", artifact.Path); err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}
-	if err := writeEvidenceBundle(context, manifest, scenarioConfig{}, result, nil); err != nil {
+	if err := writeEvidenceBundle(context, manifest, scenarioConfig{}, result, []visualEvidenceArtifact{artifact}, nil); err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}
+	cleanupEvidence = false
 	if err := cleanupRunState(repoDir, runID); err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}

@@ -310,10 +310,10 @@ Commands:
   evidence collect   run a Scenario and write a complete Evidence Bundle
   evidence publish   copy an Evidence Bundle to a filesystem Evidence Store
   init      write a repo-only sample .maya-stall.yaml
-  record    capture a fake Session Broker recording artifact
+  record    capture a Session Broker recording artifact
   review-comment   create or update a GitHub PR or GitLab MR Review Comment
   run       run a named Scenario with fake or configured SSH transport
-  screenshot   capture a fake Session Broker screenshot artifact
+  screenshot   capture a Session Broker screenshot artifact
   status   show kept run state
   stop     stop a kept run and release its Host Lock
   version   print the maya-stall version
@@ -482,8 +482,7 @@ func newUsageError(format string, args ...any) error {
 
 func defaultRunRuntime() runRuntime {
 	return runRuntime{
-		Broker: fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "fake Scenario completed"}},
-		Now:    time.Now,
+		Now: time.Now,
 	}
 }
 

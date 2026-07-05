@@ -143,9 +143,6 @@ type validatorResult struct {
 }
 
 func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcome runOutcome, err error) {
-	if runtime.Broker == nil {
-		runtime.Broker = fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "fake Scenario completed"}}
-	}
 	if runtime.Now == nil {
 		runtime.Now = time.Now
 	}
@@ -172,6 +169,9 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	if runtime.Host == nil {
 		runtime.Host = runHostForConfig(host.Config)
 	}
+	if runtime.Broker == nil {
+		runtime.Broker = sessionBrokerForConfig(host.Config)
+	}
 	releaseHostLock := true
 	defer func() {
 		if releaseHostLock {
@@ -180,6 +180,12 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 			}
 		}
 	}()
+	if err := rejectInvalidSessionBroker(runtime.Broker); err != nil {
+		return runOutcome{}, err
+	}
+	if err := rejectUnsupportedEvidenceConfig(runtime.Broker, scenario); err != nil {
+		return runOutcome{}, err
+	}
 	defer func() {
 		if err == nil && outcome.StopPolicy == "stopped" {
 			if cleanupErr := cleanupRunState(repoDir, outcome.RunID); cleanupErr != nil {
@@ -267,7 +273,8 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	if result.Status == "" {
 		result.Status = resultStatusPassed
 	}
-	if err := collectScenarioVisualEvidence(runtime.Broker, context, options.ScenarioName, scenario.Evidence); err != nil {
+	visualEvidence, err := collectScenarioVisualEvidence(runtime.Broker, context, options.ScenarioName, scenario.Evidence)
+	if err != nil {
 		return runOutcome{}, err
 	}
 	resultDocument.setResult(result)
@@ -298,7 +305,7 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	if err := appendEvent(context.EventsPath, "run.completed", result.Status); err != nil {
 		return runOutcome{}, err
 	}
-	if err := writeEvidenceBundle(context, manifest, scenario, result, validatorResults); err != nil {
+	if err := writeEvidenceBundle(context, manifest, scenario, result, visualEvidence, validatorResults); err != nil {
 		return runOutcome{}, err
 	}
 	if stopPolicy == "kept" {
@@ -322,26 +329,50 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	}, nil
 }
 
-func collectScenarioVisualEvidence(broker sessionBroker, context runContext, scenarioName string, config evidenceConfig) error {
+func rejectUnsupportedEvidenceConfig(broker sessionBroker, scenario scenarioConfig) error {
+	if scenario.Evidence.Recording.Enabled {
+		if _, ok := broker.(ggMayaSessiondBroker); ok {
+			return fmt.Errorf("gg_mayasessiond does not expose recording capture; disable recording evidence or use screenshot/viewport capture")
+		}
+	}
+	return nil
+}
+
+func rejectInvalidSessionBroker(broker sessionBroker) error {
+	switch broker := broker.(type) {
+	case invalidSessionBroker:
+		return broker.err
+	case ggMayaSessiondBroker:
+		return broker.validate()
+	}
+	return nil
+}
+
+func collectScenarioVisualEvidence(broker sessionBroker, context runContext, scenarioName string, config evidenceConfig) ([]visualEvidenceArtifact, error) {
+	var artifacts []visualEvidenceArtifact
 	if config.Screenshots.Enabled {
 		capturer, ok := broker.(screenshotCapturer)
 		if !ok {
-			return fmt.Errorf("Session Broker does not support screenshot capture")
+			return nil, fmt.Errorf("Session Broker does not support screenshot capture")
 		}
-		if _, err := capturer.CaptureScreenshot(context, screenshotRequest{Name: visualEvidenceFileName(scenarioName, ".png")}); err != nil {
-			return err
+		artifact, err := capturer.CaptureScreenshot(context, screenshotRequest{Name: visualEvidenceFileName(scenarioName, ".png")})
+		if err != nil {
+			return nil, err
 		}
+		artifacts = append(artifacts, artifact)
 	}
 	if config.Recording.Enabled {
 		capturer, ok := broker.(recordingCapturer)
 		if !ok {
-			return fmt.Errorf("Session Broker does not support recording capture")
+			return nil, fmt.Errorf("Session Broker does not support recording capture")
 		}
-		if _, err := capturer.CaptureRecording(context, recordingRequest{Name: visualEvidenceFileName(scenarioName, ".mp4"), Duration: defaultRecordingDuration, FPS: defaultRecordingFPS}); err != nil {
-			return err
+		artifact, err := capturer.CaptureRecording(context, recordingRequest{Name: visualEvidenceFileName(scenarioName, ".mp4"), Duration: defaultRecordingDuration, FPS: defaultRecordingFPS})
+		if err != nil {
+			return nil, err
 		}
+		artifacts = append(artifacts, artifact)
 	}
-	return nil
+	return artifacts, nil
 }
 
 func visualEvidenceFileName(name string, extension string) string {
@@ -469,6 +500,9 @@ func buildManifestPayload(payload runPayload) ([]manifestPayload, error) {
 }
 
 func cleanRepoRelativePath(path string) (string, error) {
+	if strings.Contains(path, `\`) {
+		return "", fmt.Errorf("repo path %q must use forward slashes, not backslashes", path)
+	}
 	clean := filepath.Clean(path)
 	if clean == "." || filepath.IsAbs(clean) || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || clean == ".." {
 		return "", fmt.Errorf("repo path %q must be repo-relative", path)
@@ -868,7 +902,7 @@ func hasValidatorFailure(results []validatorResult) bool {
 	return false
 }
 
-func writeEvidenceBundle(context runContext, manifest runManifest, scenario scenarioConfig, result ScenarioResult, validators []validatorResult) error {
+func writeEvidenceBundle(context runContext, manifest runManifest, scenario scenarioConfig, result ScenarioResult, capturedVisualEvidence []visualEvidenceArtifact, validators []validatorResult) error {
 	outputs, err := copyEvidenceOutputs(context, scenario)
 	if err != nil {
 		return err
@@ -886,6 +920,7 @@ func writeEvidenceBundle(context runContext, manifest runManifest, scenario scen
 	if err != nil {
 		return err
 	}
+	visualEvidence = mergeVisualEvidence(capturedVisualEvidence, visualEvidence)
 	bundle := evidenceBundle{
 		RunID:          manifest.RunID,
 		Scenario:       manifest.Scenario,
@@ -902,6 +937,29 @@ func writeEvidenceBundle(context runContext, manifest runManifest, scenario scen
 		Validators:     validators,
 	}
 	return writeJSONFile(filepath.Join(context.EvidenceDir, "evidence.json"), bundle)
+}
+
+func mergeVisualEvidence(preferred []visualEvidenceArtifact, discovered []visualEvidenceArtifact) []visualEvidenceArtifact {
+	seen := make(map[string]bool)
+	artifacts := make([]visualEvidenceArtifact, 0, len(preferred)+len(discovered))
+	add := func(artifact visualEvidenceArtifact) {
+		artifact.Path = filepath.ToSlash(artifact.Path)
+		if artifact.Path == "" || seen[artifact.Path] {
+			return
+		}
+		seen[artifact.Path] = true
+		artifacts = append(artifacts, artifact)
+	}
+	for _, artifact := range preferred {
+		add(artifact)
+	}
+	for _, artifact := range discovered {
+		add(artifact)
+	}
+	sort.Slice(artifacts, func(i, j int) bool {
+		return artifacts[i].Path < artifacts[j].Path
+	})
+	return artifacts
 }
 
 func copyEvidenceOutputs(context runContext, scenario scenarioConfig) ([]outputArtifact, error) {
@@ -1041,7 +1099,7 @@ func discoverVisualEvidence(evidenceDir string) ([]visualEvidenceArtifact, error
 		kind      string
 		mediaType string
 	}{
-		{dir: "screenshots", kind: "screenshot", mediaType: "image/png"},
+		{dir: "screenshots", kind: "screenshot"},
 		{dir: "recordings", kind: "recording", mediaType: "video/mp4"},
 	} {
 		root := filepath.Join(evidenceDir, spec.dir)
@@ -1066,7 +1124,7 @@ func discoverVisualEvidence(evidenceDir string) ([]visualEvidenceArtifact, error
 			artifacts = append(artifacts, visualEvidenceArtifact{
 				Kind:      spec.kind,
 				Path:      filepath.ToSlash(relative),
-				MediaType: spec.mediaType,
+				MediaType: visualEvidenceMediaType(spec.mediaType, relative),
 			})
 			return nil
 		})
@@ -1075,6 +1133,13 @@ func discoverVisualEvidence(evidenceDir string) ([]visualEvidenceArtifact, error
 		}
 	}
 	return artifacts, nil
+}
+
+func visualEvidenceMediaType(defaultType string, relativePath string) string {
+	if defaultType != "" {
+		return defaultType
+	}
+	return mediaTypeForPath(relativePath)
 }
 
 func repoRelativePath(repoDir string, path string) string {
@@ -1224,6 +1289,31 @@ func (fakeSessionBroker) CaptureRecording(context runContext, request recordingR
 		return visualEvidenceArtifact{}, err
 	}
 	return visualEvidenceArtifact{Kind: "recording", Path: filepath.ToSlash(relative), MediaType: "video/mp4"}, nil
+}
+
+type invalidSessionBroker struct {
+	err error
+}
+
+func (broker invalidSessionBroker) RunScenario(runContext, scenarioConfig) (ScenarioResult, error) {
+	return ScenarioResult{}, broker.err
+}
+
+func (broker invalidSessionBroker) CaptureScreenshot(runContext, screenshotRequest) (visualEvidenceArtifact, error) {
+	return visualEvidenceArtifact{}, broker.err
+}
+
+func (broker invalidSessionBroker) CaptureRecording(runContext, recordingRequest) (visualEvidenceArtifact, error) {
+	return visualEvidenceArtifact{}, broker.err
+}
+
+func sessionBrokerDisplayName(broker sessionBroker) string {
+	switch broker.(type) {
+	case ggMayaSessiondBroker:
+		return "gg_mayasessiond Session Broker"
+	default:
+		return "fake Session Broker"
+	}
 }
 
 func copyPath(source string, destination string) error {

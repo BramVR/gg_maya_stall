@@ -234,10 +234,8 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 			add(failedCheck("visual-evidence", "skipped because Host Lock is not clear", "Wait for the active Fresh Run or clear the stale Host Lock before probing viewport.capture. See docs/setup/windows-maya-host.md#host-lock-and-retention."))
 		} else if !sessionBrokerOK {
 			add(failedCheck("visual-evidence", "skipped because session-broker is not healthy", "Repair the gg_mayasessiond session-broker layer before probing viewport.capture. See docs/setup/windows-maya-host.md#visual-evidence."))
-		} else if lockCheck.Status == "ok" {
-			add(realSessionBrokerVisualEvidenceLayer(host))
 		} else {
-			add(failedCheck("visual-evidence", "skipped because Host Lock is not clear", "Wait for the active Fresh Run or clear the stale Host Lock before probing viewport.capture. See docs/setup/windows-maya-host.md#host-lock-and-retention."))
+			add(realSessionBrokerVisualEvidenceLayer(host))
 		}
 	} else {
 		add(okCheck("visual-evidence", "available"))

@@ -79,9 +79,6 @@ func (config brokerConfig) isGGMayaSessiond() bool {
 }
 
 func (config brokerConfig) fakeStatus() string {
-	if config.Type != "" {
-		return config.Type
-	}
 	return config.FakeStatus
 }
 
@@ -109,7 +106,7 @@ func (config brokerConfig) invalidReason() string {
 		return fmt.Sprintf("unknown broker.type %q", config.Type)
 	}
 	if !config.isLegacyFakeStatus() {
-		return fmt.Sprintf("unknown broker status %q", config.FakeStatus)
+		return fmt.Sprintf("broker status %q is not usable for runs", config.FakeStatus)
 	}
 	return ""
 }

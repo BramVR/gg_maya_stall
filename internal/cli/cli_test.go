@@ -1454,7 +1454,7 @@ hostPools:
 	if !strings.Contains(stdout.String(), `session-broker: fail - gg-mayasessiond`) {
 		t.Fatalf("doctor did not report scalar broker status failure:\n%s", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), `visual-evidence: fail - unavailable: unknown broker status "gg-mayasessiond"`) {
+	if !strings.Contains(stdout.String(), `visual-evidence: fail - unavailable: broker status "gg-mayasessiond" is not usable for runs`) {
 		t.Fatalf("doctor reported Visual Evidence as available for invalid scalar broker:\n%s", stdout.String())
 	}
 }
@@ -2100,7 +2100,7 @@ hostPools:
 	if code != 1 {
 		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), `unknown broker status "gg-mayasessiond"`) {
+	if !strings.Contains(stderr.String(), `broker status "gg-mayasessiond" is not usable for runs`) {
 		t.Fatalf("run error did not reject unknown scalar broker status: %s", stderr.String())
 	}
 }

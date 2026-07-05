@@ -1960,6 +1960,54 @@ hostPools:
 	}
 }
 
+func TestRunScenarioGGMayaSessiondDownloadedFailedResultFailsRun(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sftpLog := filepath.Join(dir, "sftp.log")
+	sftpPath := writeScenarioResultSFTPCommand(t, dir, sftpLog, resultStatusFailed, "remote script failed")
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		`{"ok":true,"tool":"script.execute"}`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/PROJECTS/GG/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	bundleBytes, err := os.ReadFile(filepath.Join(evidence, "evidence.json"))
+	if err != nil {
+		t.Fatalf("read evidence bundle: %v; stdout: %s stderr: %s", err, stdout.String(), stderr.String())
+	}
+	var bundle evidenceBundle
+	if err := json.Unmarshal(bundleBytes, &bundle); err != nil {
+		t.Fatalf("parse evidence bundle: %v", err)
+	}
+	if bundle.Status != resultStatusFailed {
+		t.Fatalf("Evidence Bundle status = %q, want failed; stdout: %s stderr: %s", bundle.Status, stdout.String(), stderr.String())
+	}
+}
+
 func TestRunScenarioRejectsUnknownStructuredBrokerType(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -4047,6 +4095,31 @@ exit 0
 `, shellQuote(logPath))
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("write fake sftp command: %v", err)
+	}
+	return path
+}
+
+func writeScenarioResultSFTPCommand(t *testing.T, dir string, logPath string, status string, summary string) string {
+	t.Helper()
+	path := filepath.Join(dir, "fake-sftp-scenario-result")
+	result := fmt.Sprintf("{\"status\":%q,\"summary\":%q}\n", status, summary)
+	content := fmt.Sprintf(`#!/bin/sh
+while IFS= read -r line; do
+  printf '%%s\n' "$line" >> %s
+  case "$line" in
+    *get*)
+      local_path=${line##*\" \"}
+      local_path=${local_path%%\"}
+      local_path=${local_path##\"}
+      mkdir -p "$(dirname "$local_path")"
+      printf %%s %s > "$local_path"
+      ;;
+  esac
+done
+exit 0
+`, shellQuote(logPath), shellQuote(result))
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write scenario result fake sftp command: %v", err)
 	}
 	return path
 }

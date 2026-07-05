@@ -182,10 +182,27 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 	if host.Broker.missingStructuredType() || strings.TrimSpace(host.Broker.Type) != "" {
 		brokerLayerInvalidReason = brokerInvalidReason
 	}
+	probeLockDetail := ""
+	if host.Broker.isGGMayaSessiond() && lockCheck.Status == "ok" {
+		release, locked, err := acquireHostLock(repoDir, host.ID)
+		if err != nil {
+			probeLockDetail = err.Error()
+		} else if locked {
+			probeLockDetail = fmt.Sprintf("%s locked", host.ID)
+		} else {
+			defer func() {
+				if err := release(); err != nil {
+					add(failedCheck("host-lock", fmt.Sprintf("release doctor probe lock for %s: %v", host.ID, err), "Inspect the Host Lock state directory and permissions. See docs/setup/windows-maya-host.md#host-lock-and-retention."))
+				}
+			}()
+		}
+	}
 	if host.Broker.isGGMayaSessiond() {
 		broker := ggMayaSessiondBroker{host: host}
 		if err := broker.validate(); err != nil {
 			add(failedCheck("session-broker", err.Error(), "Configure gg_mayasessiond paths in host config. See docs/setup/windows-maya-host.md#session-broker."))
+		} else if probeLockDetail != "" {
+			add(failedCheck("session-broker", "skipped because Host Lock is not clear: "+probeLockDetail, "Wait for the active Fresh Run or clear the stale Host Lock before probing gg_mayasessiond. See docs/setup/windows-maya-host.md#host-lock-and-retention."))
 		} else if lockCheck.Status == "ok" {
 			add(realSessionBrokerLayer(host))
 		} else {
@@ -207,6 +224,8 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 		broker := ggMayaSessiondBroker{host: host}
 		if err := broker.validate(); err != nil {
 			add(failedCheck("visual-evidence", "unavailable: "+err.Error(), "Configure gg_mayasessiond paths before checking screenshot capture. See docs/setup/windows-maya-host.md#visual-evidence."))
+		} else if probeLockDetail != "" {
+			add(failedCheck("visual-evidence", "skipped because Host Lock is not clear: "+probeLockDetail, "Wait for the active Fresh Run or clear the stale Host Lock before probing viewport.capture. See docs/setup/windows-maya-host.md#host-lock-and-retention."))
 		} else if lockCheck.Status == "ok" {
 			add(realSessionBrokerVisualEvidenceLayer(host))
 		} else {

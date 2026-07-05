@@ -54,7 +54,7 @@ The current live fixture uses an interactive Windows Scheduled Task:
 The launcher starts:
 
 ```cmd
-C:\maya-stall\sessiond-venv311\Scripts\python.exe -m gg_maya_sessiond.cli start --state-dir C:\maya-stall\sessiond-ui --maya-exe "C:\Program Files\Autodesk\Maya2025\bin\maya.exe" --mcp-python C:\maya-stall\sessiond-venv311\Scripts\python.exe --mcp-src C:\PROJECTS\GG\GG_MayaMCP --wait-timeout-seconds 180 --json
+C:\maya-stall\sessiond-venv311\Scripts\python.exe -m gg_maya_sessiond.cli start --state-dir C:\maya-stall\sessiond-ui --maya-exe "C:\Program Files\Autodesk\Maya2025\bin\maya.exe" --mcp-python C:\maya-stall\sessiond-venv311\Scripts\python.exe --mcp-src C:\PROJECTS\GG\GG_MayaMCP --mcp-script-dirs C:\maya-stall\runs --wait-timeout-seconds 180 --json
 ```
 
 Use this only as the current development fixture. The product implementation should model this as Session Broker behavior and keep host-specific paths configurable.

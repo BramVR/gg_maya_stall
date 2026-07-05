@@ -319,7 +319,7 @@ func (batch *sftpBatch) mkdir(path string) {
 	if path == "" {
 		return
 	}
-	fmt.Fprintf(&batch.builder, "-mkdir %s\n", sftpQuote(path))
+	fmt.Fprintf(&batch.builder, "-mkdir %s\n", sftpQuote(sftpRemotePath(path)))
 }
 
 func (batch *sftpBatch) mkdirAll(path string) {
@@ -341,7 +341,7 @@ func (batch *sftpBatch) mkdirAll(path string) {
 }
 
 func (batch *sftpBatch) put(local string, remote string) {
-	fmt.Fprintf(&batch.builder, "put -r %s %s\n", sftpQuote(local), sftpQuote(remote))
+	fmt.Fprintf(&batch.builder, "put -r %s %s\n", sftpQuote(local), sftpQuote(sftpRemotePath(remote)))
 }
 
 func (batch *sftpBatch) get(remote string, local string, optional bool) {
@@ -349,11 +349,23 @@ func (batch *sftpBatch) get(remote string, local string, optional bool) {
 	if optional {
 		prefix = "-get"
 	}
-	fmt.Fprintf(&batch.builder, "%s -r %s %s\n", prefix, sftpQuote(remote), sftpQuote(local))
+	fmt.Fprintf(&batch.builder, "%s -r %s %s\n", prefix, sftpQuote(sftpRemotePath(remote)), sftpQuote(local))
 }
 
 func sftpQuote(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
+}
+
+func sftpRemotePath(path string) string {
+	clean := strings.ReplaceAll(path, `\`, "/")
+	if len(clean) >= 2 && clean[1] == ':' && isASCIIAlpha(clean[0]) {
+		return "/" + clean
+	}
+	return clean
+}
+
+func isASCIIAlpha(value byte) bool {
+	return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z')
 }
 
 func remoteJoin(root string, parts ...string) string {

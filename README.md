@@ -237,7 +237,7 @@ hostPools:
         visualEvidence: true
 ```
 
-With `broker.type: gg-mayasessiond`, `maya-stall run` stages declared payloads under `workRoot/runs/<run-id>/`, writes a small Scenario wrapper into the remote workspace, executes it through `gg_maya_sessiond.cli call ... script.execute file_path=<wrapper>`, downloads declared outputs, and captures screenshots through `viewport.capture`. `maya-stall doctor` runs daemon `doctor` and `status`, checks for an interactive `maya.exe`, stages and executes a tiny `script.execute` probe under `workRoot/runs/doctor-*`, checks `viewport.capture`, and fails if Maya is in Windows Services session `0`.
+With `broker.type: gg-mayasessiond`, `maya-stall run` stages declared payloads under `workRoot/runs/<run-id>/`, writes a small Scenario wrapper into the remote workspace, executes it through `gg_maya_sessiond.cli call ... script.execute file_path=<wrapper>`, downloads declared outputs, and captures screenshots through `viewport.capture`. Remote Scenario execution through `script.execute` is capped at 10 minutes. `maya-stall doctor` runs daemon `doctor` and `status`, checks for an interactive `maya.exe`, stages and executes a tiny `script.execute` probe under `workRoot/runs/doctor-*`, checks `viewport.capture`, and fails if Maya is in Windows Services session `0`.
 
 Opt-in live smoke is skipped unless the exact host config env var is set:
 

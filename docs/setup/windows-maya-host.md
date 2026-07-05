@@ -110,6 +110,7 @@ Doctor layer:
 - Give it access to the work root, Maya executable, MCP or helper code it needs, and any configured state directory.
 - Allow `script.execute` to run scripts staged under `workRoot/runs`, such as `--mcp-script-dirs C:/maya-stall/runs` for `gg_mayasessiond`.
 - Keep host-specific paths in host-managed config; do not bake them into consuming repos.
+- Treat Host and Session Broker as one runtime contract. Default local tests use `fake-local` (fake Maya Host plus fake Session Broker). Real SSH Maya Hosts use `ssh-sessiond` (SSH Windows Maya Host plus `gg_mayasessiond`). SSH Host plus fake broker, missing broker config, malformed `gg_mayasessiond` config, or fake Host plus real broker fail before payload staging or proof capture.
 - Configure the broker as a structured host-config block:
 
 ```yaml
@@ -122,6 +123,8 @@ broker:
 ```
 
 Maya Stall invokes `gg_maya_sessiond.cli` on the Windows host through the same SSH transport. Runs stage declared payloads under `workRoot/runs/<run-id>/`, execute a staged wrapper with `script.execute`, download declared outputs from the remote workspace, and capture screenshots with `viewport.capture`. Remote Scenario execution through `script.execute` is capped at 10 minutes. The Session Broker launcher must allow the staged wrapper directory; otherwise doctor fails the `session-broker` layer with a `script.execute` repair hint.
+
+Each `manifest.json` and `evidence.json` records the resolved runtime profile, host adapter, broker adapter, redacted broker config source, and whether the run is eligible for live product proof.
 
 `maya-stall doctor` also performs live broker probes for `gg_mayasessiond`: it runs daemon `doctor` and `status`, checks the Windows `maya.exe` session, stages a tiny probe script under `workRoot/runs/doctor-*`, executes it with `script.execute`, removes that probe directory, and checks `viewport.capture`. The local Host Lock gates these probes for Maya Stall runs from the same checkout, but operators should still treat doctor as a live diagnostic that briefly executes code in the active Maya session.
 

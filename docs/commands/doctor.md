@@ -20,6 +20,7 @@ Doctor reports the layer that failed and a repair hint where possible:
 - local repo config and Scenario input shape;
 - Target Profile and Host Pool references;
 - pinned Maya Host selection;
+- Host/Broker runtime contract (`fake-local` or `ssh-sessiond`);
 - fake/local SSH readiness for deterministic default tests;
 - real SSH reachability when `transport: ssh` is configured;
 - work root readiness;
@@ -29,7 +30,9 @@ Doctor reports the layer that failed and a repair hint where possible:
 - Host Lock state.
 
 Default checks stay fake/local. Real SSH is opt-in through host config outside
-the consuming repo.
+the consuming repo. A real SSH Maya Host must configure
+`broker.type: gg-mayasessiond`; doctor reports a runtime/session-broker failure
+instead of falling back to the fake Session Broker.
 
 With `broker.type: gg-mayasessiond`, doctor runs the daemon `doctor` and
 `status` commands, checks that `maya.exe` is in the interactive desktop session,

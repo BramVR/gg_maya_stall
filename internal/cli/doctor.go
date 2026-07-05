@@ -177,14 +177,23 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 	}
 	lockCheck := hostLockLayer(repoDir, host.ID)
 	add(lockCheck)
+	resolved, runtimeErr := resolveRuntimeForHost(host)
+	if runtimeErr != nil {
+		add(failedCheck("runtime", runtimeErr.Error(), "Choose a supported runtime profile: fake-local or ssh-sessiond. See docs/setup/windows-maya-host.md#session-broker."))
+	} else {
+		add(okCheck("runtime", resolved.Metadata.Profile))
+	}
 	brokerInvalidReason := host.Broker.invalidReason()
+	if runtimeErr != nil {
+		brokerInvalidReason = runtimeErr.Error()
+	}
 	brokerLayerInvalidReason := ""
-	if host.Broker.missingStructuredType() || strings.TrimSpace(host.Broker.Type) != "" {
+	if runtimeErr != nil || host.Broker.missingStructuredType() || strings.TrimSpace(host.Broker.Type) != "" {
 		brokerLayerInvalidReason = brokerInvalidReason
 	}
 	sessionBrokerOK := false
 	probeLockDetail := ""
-	if host.Broker.isGGMayaSessiond() && lockCheck.Status == "ok" {
+	if runtimeErr == nil && host.Broker.isGGMayaSessiond() && lockCheck.Status == "ok" {
 		release, locked, err := acquireHostLock(repoDir, host.ID)
 		if err != nil {
 			probeLockDetail = err.Error()
@@ -198,8 +207,8 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 			}()
 		}
 	}
-	if host.Broker.isGGMayaSessiond() {
-		broker := ggMayaSessiondBroker{host: host}
+	if runtimeErr == nil && host.Broker.isGGMayaSessiond() {
+		broker := resolved.Broker.(ggMayaSessiondBroker)
 		var check doctorCheck
 		if err := broker.validate(); err != nil {
 			check = failedCheck("session-broker", err.Error(), "Configure gg_mayasessiond paths in host config. See docs/setup/windows-maya-host.md#session-broker.")
@@ -222,10 +231,10 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 		add(failedCheck("visual-evidence", "unavailable", "Enable screenshot or recording capture through the Session Broker. See docs/setup/windows-maya-host.md#visual-evidence."))
 	} else if brokerInvalidReason != "" {
 		add(failedCheck("visual-evidence", "unavailable: "+brokerInvalidReason, "Use a valid Session Broker before checking screenshot or recording capture. See docs/setup/windows-maya-host.md#visual-evidence."))
-	} else if host.Broker.isGGMayaSessiond() && scenario.Evidence.Recording.Enabled {
+	} else if runtimeErr == nil && host.Broker.isGGMayaSessiond() && scenario.Evidence.Recording.Enabled {
 		add(failedCheck("visual-evidence", "gg_mayasessiond recording capture unsupported", "Disable recording evidence or use screenshot/viewport capture. See docs/setup/windows-maya-host.md#visual-evidence."))
-	} else if host.Broker.isGGMayaSessiond() {
-		broker := ggMayaSessiondBroker{host: host}
+	} else if runtimeErr == nil && host.Broker.isGGMayaSessiond() {
+		broker := resolved.Broker.(ggMayaSessiondBroker)
 		if err := broker.validate(); err != nil {
 			add(failedCheck("visual-evidence", "unavailable: "+err.Error(), "Configure gg_mayasessiond paths before checking screenshot capture. See docs/setup/windows-maya-host.md#visual-evidence."))
 		} else if probeLockDetail != "" {

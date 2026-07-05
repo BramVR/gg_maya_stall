@@ -8,7 +8,8 @@ maya-stall status --run <run-id>
 ```
 
 Use it after `--keep-on-failure` or `--stop-after never` to find sessions that
-still hold Host Locks.
+still hold Host Locks. Kept run status includes the resolved runtime profile,
+host adapter, broker adapter, and live-proof eligibility recorded at run time.
 
 Kept Sessions remain visible until `maya-stall stop <run-id>` removes their run
 state and releases the Host Lock.

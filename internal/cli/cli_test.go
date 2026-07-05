@@ -1906,11 +1906,11 @@ hostPools:
 	}
 	log := string(logBytes)
 	for _, want := range []string{
-		`-mkdir "C:/maya-stall"`,
-		`-mkdir "C:/maya-stall/runs"`,
+		`-mkdir "/C:/maya-stall"`,
+		`-mkdir "/C:/maya-stall/runs"`,
 		`put -r `,
 		`maya/smoke.py`,
-		`C:/maya-stall/runs/`,
+		`/C:/maya-stall/runs/`,
 		`payload/mayaScripts/maya/smoke.py`,
 		`-get -r `,
 		`workspace/outputs/report.json`,
@@ -1922,6 +1922,26 @@ hostPools:
 	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
 	if _, err := os.Stat(filepath.Join(evidence, "outputs", "report.json")); err != nil {
 		t.Fatalf("expected downloaded output in Evidence Bundle: %v", err)
+	}
+}
+
+func TestSFTPBatchUsesWindowsAbsoluteDrivePaths(t *testing.T) {
+	batch := newSFTPBatch()
+
+	batch.mkdirAll("C:/maya-stall/runs/run-1/workspace")
+	batch.put("/tmp/probe.py", "C:/maya-stall/runs/run-1/workspace/probe.py")
+	batch.get("C:/maya-stall/runs/run-1/workspace/outputs/result.json", "/tmp/result.json", true)
+
+	got := batch.String()
+	for _, want := range []string{
+		`-mkdir "/C:/maya-stall"`,
+		`-mkdir "/C:/maya-stall/runs/run-1/workspace"`,
+		`put -r "/tmp/probe.py" "/C:/maya-stall/runs/run-1/workspace/probe.py"`,
+		`-get -r "/C:/maya-stall/runs/run-1/workspace/outputs/result.json" "/tmp/result.json"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("SFTP batch missing %q:\n%s", want, got)
+		}
 	}
 }
 

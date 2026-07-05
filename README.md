@@ -237,13 +237,21 @@ hostPools:
         visualEvidence: true
 ```
 
-With `broker.type: gg-mayasessiond`, `maya-stall run` stages declared payloads under `workRoot/runs/<run-id>/`, writes a small Scenario wrapper into the remote workspace, executes it through `gg_maya_sessiond.cli call ... script.execute file_path=<wrapper>`, downloads declared outputs, and captures screenshots through `viewport.capture`. Remote Scenario execution through `script.execute` is capped at 10 minutes. `maya-stall doctor` runs daemon `doctor` and `status`, checks for an interactive `maya.exe`, stages and executes a tiny `script.execute` probe under `workRoot/runs/doctor-*`, checks `viewport.capture`, and fails if Maya is in Windows Services session `0`.
+With `broker.type: gg-mayasessiond`, `maya-stall run` stages declared payloads under `workRoot/runs/<run-id>/`, writes a small Scenario wrapper into the remote workspace, executes it through `gg_maya_sessiond.cli call ... script.execute file_path=<wrapper>`, downloads declared outputs, and captures screenshots through `viewport.capture`. Remote Scenario execution through `script.execute` is capped at 10 minutes. Start `gg_mayasessiond` with script execution allowed for `workRoot/runs`, for example `--mcp-script-dirs C:/maya-stall/runs`. `maya-stall doctor` runs daemon `doctor` and `status`, checks for an interactive `maya.exe`, stages and executes a tiny `script.execute` probe under `workRoot/runs/doctor-*`, checks `viewport.capture`, and fails if Maya is in Windows Services session `0`.
 
 Opt-in live smoke is skipped unless the exact host config env var is set:
 
 ```sh
 MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml go test ./internal/cli -run TestOptInRealSSHDoctorSmoke -count=1
 ```
+
+To run the full live smoke, use:
+
+```sh
+MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run)Smoke' -count=1
+```
+
+`TestOptInRealSSHRunSmoke` first runs `doctor --scenario smoke`, then runs one generated `smoke` Scenario through the configured `gg_mayasessiond` Session Broker, requires screenshot Visual Evidence, and asserts that the local Evidence Bundle contains `evidence.json`, logs, events, Scenario Result, and the captured screenshot. The test fails if `maya.exe` is not in the interactive Windows desktop session because the doctor session-broker layer rejects Services session `0`.
 
 Optional smoke env vars:
 

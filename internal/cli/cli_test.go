@@ -2247,6 +2247,35 @@ func TestGGMayaSessiondScreenshotNameFollowsDaemonMediaType(t *testing.T) {
 	}
 }
 
+func TestGGMayaSessiondCaptureImageDataRequiresImageContent(t *testing.T) {
+	var result sessiondCaptureResult
+	result.Content = append(result.Content, struct {
+		Type     string `json:"type"`
+		Data     string `json:"data"`
+		MimeType string `json:"mimeType"`
+	}{
+		Type:     "text",
+		Data:     base64.StdEncoding.EncodeToString([]byte("not image")),
+		MimeType: "text/plain",
+	}, struct {
+		Type     string `json:"type"`
+		Data     string `json:"data"`
+		MimeType string `json:"mimeType"`
+	}{
+		Type:     "image",
+		Data:     base64.StdEncoding.EncodeToString([]byte("image bytes")),
+		MimeType: "image/png",
+	})
+
+	data, mediaType, err := captureImageData(result)
+	if err != nil {
+		t.Fatalf("captureImageData returned error: %v", err)
+	}
+	if string(data) != "image bytes" || mediaType != "image/png" {
+		t.Fatalf("captureImageData = %q/%q, want image bytes/image/png", string(data), mediaType)
+	}
+}
+
 func TestVisualEvidenceBundlePrefersCapturedMediaType(t *testing.T) {
 	got := mergeVisualEvidence(
 		[]visualEvidenceArtifact{{Kind: "screenshot", Path: "screenshots/smoke.bin", MediaType: "image/webp"}},

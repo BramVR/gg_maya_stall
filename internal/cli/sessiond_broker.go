@@ -403,6 +403,9 @@ Remove-Item -LiteralPath %s -Recurse -Force`, powerShellSingleQuoted(path))
 func captureImageData(result sessiondCaptureResult) ([]byte, string, error) {
 	mediaType := result.Output.MimeType
 	for _, item := range result.Content {
+		if item.Type != "image" {
+			continue
+		}
 		if item.Data == "" {
 			continue
 		}

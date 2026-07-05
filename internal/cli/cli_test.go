@@ -2524,6 +2524,30 @@ func TestTrimToJSONReturnsFirstDocumentWithTrailingNoise(t *testing.T) {
 	}
 }
 
+func TestTrimToJSONSkipsBracketedLogNoise(t *testing.T) {
+	got := trimToJSON([]byte("[INFO] loading {state}\n{\"ok\":true,\"tool\":\"status\"}\n"))
+	if string(got) != `{"ok":true,"tool":"status"}` {
+		t.Fatalf("trimToJSON = %q, want JSON after bracketed log noise", string(got))
+	}
+}
+
+func TestTrimToJSONPreservesArrayDocuments(t *testing.T) {
+	got := trimToJSON([]byte(`[{"ok":true,"tool":"status"}]`))
+	if string(got) != `[{"ok":true,"tool":"status"}]` {
+		t.Fatalf("trimToJSON = %q, want full array document", string(got))
+	}
+}
+
+func TestSessiondJSONFromFailedOutputSkipsBracketedLogNoise(t *testing.T) {
+	got, ok := sessiondJSONFromFailedOutput([]byte("[ERROR] loading {state}\n{\"ok\":false,\"error\":\"tool failed\"}\n"))
+	if !ok {
+		t.Fatal("sessiondJSONFromFailedOutput rejected JSON after bracketed log noise")
+	}
+	if !strings.Contains(string(got), `"ok":false`) {
+		t.Fatalf("sessiond JSON = %s", string(got))
+	}
+}
+
 func TestRunScenarioRealSSHRequiresDownloadedScenarioResult(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	sftpPath := writeFailingGetSFTPCommand(t, dir)

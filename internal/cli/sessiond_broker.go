@@ -459,17 +459,20 @@ func pythonStringList(values []string) string {
 
 func trimToJSON(raw []byte) []byte {
 	trimmed := bytes.TrimSpace(raw)
-	start := bytes.IndexAny(trimmed, "{[")
-	if start < 0 {
-		return trimmed
+	for start := bytes.IndexAny(trimmed, "{["); start >= 0; {
+		jsonOutput := trimmed[start:]
+		var document json.RawMessage
+		decoder := json.NewDecoder(bytes.NewReader(jsonOutput))
+		if err := decoder.Decode(&document); err == nil {
+			return bytes.TrimSpace(document)
+		}
+		next := bytes.IndexAny(trimmed[start+1:], "{[")
+		if next < 0 {
+			break
+		}
+		start += next + 1
 	}
-	jsonOutput := trimmed[start:]
-	var document json.RawMessage
-	decoder := json.NewDecoder(bytes.NewReader(jsonOutput))
-	if err := decoder.Decode(&document); err == nil {
-		return document
-	}
-	return jsonOutput
+	return trimmed
 }
 
 func sessiondJSONFromFailedOutput(raw []byte) ([]byte, bool) {

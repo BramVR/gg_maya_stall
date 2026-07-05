@@ -185,6 +185,8 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 	add(mayaVersionLayer(options, host, scenario))
 	if host.VisualEvidence != nil && !*host.VisualEvidence {
 		add(failedCheck("visual-evidence", "unavailable", "Enable screenshot or recording capture through the Session Broker. See docs/setup/windows-maya-host.md#visual-evidence."))
+	} else if host.Broker.isGGMayaSessiond() && scenario.Evidence.Recording.Enabled {
+		add(failedCheck("visual-evidence", "gg_mayasessiond recording capture unsupported", "Disable recording evidence or use screenshot/viewport capture. See docs/setup/windows-maya-host.md#visual-evidence."))
 	} else if host.Broker.isGGMayaSessiond() {
 		add(realSessionBrokerVisualEvidenceLayer(host))
 	} else {

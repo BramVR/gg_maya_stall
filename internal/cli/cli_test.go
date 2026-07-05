@@ -1275,6 +1275,59 @@ hostPools:
 	}
 }
 
+func TestDoctorGGMayaSessiondRejectsRecordingScenario(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	configPath := filepath.Join(dir, ".maya-stall.yaml")
+	contentBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config fixture: %v", err)
+	}
+	content := strings.Replace(string(contentBytes), "recording:\n        enabled: false", "recording:\n        enabled: true", 1)
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config fixture: %v", err)
+	}
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		``,
+		``,
+		`{"ok":true,"checks":[{"id":"state_dir","ok":true}]}`,
+		`{"derived_status":"running","state":{"status":"running","call_server_ready":true,"maya_alive":true,"mcp_alive":true}}`,
+		`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
+		`{"ok":true,"tool":"script.execute"}`,
+		``,
+	})
+	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/PROJECTS/GG/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha", "--scenario", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "visual-evidence: fail - gg_mayasessiond recording capture unsupported") {
+		t.Fatalf("doctor did not reject recording scenario:\n%s", stdout.String())
+	}
+}
+
 func TestDoctorGGMayaSessiondRejectsStaleDerivedStatus(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
@@ -1841,6 +1894,50 @@ hostPools:
 	}
 }
 
+func TestRunScenarioGGMayaSessiondRejectsRecordingBeforeRemoteRun(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	configPath := filepath.Join(dir, ".maya-stall.yaml")
+	contentBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config fixture: %v", err)
+	}
+	content := strings.Replace(string(contentBytes), "recording:\n        enabled: false", "recording:\n        enabled: true", 1)
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config fixture: %v", err)
+	}
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/PROJECTS/GG/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "does not expose recording capture") {
+		t.Fatalf("run error did not fail fast on recording: %s", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")); !os.IsNotExist(err) {
+		t.Fatalf("host lock was not released after recording fail-fast, stat err = %v", err)
+	}
+}
+
 func TestGGMayaSessiondScreenshotNameFollowsDaemonMediaType(t *testing.T) {
 	if got := visualEvidenceNameForMediaType("smoke.png", "image/jpeg"); got != "smoke.jpg" {
 		t.Fatalf("jpeg screenshot name = %q, want smoke.jpg", got)
@@ -1872,6 +1969,11 @@ func TestGGMayaSessiondScenarioWrapperPreservesFailingScenarioResult(t *testing.
 	for _, want := range []string{
 		"def _maya_stall_should_overwrite_failure():",
 		"return payload.get('status') in (None, '', 'passed')",
+		"previous_cwd = os.getcwd()",
+		"previous_sys_path = list(sys.path)",
+		"def _maya_stall_clear_run_modules():",
+		"sys.path[:] = previous_sys_path",
+		"os.chdir(previous_cwd)",
 		"_maya_stall_write_result('failed', str(exc), traceback.format_exc(), overwrite=_maya_stall_should_overwrite_failure())",
 		"except SystemExit as exc:",
 		"_maya_stall_write_result('failed', 'Scenario exited with code %s' % code, overwrite=_maya_stall_should_overwrite_failure())",

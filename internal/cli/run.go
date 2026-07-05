@@ -180,6 +180,9 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 			}
 		}
 	}()
+	if err := rejectUnsupportedEvidenceConfig(runtime.Broker, scenario); err != nil {
+		return runOutcome{}, err
+	}
 	defer func() {
 		if err == nil && outcome.StopPolicy == "stopped" {
 			if cleanupErr := cleanupRunState(repoDir, outcome.RunID); cleanupErr != nil {
@@ -320,6 +323,15 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 		StopPolicy:       stopPolicy,
 		FollowUpCommands: followUpCommands,
 	}, nil
+}
+
+func rejectUnsupportedEvidenceConfig(broker sessionBroker, scenario scenarioConfig) error {
+	if scenario.Evidence.Recording.Enabled {
+		if _, ok := broker.(ggMayaSessiondBroker); ok {
+			return fmt.Errorf("gg_mayasessiond does not expose recording capture; disable recording evidence or use screenshot/viewport capture")
+		}
+	}
+	return nil
 }
 
 func collectScenarioVisualEvidence(broker sessionBroker, context runContext, scenarioName string, config evidenceConfig) error {

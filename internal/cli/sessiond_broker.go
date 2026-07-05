@@ -24,10 +24,9 @@ type ggMayaSessiondBroker struct {
 }
 
 type sessiondCommandResult struct {
-	OK    bool            `json:"ok"`
-	Tool  string          `json:"tool"`
-	Error string          `json:"error"`
-	Raw   json.RawMessage `json:"-"`
+	OK    bool   `json:"ok"`
+	Tool  string `json:"tool"`
+	Error string `json:"error"`
 }
 
 type sessiondCaptureResult struct {
@@ -167,6 +166,14 @@ func (broker ggMayaSessiondBroker) scenarioWrapper(context runContext, scenario 
 	builder.WriteString("result_path = ")
 	builder.WriteString(pythonString(resultPath))
 	builder.WriteString("\n")
+	builder.WriteString("run_modules_root = ")
+	builder.WriteString(pythonString(remoteJoin(broker.host.WorkRoot, "runs")))
+	builder.WriteString("\n")
+	builder.WriteString("previous_cwd = os.getcwd()\n")
+	builder.WriteString("previous_sys_path = list(sys.path)\n")
+	builder.WriteString("previous_result_env = os.environ.get(")
+	builder.WriteString(pythonString(scenarioResultEnvVar))
+	builder.WriteString(")\n")
 	builder.WriteString("os.environ[")
 	builder.WriteString(pythonString(scenarioResultEnvVar))
 	builder.WriteString("] = result_path\n")
@@ -192,6 +199,19 @@ func (broker ggMayaSessiondBroker) scenarioWrapper(context runContext, scenario 
 	builder.WriteString("    except Exception:\n")
 	builder.WriteString("        return True\n")
 	builder.WriteString("    return payload.get('status') in (None, '', 'passed')\n")
+	builder.WriteString("def _maya_stall_clear_run_modules():\n")
+	builder.WriteString("    root = os.path.normcase(os.path.abspath(run_modules_root))\n")
+	builder.WriteString("    for name, module in list(sys.modules.items()):\n")
+	builder.WriteString("        module_file = getattr(module, '__file__', None)\n")
+	builder.WriteString("        if not module_file:\n")
+	builder.WriteString("            continue\n")
+	builder.WriteString("        try:\n")
+	builder.WriteString("            module_path = os.path.normcase(os.path.abspath(module_file))\n")
+	builder.WriteString("        except Exception:\n")
+	builder.WriteString("            continue\n")
+	builder.WriteString("        if module_path.startswith(root + os.sep):\n")
+	builder.WriteString("            sys.modules.pop(name, None)\n")
+	builder.WriteString("_maya_stall_clear_run_modules()\n")
 	builder.WriteString("for include_path in ")
 	builder.WriteString(pythonStringList(includePaths))
 	builder.WriteString(":\n    sys.path.insert(0, include_path)\n")
@@ -208,6 +228,18 @@ func (broker ggMayaSessiondBroker) scenarioWrapper(context runContext, scenario 
 	builder.WriteString("        _maya_stall_write_result('failed', 'Scenario exited with code %s' % code, overwrite=_maya_stall_should_overwrite_failure())\n")
 	builder.WriteString("except Exception as exc:\n")
 	builder.WriteString("    _maya_stall_write_result('failed', str(exc), traceback.format_exc(), overwrite=_maya_stall_should_overwrite_failure())\n")
+	builder.WriteString("finally:\n")
+	builder.WriteString("    sys.path[:] = previous_sys_path\n")
+	builder.WriteString("    os.chdir(previous_cwd)\n")
+	builder.WriteString("    if previous_result_env is None:\n")
+	builder.WriteString("        os.environ.pop(")
+	builder.WriteString(pythonString(scenarioResultEnvVar))
+	builder.WriteString(", None)\n")
+	builder.WriteString("    else:\n")
+	builder.WriteString("        os.environ[")
+	builder.WriteString(pythonString(scenarioResultEnvVar))
+	builder.WriteString("] = previous_result_env\n")
+	builder.WriteString("    _maya_stall_clear_run_modules()\n")
 	return builder.String(), nil
 }
 
@@ -269,7 +301,6 @@ func (broker ggMayaSessiondBroker) callTool(tool string, args []string, timeout 
 		return sessiondCommandResult{}, err
 	}
 	var result sessiondCommandResult
-	result.Raw = append(result.Raw, raw...)
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return sessiondCommandResult{}, fmt.Errorf("parse gg_mayasessiond %s JSON: %w", tool, err)
 	}

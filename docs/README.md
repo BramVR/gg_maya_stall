@@ -67,6 +67,7 @@ This repo currently builds from source:
 
 ```sh
 go test ./...
+mkdir -p bin
 go build -o bin/maya-stall ./cmd/maya-stall
 ```
 

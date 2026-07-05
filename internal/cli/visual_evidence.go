@@ -56,9 +56,6 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 	if err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}
-	if runtime.Broker == nil {
-		runtime.Broker = sessionBrokerForConfig(host.Config)
-	}
 	defer func() {
 		if host.release != nil {
 			if releaseErr := host.release(); releaseErr != nil {
@@ -66,6 +63,16 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 			}
 		}
 	}()
+	resolved, err := resolveRuntimeForHost(host.Config)
+	if err != nil {
+		return runOutcome{}, visualEvidenceArtifact{}, err
+	}
+	if err := rejectMismatchedRuntimeOverride(resolved, runtime); err != nil {
+		return runOutcome{}, visualEvidenceArtifact{}, err
+	}
+	if runtime.Broker == nil {
+		runtime.Broker = resolved.Broker
+	}
 
 	runID := runtime.Now().UTC().Format("20060102T150405.000000000Z")
 	stateDir := filepath.Join(repoDir, ".maya-stall", "state", "runs", runID)
@@ -97,6 +104,7 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 		Scenario:      "manual-" + kind,
 		TargetProfile: host.TargetProfile,
 		Host:          host.HostID,
+		Runtime:       resolved.Metadata,
 	}
 	if configPath, err := DiscoverConfig(repoDir); err == nil {
 		manifest.ConfigPath = repoRelativePath(repoDir, configPath)

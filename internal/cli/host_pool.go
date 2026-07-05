@@ -24,6 +24,20 @@ type hostRuntime struct {
 	release       func() error
 }
 
+type resolvedRuntime struct {
+	Host     runHost
+	Broker   sessionBroker
+	Metadata runtimeMetadata
+}
+
+type runtimeMetadata struct {
+	Profile            string `json:"profile"`
+	HostAdapter        string `json:"hostAdapter"`
+	BrokerAdapter      string `json:"brokerAdapter"`
+	BrokerConfigSource string `json:"brokerConfigSource"`
+	LiveProofEligible  bool   `json:"liveProofEligible"`
+}
+
 type userHostConfig struct {
 	Version        int                            `yaml:"version"`
 	TargetProfiles map[string]targetProfileConfig `yaml:"targetProfiles"`
@@ -250,6 +264,50 @@ func isHealthyHost(host mayaHostConfig) bool {
 
 func (host mayaHostConfig) usesRealSSH() bool {
 	return strings.EqualFold(strings.TrimSpace(host.Transport), "ssh") || host.SSH.Host != ""
+}
+
+func resolveRuntimeForHost(host mayaHostConfig) (resolvedRuntime, error) {
+	if host.usesRealSSH() {
+		if !host.Broker.isGGMayaSessiond() {
+			if reason := host.Broker.invalidReason(); reason != "" {
+				return resolvedRuntime{}, fmt.Errorf("%s", reason)
+			}
+			return resolvedRuntime{}, fmt.Errorf("SSH Maya Host requires broker.type: gg-mayasessiond")
+		}
+		broker := ggMayaSessiondBroker{host: host}
+		if err := broker.validate(); err != nil {
+			return resolvedRuntime{}, err
+		}
+		return resolvedRuntime{
+			Host:   realSSHHost{host: host},
+			Broker: broker,
+			Metadata: runtimeMetadata{
+				Profile:            "ssh-sessiond",
+				HostAdapter:        "ssh",
+				BrokerAdapter:      "gg-mayasessiond",
+				BrokerConfigSource: "host config broker.type=gg-mayasessiond",
+				LiveProofEligible:  true,
+			},
+		}, nil
+	}
+
+	if host.Broker.isGGMayaSessiond() {
+		return resolvedRuntime{}, fmt.Errorf("fake Maya Host cannot use gg_mayasessiond Session Broker")
+	}
+	if reason := host.Broker.invalidReason(); reason != "" {
+		return resolvedRuntime{}, fmt.Errorf("%s", reason)
+	}
+	return resolvedRuntime{
+		Host:   fakeHost{},
+		Broker: fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "fake Scenario completed"}},
+		Metadata: runtimeMetadata{
+			Profile:            "fake-local",
+			HostAdapter:        "fake",
+			BrokerAdapter:      "fake",
+			BrokerConfigSource: "default fake host config",
+			LiveProofEligible:  false,
+		},
+	}, nil
 }
 
 func acquireHostLock(repoDir string, hostID string) (func() error, bool, error) {

@@ -14,6 +14,8 @@ at 15 fps. Other timing defaults remain decision records until implemented.
 
 The fake Session Broker supports recordings. With
 `broker.type: gg-mayasessiond`, recording reports an actionable unsupported
-error until the daemon exposes a recording tool.
+error until the daemon exposes a recording tool. SSH Maya Hosts must use the
+`ssh-sessiond` runtime profile and do not fall back to fake recording capture.
 
-The command writes a local Evidence Bundle under `artifacts/maya-stall/`.
+The command writes a local Evidence Bundle under `artifacts/maya-stall/` with
+the resolved runtime metadata.

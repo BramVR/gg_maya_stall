@@ -89,6 +89,7 @@ type runManifest struct {
 	Scenario      string            `json:"scenario"`
 	TargetProfile string            `json:"targetProfile"`
 	Host          string            `json:"host"`
+	Runtime       runtimeMetadata   `json:"runtime"`
 	ConfigPath    string            `json:"configPath"`
 	Payload       []manifestPayload `json:"payload"`
 }
@@ -115,6 +116,7 @@ type evidenceBundle struct {
 	Status         string                   `json:"status"`
 	TargetProfile  string                   `json:"targetProfile"`
 	Host           string                   `json:"host"`
+	Runtime        runtimeMetadata          `json:"runtime"`
 	Manifest       string                   `json:"manifest"`
 	Events         string                   `json:"events"`
 	Log            string                   `json:"log"`
@@ -166,12 +168,6 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	if err != nil {
 		return runOutcome{}, err
 	}
-	if runtime.Host == nil {
-		runtime.Host = runHostForConfig(host.Config)
-	}
-	if runtime.Broker == nil {
-		runtime.Broker = sessionBrokerForConfig(host.Config)
-	}
 	releaseHostLock := true
 	defer func() {
 		if releaseHostLock {
@@ -180,6 +176,19 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 			}
 		}
 	}()
+	resolved, err := resolveRuntimeForHost(host.Config)
+	if err != nil {
+		return runOutcome{}, err
+	}
+	if runtime.Host == nil {
+		runtime.Host = resolved.Host
+	}
+	if err := rejectMismatchedRuntimeOverride(resolved, runtime); err != nil {
+		return runOutcome{}, err
+	}
+	if runtime.Broker == nil {
+		runtime.Broker = resolved.Broker
+	}
 	if err := rejectInvalidSessionBroker(runtime.Broker); err != nil {
 		return runOutcome{}, err
 	}
@@ -232,6 +241,7 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 		Scenario:      options.ScenarioName,
 		TargetProfile: host.TargetProfile,
 		Host:          host.HostID,
+		Runtime:       resolved.Metadata,
 		ConfigPath:    repoRelativePath(repoDir, configPath),
 		Payload:       payload,
 	}
@@ -334,6 +344,16 @@ func rejectUnsupportedEvidenceConfig(broker sessionBroker, scenario scenarioConf
 		if _, ok := broker.(ggMayaSessiondBroker); ok {
 			return fmt.Errorf("gg_mayasessiond does not expose recording capture; disable recording evidence or use screenshot/viewport capture")
 		}
+	}
+	return nil
+}
+
+func rejectMismatchedRuntimeOverride(resolved resolvedRuntime, runtime runRuntime) error {
+	if resolved.Metadata.Profile != "ssh-sessiond" || runtime.Broker == nil {
+		return nil
+	}
+	if _, ok := runtime.Broker.(ggMayaSessiondBroker); !ok {
+		return fmt.Errorf("ssh-sessiond runtime requires gg_mayasessiond Session Broker adapter")
 	}
 	return nil
 }
@@ -927,6 +947,7 @@ func writeEvidenceBundle(context runContext, manifest runManifest, scenario scen
 		Status:         result.Status,
 		TargetProfile:  manifest.TargetProfile,
 		Host:           manifest.Host,
+		Runtime:        manifest.Runtime,
 		Manifest:       "manifest.json",
 		Events:         "events.jsonl",
 		Log:            filepath.Join("logs", "session.log"),

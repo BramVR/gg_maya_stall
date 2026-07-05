@@ -145,6 +145,9 @@ func assertLiveSmokeEvidenceBundle(t *testing.T, evidenceDir string) {
 	if bundle.Scenario != "smoke" {
 		t.Fatalf("Evidence Bundle scenario = %q, want smoke", bundle.Scenario)
 	}
+	if bundle.Runtime.Profile != "ssh-sessiond" || bundle.Runtime.HostAdapter != "ssh" || bundle.Runtime.BrokerAdapter != "gg-mayasessiond" || !bundle.Runtime.LiveProofEligible {
+		t.Fatalf("Evidence Bundle runtime = %+v, want live-proof-eligible ssh-sessiond", bundle.Runtime)
+	}
 	if len(bundle.VisualEvidence) == 0 {
 		t.Fatalf("Evidence Bundle missing Visual Evidence")
 	}

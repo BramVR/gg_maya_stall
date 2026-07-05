@@ -93,6 +93,12 @@ func printKeptRunStatus(stdout io.Writer, run keptRun) {
 	fmt.Fprintf(stdout, "scenario: %s\n", run.Manifest.Scenario)
 	fmt.Fprintf(stdout, "targetProfile: %s\n", run.Manifest.TargetProfile)
 	fmt.Fprintf(stdout, "host: %s\n", run.Manifest.Host)
+	if run.Manifest.Runtime.Profile != "" {
+		fmt.Fprintf(stdout, "runtime: %s\n", run.Manifest.Runtime.Profile)
+		fmt.Fprintf(stdout, "hostAdapter: %s\n", run.Manifest.Runtime.HostAdapter)
+		fmt.Fprintf(stdout, "brokerAdapter: %s\n", run.Manifest.Runtime.BrokerAdapter)
+		fmt.Fprintf(stdout, "liveProofEligible: %t\n", run.Manifest.Runtime.LiveProofEligible)
+	}
 	fmt.Fprintf(stdout, "status: %s\n", run.Bundle.Status)
 	fmt.Fprintf(stdout, "stateDir: %s\n", run.StateDir)
 }

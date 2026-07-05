@@ -214,8 +214,8 @@ hostPools:
           type: gg-mayasessiond
           stateDir: C:/maya-stall/sessiond-ui
           python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
-          repo: C:/PROJECTS/GG/GG_MayaSessiond
-          mcpSource: C:/PROJECTS/GG/GG_MayaMCP
+          repo: C:/maya-stall/tools/gg_mayasessiond
+          mcpSource: C:/maya-stall/tools/GG_MayaMCP
         mayaVersions: ["2025"]
         visualEvidence: true
 ```

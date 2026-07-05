@@ -280,7 +280,11 @@ func realSessionBrokerLayer(host mayaHostConfig) doctorCheck {
 		return failedCheck("session-broker", "invalid doctor JSON", "Update gg_mayasessiond or fix its CLI JSON output. See docs/setup/windows-maya-host.md#session-broker.")
 	}
 	if !doctor.OK {
-		return failedCheck("session-broker", "gg_mayasessiond doctor failed", "Repair the failing gg_mayasessiond doctor check. See docs/setup/windows-maya-host.md#session-broker.")
+		detail := "gg_mayasessiond doctor failed"
+		if failing := failingSessiondDoctorChecks(doctor); len(failing) > 0 {
+			detail += ": " + strings.Join(failing, ", ")
+		}
+		return failedCheck("session-broker", detail, "Repair the failing gg_mayasessiond doctor check. See docs/setup/windows-maya-host.md#session-broker.")
 	}
 	statusRaw, err := broker.runSessiondCLI([]string{"status", "--state-dir", host.Broker.StateDir, "--json"}, sessiondCommandTimeout)
 	if err != nil {
@@ -316,6 +320,16 @@ func realSessionBrokerLayer(host mayaHostConfig) doctorCheck {
 		return failedCheck("session-broker", err.Error(), "Repair gg_mayasessiond script.execute access to the Maya Stall work root. See docs/setup/windows-maya-host.md#session-broker.")
 	}
 	return okCheck("session-broker", "gg_mayasessiond reachable; Maya UI is interactive")
+}
+
+func failingSessiondDoctorChecks(doctor sessiondDoctorOutput) []string {
+	var failing []string
+	for _, check := range doctor.Checks {
+		if !check.OK && check.ID != "" {
+			failing = append(failing, check.ID)
+		}
+	}
+	return failing
 }
 
 func realSessionBrokerVisualEvidenceLayer(host mayaHostConfig) doctorCheck {

@@ -1283,6 +1283,44 @@ hostPools:
 	}
 }
 
+func TestDoctorGGMayaSessiondReportsDaemonDoctorCheckIDs(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		``,
+		``,
+		`{"ok":false,"checks":[{"id":"state_dir","ok":false},{"id":"mcp_source","ok":true}]}`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/PROJECTS/GG/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "session-broker: fail - gg_mayasessiond doctor failed: state_dir") {
+		t.Fatalf("doctor did not include failing daemon check id:\n%s", stdout.String())
+	}
+}
+
 func TestDoctorGGMayaSessiondRejectsRecordingScenario(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	configPath := filepath.Join(dir, ".maya-stall.yaml")

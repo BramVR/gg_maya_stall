@@ -339,8 +339,11 @@ func rejectUnsupportedEvidenceConfig(broker sessionBroker, scenario scenarioConf
 }
 
 func rejectInvalidSessionBroker(broker sessionBroker) error {
-	if broker, ok := broker.(invalidSessionBroker); ok {
+	switch broker := broker.(type) {
+	case invalidSessionBroker:
 		return broker.err
+	case ggMayaSessiondBroker:
+		return broker.validate()
 	}
 	return nil
 }

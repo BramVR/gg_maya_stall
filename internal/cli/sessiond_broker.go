@@ -480,9 +480,6 @@ func trimToJSON(raw []byte) []byte {
 			if isSessiondJSONDocument(document) {
 				return document
 			}
-			if len(document) > 0 && document[0] == '[' {
-				return document
-			}
 		}
 		next := bytes.IndexAny(trimmed[start+advance:], "{[")
 		if next < 0 {

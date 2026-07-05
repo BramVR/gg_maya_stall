@@ -2119,6 +2119,43 @@ hostPools:
 	}
 }
 
+func TestRunScenarioRejectsIncompleteSessiondBrokerBeforeRemoteStaging(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sftpLog := filepath.Join(dir, "sftp.log")
+	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          repo: C:/PROJECTS/GG/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gg_mayasessiond broker requires broker.python") {
+		t.Fatalf("run error did not reject incomplete sessiond broker config: %s", stderr.String())
+	}
+	if _, err := os.Stat(sftpLog); !os.IsNotExist(err) {
+		t.Fatalf("incomplete broker config should fail before SFTP staging, stat err = %v", err)
+	}
+}
+
 func TestRunScenarioRejectsUnknownScalarBrokerStatus(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -2588,6 +2625,13 @@ func TestTrimToJSONPreservesArrayDocuments(t *testing.T) {
 	got := trimToJSON([]byte(`[{"ok":true,"tool":"status"}]`))
 	if string(got) != `[{"ok":true,"tool":"status"}]` {
 		t.Fatalf("trimToJSON = %q, want full array document", string(got))
+	}
+}
+
+func TestTrimToJSONSkipsArrayLogNoiseBeforeSessiondResult(t *testing.T) {
+	got := trimToJSON([]byte("[{\"level\":\"info\"}]\n{\"ok\":true,\"tool\":\"status\"}\n"))
+	if string(got) != `{"ok":true,"tool":"status"}` {
+		t.Fatalf("trimToJSON = %q, want sessiond JSON after array log noise", string(got))
 	}
 }
 

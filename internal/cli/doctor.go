@@ -4,30 +4,44 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-type doctorReport struct {
-	Checks  []doctorCheck
-	Healthy bool
+type hostHealthReport struct {
+	TargetProfile string
+	HostPool      string
+	HostID        string
+	Scenario      string
+	Runtime       runtimeMetadata
+	Layers        []hostHealthLayer
+	Healthy       bool
 }
 
-type doctorCheck struct {
-	Layer  string
-	Status string
-	Detail string
-	Hint   string
+type hostHealthLayer struct {
+	ID                 string
+	Layer              string
+	Status             string
+	Detail             string
+	Hint               string
+	Source             string
+	State              string
+	BlockedBy          string
+	KeptRun            string
+	InteractiveDesktop bool
 }
 
-func runDoctor(repoDir string, options doctorOptions) doctorReport {
-	report := doctorReport{Healthy: true}
-	add := func(check doctorCheck) {
+type doctorCheck = hostHealthLayer
+
+func runDoctor(repoDir string, options doctorOptions) hostHealthReport {
+	report := hostHealthReport{TargetProfile: options.TargetProfile, Scenario: options.ScenarioName, Healthy: true}
+	add := func(check hostHealthLayer) {
 		if check.Status == "fail" {
 			report.Healthy = false
 		}
-		report.Checks = append(report.Checks, check)
+		report.Layers = append(report.Layers, check)
 	}
 
 	config, configPath, err := loadRepoRunConfig(repoDir)
@@ -63,6 +77,7 @@ func runDoctor(repoDir string, options doctorOptions) doctorReport {
 		return report
 	}
 	add(okCheck("target-profile", options.TargetProfile))
+	report.HostPool = profile.HostPool
 
 	pool, ok := hostConfig.HostPools[profile.HostPool]
 	if !ok {
@@ -99,7 +114,8 @@ func runDoctor(repoDir string, options doctorOptions) doctorReport {
 		}
 	}
 	add(okCheck("host", host.ID))
-	checkHostLayers(repoDir, options, host, scenario, add)
+	report.HostID = host.ID
+	checkHostLayers(repoDir, options, host, scenario, &report, add)
 
 	return report
 }
@@ -167,7 +183,7 @@ func selectDoctorHost(hosts []mayaHostConfig, hostPin string) (mayaHostConfig, e
 	return mayaHostConfig{}, fmt.Errorf("no healthy Maya Host available")
 }
 
-func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig, scenario scenarioConfig, add func(doctorCheck)) {
+func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig, scenario scenarioConfig, report *hostHealthReport, add func(hostHealthLayer)) {
 	if host.usesRealSSH() {
 		add(realSSHLayer(host))
 		add(realWorkRootLayer(host))
@@ -181,7 +197,8 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 	if runtimeErr != nil {
 		add(failedCheck("runtime", runtimeErr.Error(), "Choose a supported runtime profile: fake-local or ssh-sessiond. See docs/setup/windows-maya-host.md#session-broker."))
 	} else {
-		add(okCheck("runtime", resolved.Metadata.Profile))
+		report.Runtime = resolved.Metadata
+		add(withSource(okCheck("runtime", resolved.Metadata.Profile), resolved.Metadata.Profile))
 	}
 	brokerInvalidReason := host.Broker.invalidReason()
 	if runtimeErr != nil {
@@ -202,52 +219,52 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 		} else {
 			defer func() {
 				if err := release(); err != nil {
-					add(failedCheck("host-lock", fmt.Sprintf("release doctor probe lock for %s: %v", host.ID, err), "Inspect the Host Lock state directory and permissions. See docs/setup/windows-maya-host.md#host-lock-and-retention."))
+					add(failedCheck("host-lock-release", fmt.Sprintf("release doctor probe lock for %s: %v", host.ID, err), "Inspect the Host Lock state directory and permissions. See docs/setup/windows-maya-host.md#host-lock-and-retention."))
 				}
 			}()
 		}
 	}
 	if runtimeErr == nil && host.Broker.isGGMayaSessiond() {
 		broker := resolved.Broker.(ggMayaSessiondBroker)
-		var check doctorCheck
+		var check hostHealthLayer
 		if err := broker.validate(); err != nil {
 			check = failedCheck("session-broker", err.Error(), "Configure gg_mayasessiond paths in host config. See docs/setup/windows-maya-host.md#session-broker.")
 		} else if probeLockDetail != "" {
-			check = failedCheck("session-broker", "skipped because Host Lock is not clear: "+probeLockDetail, "Wait for the active Fresh Run or clear the stale Host Lock before probing gg_mayasessiond. See docs/setup/windows-maya-host.md#host-lock-and-retention.")
+			check = withBlockedBy(failedCheck("session-broker", "skipped because Host Lock is not clear: "+probeLockDetail, "Wait for the active Fresh Run or clear the stale Host Lock before probing gg_mayasessiond. See docs/setup/windows-maya-host.md#host-lock-and-retention."), "host-lock")
 		} else if lockCheck.Status == "ok" {
 			check = realSessionBrokerLayer(host)
 		} else {
-			check = failedCheck("session-broker", "skipped because Host Lock is not clear", "Wait for the active Fresh Run or clear the stale Host Lock before probing gg_mayasessiond. See docs/setup/windows-maya-host.md#host-lock-and-retention.")
+			check = withBlockedBy(failedCheck("session-broker", "skipped because Host Lock is not clear", "Wait for the active Fresh Run or clear the stale Host Lock before probing gg_mayasessiond. See docs/setup/windows-maya-host.md#host-lock-and-retention."), "host-lock")
 		}
 		sessionBrokerOK = check.Status == "ok"
 		add(check)
 	} else if brokerLayerInvalidReason != "" {
 		add(failedCheck("session-broker", brokerLayerInvalidReason, "Use broker.type: gg-mayasessiond or a legacy fake broker status. See docs/setup/windows-maya-host.md#session-broker."))
 	} else {
-		add(statusLayer("session-broker", host.Broker.fakeStatus(), "reachable", []string{"", "ok", "healthy", "reachable"}, "Start or repair the Session Broker on this Maya Host. See docs/setup/windows-maya-host.md#session-broker."))
+		add(withSource(statusLayer("session-broker", host.Broker.fakeStatus(), "reachable", []string{"", "ok", "healthy", "reachable"}, "Start or repair the Session Broker on this Maya Host. See docs/setup/windows-maya-host.md#session-broker."), "fake"))
 	}
 	add(mayaVersionLayer(options, host, scenario))
 	if host.VisualEvidence != nil && !*host.VisualEvidence {
-		add(failedCheck("visual-evidence", "unavailable", "Enable screenshot or recording capture through the Session Broker. See docs/setup/windows-maya-host.md#visual-evidence."))
+		add(withSource(failedCheck("visual-evidence", "unavailable", "Enable screenshot or recording capture through the Session Broker. See docs/setup/windows-maya-host.md#visual-evidence."), "config"))
 	} else if brokerInvalidReason != "" {
-		add(failedCheck("visual-evidence", "unavailable: "+brokerInvalidReason, "Use a valid Session Broker before checking screenshot or recording capture. See docs/setup/windows-maya-host.md#visual-evidence."))
+		add(withBlockedBy(failedCheck("visual-evidence", "unavailable: "+brokerInvalidReason, "Use a valid Session Broker before checking screenshot or recording capture. See docs/setup/windows-maya-host.md#visual-evidence."), "session-broker"))
 	} else if runtimeErr == nil && host.Broker.isGGMayaSessiond() && scenario.Evidence.Recording.Enabled {
-		add(failedCheck("visual-evidence", "gg_mayasessiond recording capture unsupported", "Disable recording evidence or use screenshot/viewport capture. See docs/setup/windows-maya-host.md#visual-evidence."))
+		add(withSource(failedCheck("visual-evidence", "gg_mayasessiond recording capture unsupported", "Disable recording evidence or use screenshot/viewport capture. See docs/setup/windows-maya-host.md#visual-evidence."), "session-broker"))
 	} else if runtimeErr == nil && host.Broker.isGGMayaSessiond() {
 		broker := resolved.Broker.(ggMayaSessiondBroker)
 		if err := broker.validate(); err != nil {
-			add(failedCheck("visual-evidence", "unavailable: "+err.Error(), "Configure gg_mayasessiond paths before checking screenshot capture. See docs/setup/windows-maya-host.md#visual-evidence."))
+			add(withBlockedBy(failedCheck("visual-evidence", "unavailable: "+err.Error(), "Configure gg_mayasessiond paths before checking screenshot capture. See docs/setup/windows-maya-host.md#visual-evidence."), "session-broker"))
 		} else if probeLockDetail != "" {
-			add(failedCheck("visual-evidence", "skipped because Host Lock is not clear: "+probeLockDetail, "Wait for the active Fresh Run or clear the stale Host Lock before probing viewport.capture. See docs/setup/windows-maya-host.md#host-lock-and-retention."))
+			add(withBlockedBy(failedCheck("visual-evidence", "skipped because Host Lock is not clear: "+probeLockDetail, "Wait for the active Fresh Run or clear the stale Host Lock before probing viewport.capture. See docs/setup/windows-maya-host.md#host-lock-and-retention."), "host-lock"))
 		} else if lockCheck.Status != "ok" {
-			add(failedCheck("visual-evidence", "skipped because Host Lock is not clear", "Wait for the active Fresh Run or clear the stale Host Lock before probing viewport.capture. See docs/setup/windows-maya-host.md#host-lock-and-retention."))
+			add(withBlockedBy(failedCheck("visual-evidence", "skipped because Host Lock is not clear", "Wait for the active Fresh Run or clear the stale Host Lock before probing viewport.capture. See docs/setup/windows-maya-host.md#host-lock-and-retention."), "host-lock"))
 		} else if !sessionBrokerOK {
-			add(failedCheck("visual-evidence", "skipped because session-broker is not healthy", "Repair the gg_mayasessiond session-broker layer before probing viewport.capture. See docs/setup/windows-maya-host.md#visual-evidence."))
+			add(withBlockedBy(failedCheck("visual-evidence", "skipped because session-broker is not healthy", "Repair the gg_mayasessiond session-broker layer before probing viewport.capture. See docs/setup/windows-maya-host.md#visual-evidence."), "session-broker"))
 		} else {
 			add(realSessionBrokerVisualEvidenceLayer(host))
 		}
 	} else {
-		add(okCheck("visual-evidence", "available"))
+		add(withSource(okCheck("visual-evidence", "available"), "fake"))
 	}
 }
 
@@ -278,57 +295,59 @@ type windowsProcessSession struct {
 func realSessionBrokerLayer(host mayaHostConfig) doctorCheck {
 	broker := ggMayaSessiondBroker{host: host}
 	if err := broker.validate(); err != nil {
-		return failedCheck("session-broker", err.Error(), "Configure gg_mayasessiond paths in host config. See docs/setup/windows-maya-host.md#session-broker.")
+		return withSource(failedCheck("session-broker", err.Error(), "Configure gg_mayasessiond paths in host config. See docs/setup/windows-maya-host.md#session-broker."), "gg-mayasessiond")
 	}
 	doctorRaw, err := broker.runSessiondCLI(sessiondDoctorArgs(host), sessiondCommandTimeout)
 	if err != nil {
-		return failedCheck("session-broker", err.Error(), "Start or repair gg_mayasessiond on this Maya Host. See docs/setup/windows-maya-host.md#session-broker.")
+		return withSource(failedCheck("session-broker", err.Error(), "Start or repair gg_mayasessiond on this Maya Host. See docs/setup/windows-maya-host.md#session-broker."), "gg-mayasessiond")
 	}
 	var doctor sessiondDoctorOutput
 	if err := json.Unmarshal(doctorRaw, &doctor); err != nil {
-		return failedCheck("session-broker", "invalid doctor JSON", "Update gg_mayasessiond or fix its CLI JSON output. See docs/setup/windows-maya-host.md#session-broker.")
+		return withSource(failedCheck("session-broker", "invalid doctor JSON", "Update gg_mayasessiond or fix its CLI JSON output. See docs/setup/windows-maya-host.md#session-broker."), "gg-mayasessiond")
 	}
 	if !doctor.OK {
 		detail := "gg_mayasessiond doctor failed"
 		if failing := failingSessiondDoctorChecks(doctor); len(failing) > 0 {
 			detail += ": " + strings.Join(failing, ", ")
 		}
-		return failedCheck("session-broker", detail, "Repair the failing gg_mayasessiond doctor check. See docs/setup/windows-maya-host.md#session-broker.")
+		return withSource(failedCheck("session-broker", detail, "Repair the failing gg_mayasessiond doctor check. See docs/setup/windows-maya-host.md#session-broker."), "gg-mayasessiond")
 	}
 	statusRaw, err := broker.runSessiondCLI([]string{"status", "--state-dir", host.Broker.StateDir, "--json"}, sessiondCommandTimeout)
 	if err != nil {
-		return failedCheck("session-broker", err.Error(), "Start or repair gg_mayasessiond on this Maya Host. See docs/setup/windows-maya-host.md#session-broker.")
+		return withSource(failedCheck("session-broker", err.Error(), "Start or repair gg_mayasessiond on this Maya Host. See docs/setup/windows-maya-host.md#session-broker."), "gg-mayasessiond")
 	}
 	var status sessiondStatusOutput
 	if err := json.Unmarshal(statusRaw, &status); err != nil {
-		return failedCheck("session-broker", "invalid status JSON", "Update gg_mayasessiond or fix its CLI JSON output. See docs/setup/windows-maya-host.md#session-broker.")
+		return withSource(failedCheck("session-broker", "invalid status JSON", "Update gg_mayasessiond or fix its CLI JSON output. See docs/setup/windows-maya-host.md#session-broker."), "gg-mayasessiond")
 	}
 	effectiveStatus := status.DerivedStatus
 	if effectiveStatus == "" {
 		effectiveStatus = status.State.Status
 	}
 	if effectiveStatus != "running" {
-		return failedCheck("session-broker", "gg_mayasessiond is not running", "Start the interactive gg_mayasessiond broker. See docs/setup/windows-maya-host.md#session-broker.")
+		return withSource(failedCheck("session-broker", "gg_mayasessiond is not running", "Start the interactive gg_mayasessiond broker. See docs/setup/windows-maya-host.md#session-broker."), "gg-mayasessiond")
 	}
 	if !status.State.CallServerReady {
-		return failedCheck("session-broker", "gg_mayasessiond call server is not ready", "Repair Maya MCP startup for gg_mayasessiond. See docs/setup/windows-maya-host.md#session-broker.")
+		return withSource(failedCheck("session-broker", "gg_mayasessiond call server is not ready", "Repair Maya MCP startup for gg_mayasessiond. See docs/setup/windows-maya-host.md#session-broker."), "gg-mayasessiond")
 	}
 	processes, err := mayaProcessSessions(host)
 	if err != nil {
-		return failedCheck("session-broker", err.Error(), "Check Maya process state from the Windows host. See docs/setup/windows-maya-host.md#interactive-desktop.")
+		return withSource(failedCheck("session-broker", err.Error(), "Check Maya process state from the Windows host. See docs/setup/windows-maya-host.md#interactive-desktop."), "gg-mayasessiond")
 	}
 	if len(processes) == 0 {
-		return failedCheck("session-broker", "maya.exe is not running", "Start gg_mayasessiond from the interactive Windows desktop. See docs/setup/windows-maya-host.md#interactive-desktop.")
+		return withSource(failedCheck("session-broker", "maya.exe is not running", "Start gg_mayasessiond from the interactive Windows desktop. See docs/setup/windows-maya-host.md#interactive-desktop."), "gg-mayasessiond")
 	}
 	for _, process := range processes {
 		if process.SessionID == 0 {
-			return failedCheck("session-broker", "maya.exe is running in Windows Services session 0", "Restart gg_mayasessiond from the interactive Windows desktop. See docs/setup/windows-maya-host.md#interactive-desktop.")
+			return withSource(failedCheck("session-broker", "maya.exe is running in Windows Services session 0", "Restart gg_mayasessiond from the interactive Windows desktop. See docs/setup/windows-maya-host.md#interactive-desktop."), "gg-mayasessiond")
 		}
 	}
 	if err := broker.probeScriptExecute(); err != nil {
-		return failedCheck("session-broker", err.Error(), "Repair gg_mayasessiond script.execute access to the Maya Stall work root. See docs/setup/windows-maya-host.md#session-broker.")
+		return withSource(failedCheck("session-broker", err.Error(), "Repair gg_mayasessiond script.execute access to the Maya Stall work root. See docs/setup/windows-maya-host.md#session-broker."), "gg-mayasessiond")
 	}
-	return okCheck("session-broker", "gg_mayasessiond reachable; Maya UI is interactive")
+	check := withSource(okCheck("session-broker", "gg_mayasessiond reachable; Maya UI is interactive"), "gg-mayasessiond")
+	check.InteractiveDesktop = true
+	return check
 }
 
 func failingSessiondDoctorChecks(doctor sessiondDoctorOutput) []string {
@@ -345,15 +364,15 @@ func realSessionBrokerVisualEvidenceLayer(host mayaHostConfig) doctorCheck {
 	broker := ggMayaSessiondBroker{host: host}
 	result, err := broker.callCapture()
 	if err != nil {
-		return failedCheck("visual-evidence", err.Error(), "Repair viewport.capture in gg_mayasessiond. See docs/setup/windows-maya-host.md#visual-evidence.")
+		return withSource(failedCheck("visual-evidence", err.Error(), "Repair viewport.capture in gg_mayasessiond. See docs/setup/windows-maya-host.md#visual-evidence."), "session-broker")
 	}
 	if !result.OK {
-		return failedCheck("visual-evidence", result.Error, "Repair viewport.capture in gg_mayasessiond. See docs/setup/windows-maya-host.md#visual-evidence.")
+		return withSource(failedCheck("visual-evidence", result.Error, "Repair viewport.capture in gg_mayasessiond. See docs/setup/windows-maya-host.md#visual-evidence."), "session-broker")
 	}
 	if _, _, err := captureImageData(result); err != nil {
-		return failedCheck("visual-evidence", err.Error(), "Repair viewport.capture in gg_mayasessiond. See docs/setup/windows-maya-host.md#visual-evidence.")
+		return withSource(failedCheck("visual-evidence", err.Error(), "Repair viewport.capture in gg_mayasessiond. See docs/setup/windows-maya-host.md#visual-evidence."), "session-broker")
 	}
-	return okCheck("visual-evidence", "viewport.capture available")
+	return withSource(okCheck("visual-evidence", "viewport.capture available"), "session-broker")
 }
 
 func sessiondDoctorArgs(host mayaHostConfig) []string {
@@ -424,25 +443,83 @@ func hostLockLayer(repoDir string, hostID string) doctorCheck {
 	lockPath := filepath.Join(repoDir, ".maya-stall", "state", "locks", "hosts", hostID+".lock")
 	_, err := os.Stat(lockPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return okCheck("host-lock", "unlocked")
+		return withState(okCheck("host-lock", "unlocked"), "unlocked")
 	}
 	if err != nil {
 		return failedCheck("host-lock", err.Error(), "Inspect the Host Lock state directory and permissions. See docs/setup/windows-maya-host.md#host-lock-and-retention.")
+	}
+	if keptRun, found, err := readHostLockKeptRun(lockPath); err != nil {
+		return failedCheck("host-lock", err.Error(), "Inspect or remove the unreadable Host Lock file. See docs/setup/windows-maya-host.md#host-lock-and-retention.")
+	} else if found {
+		check := withState(failedCheck("host-lock", fmt.Sprintf("%s locked", hostID), "Stop the Kept Session or clear the Host Lock after verifying no run is active. See docs/setup/windows-maya-host.md#host-lock-and-retention."), "kept")
+		check.KeptRun = keptRun
+		return check
 	}
 	stale, err := isStaleHostLock(lockPath)
 	if err != nil {
 		return failedCheck("host-lock", err.Error(), "Inspect or remove the unreadable Host Lock file. See docs/setup/windows-maya-host.md#host-lock-and-retention.")
 	}
 	if stale {
-		return okCheck("host-lock", "unlocked")
+		return withState(okCheck("host-lock", "unlocked"), "stale")
 	}
-	return failedCheck("host-lock", fmt.Sprintf("%s locked", hostID), "Wait for the active Fresh Run or clear the stale Host Lock after verifying no run is active. See docs/setup/windows-maya-host.md#host-lock-and-retention.")
+	return withState(failedCheck("host-lock", fmt.Sprintf("%s locked", hostID), "Wait for the active Fresh Run or clear the stale Host Lock after verifying no run is active. See docs/setup/windows-maya-host.md#host-lock-and-retention."), "active")
 }
 
 func okCheck(layer string, detail string) doctorCheck {
-	return doctorCheck{Layer: layer, Status: "ok", Detail: detail}
+	return doctorCheck{ID: layer, Layer: layer, Status: "ok", Detail: detail}
 }
 
 func failedCheck(layer string, detail string, hint string) doctorCheck {
-	return doctorCheck{Layer: layer, Status: "fail", Detail: detail, Hint: hint}
+	return doctorCheck{ID: layer, Layer: layer, Status: "fail", Detail: detail, Hint: hint}
+}
+
+func withSource(check hostHealthLayer, source string) hostHealthLayer {
+	check.Source = source
+	return check
+}
+
+func withState(check hostHealthLayer, state string) hostHealthLayer {
+	check.State = state
+	return check
+}
+
+func withBlockedBy(check hostHealthLayer, blockedBy string) hostHealthLayer {
+	check.BlockedBy = blockedBy
+	return check
+}
+
+func printHostHealthReport(stdout io.Writer, report hostHealthReport) {
+	for _, check := range report.Layers {
+		fmt.Fprintf(stdout, "%s: %s - %s\n", check.ID, check.Status, check.Detail)
+		if check.Hint != "" {
+			fmt.Fprintf(stdout, "hint: %s\n", check.Hint)
+		}
+	}
+}
+
+func formatHostHealthReport(report hostHealthReport) string {
+	parts := make([]string, 0, len(report.Layers))
+	for _, check := range report.Layers {
+		part := fmt.Sprintf("%s=%s", check.ID, check.Status)
+		if check.Source != "" {
+			part += " source:" + check.Source
+		}
+		if check.State != "" {
+			part += " state:" + check.State
+		}
+		if check.KeptRun != "" {
+			part += " keptRun:" + check.KeptRun
+		}
+		if check.InteractiveDesktop {
+			part += " interactiveDesktop:true"
+		}
+		if check.BlockedBy != "" {
+			part += " blockedBy:" + check.BlockedBy
+		}
+		if check.Detail != "" {
+			part += " detail:" + check.Detail
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, "; ")
 }

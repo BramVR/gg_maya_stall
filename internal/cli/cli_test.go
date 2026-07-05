@@ -1113,6 +1113,52 @@ func TestDoctorReportsHostSpecificHealthLayers(t *testing.T) {
 	}
 }
 
+func TestDoctorReturnsStableHostHealthReportBeforeRendering(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := writeLayeredHostConfig(t, dir)
+
+	report := runDoctor(dir, doctorOptions{HostConfig: hostConfigPath, TargetProfile: "ci", HostPin: "alpha"})
+
+	if !report.Healthy {
+		t.Fatalf("Host Health healthy = false, checks: %+v", report.Layers)
+	}
+	if report.TargetProfile != "ci" || report.HostPool != "windows-maya" || report.HostID != "alpha" {
+		t.Fatalf("Host Health selection = target %q pool %q host %q", report.TargetProfile, report.HostPool, report.HostID)
+	}
+	if report.Runtime.Profile != "fake-local" || report.Runtime.HostAdapter != "fake" || report.Runtime.BrokerAdapter != "fake" {
+		t.Fatalf("Host Health runtime = %+v, want fake-local", report.Runtime)
+	}
+	for _, want := range []struct {
+		id     string
+		status string
+		state  string
+		source string
+	}{
+		{id: "local-config", status: "ok"},
+		{id: "target-profile", status: "ok"},
+		{id: "host-pool", status: "ok"},
+		{id: "host", status: "ok"},
+		{id: "fake-ssh", status: "ok"},
+		{id: "work-root", status: "ok"},
+		{id: "runtime", status: "ok", source: "fake-local"},
+		{id: "session-broker", status: "ok", source: "fake"},
+		{id: "maya-version", status: "ok"},
+		{id: "visual-evidence", status: "ok", source: "fake"},
+		{id: "host-lock", status: "ok", state: "unlocked"},
+	} {
+		check := requireHostHealthLayer(t, report, want.id)
+		if check.Status != want.status {
+			t.Fatalf("%s status = %q, want %q; layer: %+v", want.id, check.Status, want.status, check)
+		}
+		if want.state != "" && check.State != want.state {
+			t.Fatalf("%s state = %q, want %q; layer: %+v", want.id, check.State, want.state, check)
+		}
+		if want.source != "" && check.Source != want.source {
+			t.Fatalf("%s source = %q, want %q; layer: %+v", want.id, check.Source, want.source, check)
+		}
+	}
+}
+
 func TestDoctorRealSSHVerifiesConnectivityAndWritableWorkRoot(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	sshLog := filepath.Join(dir, "ssh.log")
@@ -1185,6 +1231,62 @@ hostPools:
 		if !strings.Contains(log, want) {
 			t.Fatalf("ssh command log missing noninteractive option %q:\n%s", want, log)
 		}
+	}
+}
+
+func TestDoctorHostHealthTiesRealVisualEvidenceToSessionBroker(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sshLog := filepath.Join(dir, "ssh.log")
+	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
+		`maya-stall-ssh-ok`,
+		`writable`,
+		`{"ok":true,"checks":[{"id":"state_dir","ok":true}]}`,
+		`{"derived_status":"running","state":{"status":"running","call_server_ready":true,"maya_alive":true,"mcp_alive":true}}`,
+		`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
+		`{"ok":true,"tool":"script.execute"}`,
+		`removed`,
+		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
+	})
+	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+          mcpSource: C:/maya-stall/tools/GG_MayaMCP
+        visualEvidence: true
+`)
+
+	report := runDoctor(dir, doctorOptions{HostConfig: hostConfigPath, TargetProfile: "ci", HostPin: "alpha"})
+
+	if !report.Healthy {
+		t.Fatalf("Host Health healthy = false, checks: %+v", report.Layers)
+	}
+	broker := requireHostHealthLayer(t, report, "session-broker")
+	if broker.Status != "ok" || broker.Source != "gg-mayasessiond" || !broker.InteractiveDesktop {
+		t.Fatalf("session-broker Host Health = %+v, want interactive gg_mayasessiond", broker)
+	}
+	visual := requireHostHealthLayer(t, report, "visual-evidence")
+	if visual.Status != "ok" || visual.Source != "session-broker" || visual.BlockedBy != "" {
+		t.Fatalf("visual-evidence Host Health = %+v, want broker-backed ok", visual)
+	}
+	if !strings.Contains(visual.Detail, "viewport.capture") {
+		t.Fatalf("visual-evidence detail = %q, want viewport.capture proof", visual.Detail)
 	}
 }
 
@@ -1573,6 +1675,36 @@ hostPools:
 	if _, err := os.Stat(sftpLog); !os.IsNotExist(err) {
 		t.Fatalf("locked doctor should not stage script.execute probe, stat err = %v", err)
 	}
+}
+
+func TestDoctorHostHealthRepresentsHostLockState(t *testing.T) {
+	t.Run("kept run blocks with kept run id", func(t *testing.T) {
+		dir := writeRunConfigFixture(t)
+		hostConfigPath := writeSingleHealthyHostConfig(t, dir)
+		lockPath := filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")
+		mustWriteFile(t, lockPath, "host: alpha\nkeptRun: run-kept\n")
+
+		report := runDoctor(dir, doctorOptions{HostConfig: hostConfigPath, TargetProfile: "ci", HostPin: "alpha"})
+
+		lock := requireHostHealthLayer(t, report, "host-lock")
+		if lock.Status != "fail" || lock.State != "kept" || lock.KeptRun != "run-kept" {
+			t.Fatalf("kept Host Lock layer = %+v", lock)
+		}
+	})
+
+	t.Run("stale lock is represented as stale but not blocking", func(t *testing.T) {
+		dir := writeRunConfigFixture(t)
+		hostConfigPath := writeSingleHealthyHostConfig(t, dir)
+		lockPath := filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")
+		mustWriteFile(t, lockPath, "host: alpha\npid: -1\n")
+
+		report := runDoctor(dir, doctorOptions{HostConfig: hostConfigPath, TargetProfile: "ci", HostPin: "alpha"})
+
+		lock := requireHostHealthLayer(t, report, "host-lock")
+		if lock.Status != "ok" || lock.State != "stale" {
+			t.Fatalf("stale Host Lock layer = %+v", lock)
+		}
+	})
 }
 
 func TestDoctorGGMayaSessiondValidatesConfigWhenHostLocked(t *testing.T) {
@@ -4466,6 +4598,17 @@ func mustWriteFile(t *testing.T, path string, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write fixture file: %v", err)
 	}
+}
+
+func requireHostHealthLayer(t *testing.T, report hostHealthReport, id string) hostHealthLayer {
+	t.Helper()
+	for _, layer := range report.Layers {
+		if layer.ID == id {
+			return layer
+		}
+	}
+	t.Fatalf("Host Health missing layer %q: %+v", id, report.Layers)
+	return hostHealthLayer{}
 }
 
 func writeFakeCommand(t *testing.T, dir string, name string, logPath string, exitCode int) string {

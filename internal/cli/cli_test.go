@@ -2510,6 +2510,7 @@ func TestSessiondJSONFromFailedOutputRequiresCompleteCLIJSON(t *testing.T) {
 		[]byte("traceback {'not': 'json'}"),
 		[]byte(`{"error":"missing ok"}`),
 		[]byte(`{"ok":true,"tool":"script.execute"}`),
+		[]byte(`{"level":"error","ok":false,"msg":"connection refused"}`),
 	} {
 		if got, ok := sessiondJSONFromFailedOutput(raw); ok {
 			t.Fatalf("sessiondJSONFromFailedOutput accepted %q as %s", string(raw), string(got))

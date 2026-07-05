@@ -526,6 +526,9 @@ func hasAnyJSONKey(object map[string]json.RawMessage, keys ...string) bool {
 
 func sessiondJSONFromFailedOutput(raw []byte) ([]byte, bool) {
 	jsonOutput := trimToJSON(raw)
+	if !isSessiondJSONDocument(jsonOutput) {
+		return nil, false
+	}
 	var object map[string]any
 	if err := json.Unmarshal(jsonOutput, &object); err != nil {
 		return nil, false

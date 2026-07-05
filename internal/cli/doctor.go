@@ -168,8 +168,13 @@ func selectDoctorHost(hosts []mayaHostConfig, hostPin string) (mayaHostConfig, e
 
 func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig, scenario scenarioConfig, add func(doctorCheck)) {
 	if host.usesRealSSH() {
-		add(realSSHLayer(host))
-		add(realWorkRootLayer(host))
+		sshCheck := realSSHLayer(host)
+		add(sshCheck)
+		if sshCheck.Status == "ok" {
+			add(realWorkRootLayer(host))
+		} else {
+			add(failedCheck("work-root", "skipped", "Fix SSH reachability or SSH settings before checking the host work root. See docs/setup/windows-maya-host.md#work-root."))
+		}
 	} else {
 		add(statusLayer("fake-ssh", host.SSH.FakeStatus, "reachable", []string{"", "ok", "healthy", "reachable"}, "Fix SSH reachability for this Maya Host. See docs/setup/windows-maya-host.md#openssh-reachability."))
 		add(statusLayer("work-root", host.WorkRoot, "writable", []string{"", "ok", "writable"}, "Fix the host work root path or permissions. See docs/setup/windows-maya-host.md#work-root."))
@@ -215,8 +220,16 @@ func mayaVersionLayer(options doctorOptions, host mayaHostConfig, scenario scena
 }
 
 func hostLockLayer(repoDir string, hostID string) doctorCheck {
+	reapLockPath := filepath.Join(repoDir, ".maya-stall", "state", "locks", "hosts", "reap", hostID+".lock")
+	reaping, err := hostLockReapInProgress(reapLockPath)
+	if err != nil {
+		return failedCheck("host-lock", err.Error(), "Inspect or remove the Host Lock reap guard after verifying no reap is active. See docs/setup/windows-maya-host.md#host-lock-and-retention.")
+	}
+	if reaping {
+		return failedCheck("host-lock", fmt.Sprintf("%s lock reap in progress", hostID), "Wait for the Host Lock reap to finish. See docs/setup/windows-maya-host.md#host-lock-and-retention.")
+	}
 	lockPath := filepath.Join(repoDir, ".maya-stall", "state", "locks", "hosts", hostID+".lock")
-	_, err := os.Stat(lockPath)
+	_, err = os.Stat(lockPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return okCheck("host-lock", "unlocked")
 	}

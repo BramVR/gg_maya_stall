@@ -17,6 +17,8 @@ const defaultFakeHostID = "fake-local"
 
 var hostIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
+var errHostLockReapGuard = errors.New("Host Lock reap guard")
+
 type hostRuntime struct {
 	TargetProfile string
 	HostID        string
@@ -57,6 +59,7 @@ type sshConfig struct {
 	IdentityFile string `yaml:"identityFile"`
 	Binary       string `yaml:"binary"`
 	SFTPBinary   string `yaml:"sftpBinary"`
+	SFTPTimeout  string `yaml:"sftpTimeout"`
 }
 
 func (config *sshConfig) UnmarshalYAML(value *yaml.Node) error {
@@ -89,29 +92,43 @@ func selectHostForRun(repoDir string, options runOptions) (hostRuntime, error) {
 	deadline := time.Now().Add(options.HostLockWait)
 	for {
 		var sawLocked bool
+		var sawActiveLocked bool
+		var lockErr error
 		for _, candidate := range candidates {
 			if !isHealthyHost(candidate) {
 				continue
 			}
 			release, locked, err := acquireHostLock(repoDir, candidate.ID)
 			if err != nil {
+				if errors.Is(err, errHostLockReapGuard) {
+					lockErr = err
+					sawLocked = true
+					continue
+				}
 				return hostRuntime{}, err
 			}
 			if locked {
 				sawLocked = true
+				sawActiveLocked = true
 				continue
 			}
 			return hostRuntime{TargetProfile: options.TargetProfile, HostID: candidate.ID, Config: candidate, release: release}, nil
 		}
 
-		if options.HostLockWait <= 0 || time.Now().After(deadline) {
-			if sawLocked {
-				return hostRuntime{}, fmt.Errorf("no healthy unlocked Maya Host available in Target Profile %q", options.TargetProfile)
-			}
+		if !sawLocked {
 			if options.HostPin != "" {
 				return hostRuntime{}, fmt.Errorf("pinned Maya Host %q is not healthy in Target Profile %q", options.HostPin, options.TargetProfile)
 			}
 			return hostRuntime{}, fmt.Errorf("no healthy Maya Host available in Target Profile %q", options.TargetProfile)
+		}
+		if lockErr != nil && !sawActiveLocked {
+			return hostRuntime{}, lockErr
+		}
+		if options.HostLockWait <= 0 || time.Now().After(deadline) {
+			if lockErr != nil {
+				return hostRuntime{}, lockErr
+			}
+			return hostRuntime{}, fmt.Errorf("no healthy unlocked Maya Host available in Target Profile %q", options.TargetProfile)
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
@@ -201,7 +218,15 @@ func acquireHostLock(repoDir string, hostID string) (func() error, bool, error) 
 	if err := os.MkdirAll(lockDir, 0o755); err != nil {
 		return nil, false, err
 	}
+	reapLockDir := filepath.Join(lockDir, "reap")
+	if err := ensureOutputPathHasNoSymlinkParent(repoDir, filepath.Join(".maya-stall", "state", "locks", "hosts", "reap")); err != nil {
+		return nil, false, err
+	}
+	if err := os.MkdirAll(reapLockDir, 0o755); err != nil {
+		return nil, false, err
+	}
 	lockPath := filepath.Join(lockDir, hostID+".lock")
+	reapLockPath := filepath.Join(reapLockDir, hostID+".lock")
 	tempFile, err := os.CreateTemp(lockDir, hostID+".*.tmp")
 	if err != nil {
 		return nil, false, err
@@ -216,7 +241,14 @@ func acquireHostLock(repoDir string, hostID string) (func() error, bool, error) 
 		return nil, false, err
 	}
 	for {
-		err := os.Link(tempPath, lockPath)
+		reaping, err := hostLockReapInProgress(reapLockPath)
+		if err != nil {
+			return nil, false, err
+		}
+		if reaping {
+			return nil, true, nil
+		}
+		err = os.Link(tempPath, lockPath)
 		if errors.Is(err, os.ErrExist) {
 			stale, err := isStaleHostLock(lockPath)
 			if err != nil {
@@ -225,10 +257,44 @@ func acquireHostLock(repoDir string, hostID string) (func() error, bool, error) 
 			if !stale {
 				return nil, true, nil
 			}
-			if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			releaseReap, acquired, err := acquireHostLockReapGuard(reapLockPath, hostID)
+			if err != nil {
 				return nil, false, err
 			}
-			continue
+			if !acquired {
+				return nil, true, nil
+			}
+			stale, err = isStaleHostLock(lockPath)
+			if err != nil {
+				_ = releaseReap()
+				return nil, false, err
+			}
+			if !stale {
+				_ = releaseReap()
+				return nil, true, nil
+			}
+			if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				_ = releaseReap()
+				return nil, false, err
+			}
+			err = os.Link(tempPath, lockPath)
+			reapErr := releaseReap()
+			if err != nil {
+				if reapErr != nil {
+					return nil, false, reapErr
+				}
+				if errors.Is(err, os.ErrExist) {
+					continue
+				}
+				return nil, false, err
+			}
+			if reapErr != nil {
+				_ = os.Remove(lockPath)
+				return nil, false, reapErr
+			}
+			return func() error {
+				return os.Remove(lockPath)
+			}, false, nil
 		}
 		if err != nil {
 			return nil, false, err
@@ -237,6 +303,80 @@ func acquireHostLock(repoDir string, hostID string) (func() error, bool, error) 
 			return os.Remove(lockPath)
 		}, false, nil
 	}
+}
+
+func hostLockReapInProgress(reapLockPath string) (bool, error) {
+	info, err := os.Lstat(reapLockPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Errorf("%w: %s must not be a symlink", errHostLockReapGuard, reapLockPath)
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("%w: %s must be a regular file", errHostLockReapGuard, reapLockPath)
+	}
+	content, err := os.ReadFile(reapLockPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read Host Lock reap guard %s: %w", reapLockPath, err)
+	}
+	guardContent := string(content)
+	for _, line := range strings.Split(guardContent, "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok || strings.TrimSpace(key) != "pid" {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return false, fmt.Errorf("%w: %s has invalid pid; remove it after verifying no Host Lock reap is active", errHostLockReapGuard, reapLockPath)
+		}
+		if !processExists(pid) {
+			currentContent, err := os.ReadFile(reapLockPath)
+			if errors.Is(err, os.ErrNotExist) {
+				return false, nil
+			}
+			if err != nil {
+				return false, fmt.Errorf("read Host Lock reap guard %s: %w", reapLockPath, err)
+			}
+			if string(currentContent) != guardContent {
+				return true, nil
+			}
+			return false, fmt.Errorf("%w: stale guard %s from pid %d; remove it after verifying no Host Lock reap is active", errHostLockReapGuard, reapLockPath, pid)
+		}
+		return true, nil
+	}
+	if time.Since(info.ModTime()) > 5*time.Second {
+		return false, fmt.Errorf("%w: %s has no pid; remove it after verifying no Host Lock reap is active", errHostLockReapGuard, reapLockPath)
+	}
+	// Be conservative: an empty guard may be a freshly created guard that has
+	// not been populated yet.
+	return true, nil
+}
+
+func acquireHostLockReapGuard(reapLockPath string, hostID string) (func() error, bool, error) {
+	file, err := os.OpenFile(reapLockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if errors.Is(err, os.ErrExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if _, err := fmt.Fprintf(file, "host: %s\npid: %d\n", hostID, os.Getpid()); err != nil {
+		file.Close()
+		_ = os.Remove(reapLockPath)
+		return nil, false, err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(reapLockPath)
+		return nil, false, err
+	}
+	return func() error { return os.Remove(reapLockPath) }, true, nil
 }
 
 func markHostLockKept(repoDir string, hostID string, runID string) error {

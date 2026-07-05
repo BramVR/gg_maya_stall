@@ -162,6 +162,10 @@ func replacePublishedDir(bundleDir string, publishedDir string, populate func(st
 	if err != nil {
 		return err
 	}
+	if err := os.Chmod(stagingDir, 0o755); err != nil {
+		_ = os.RemoveAll(stagingDir)
+		return err
+	}
 	if err := copyPath(bundleDir, stagingDir); err != nil {
 		_ = os.RemoveAll(stagingDir)
 		return fmt.Errorf("copy Evidence Bundle into staging directory: %w", err)

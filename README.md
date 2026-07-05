@@ -202,13 +202,14 @@ hostPools:
           user: maya-runner
           port: 22
           identityFile: ~/.ssh/maya-stall-ci
+          sftpTimeout: 30m
         workRoot: C:/maya-stall
         broker: ok
         mayaVersions: ["2025"]
         visualEvidence: true
 ```
 
-With `transport: ssh`, `maya-stall doctor` runs real SSH connectivity and writable work-root checks. `maya-stall run` uploads declared Run Payload paths with `sftp` into a clean remote run workspace under `workRoot/runs/<run-id>/`, then downloads declared `expectedOutputs.scenarioResult` and `expectedOutputs.files` back into the local Evidence Bundle path. Session Broker launch remains a separate layer.
+With `transport: ssh`, `maya-stall doctor` runs real SSH connectivity and writable work-root checks. `maya-stall run` uploads declared Run Payload paths with `sftp` into a clean remote run workspace under `workRoot/runs/<run-id>/`, then downloads declared `expectedOutputs.scenarioResult` and `expectedOutputs.files` back into the local Evidence Bundle path. `ssh.sftpTimeout` defaults to `30m`; set it to `0` to rely on SSH keepalives without a wall-clock transfer cap. Session Broker launch remains a separate layer.
 
 Opt-in live smoke is skipped unless the exact host config env var is set:
 

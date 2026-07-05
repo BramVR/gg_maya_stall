@@ -11,10 +11,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf16"
 )
 
 const sshCommandTimeout = 30 * time.Second
+const defaultSFTPBatchTimeout = 30 * time.Minute
 
 type realSSHHost struct {
 	host mayaHostConfig
@@ -30,6 +32,9 @@ func runHostForConfig(host mayaHostConfig) runHost {
 func realSSHLayer(host mayaHostConfig) doctorCheck {
 	if err := validateRealSSHConnection(host); err != nil {
 		return failedCheck("ssh", err.Error(), "Fix SSH connection details in host config. See docs/setup/windows-maya-host.md#openssh-reachability.")
+	}
+	if _, err := sftpBatchTimeout(host); err != nil {
+		return failedCheck("ssh", err.Error(), "Fix SSH transfer settings in host config. See docs/setup/windows-maya-host.md#openssh-reachability.")
 	}
 	if err := runSSHCommand(host, encodedPowerShellCommand(`Write-Output 'maya-stall-ssh-ok'`)); err != nil {
 		return failedCheck("ssh", "unreachable", "Fix SSH reachability for this Maya Host. See docs/setup/windows-maya-host.md#openssh-reachability.")
@@ -67,6 +72,9 @@ func validateRealSSHConfig(host mayaHostConfig) error {
 	if err := rejectSFTPBatchUnsafePath(host.WorkRoot); err != nil {
 		return fmt.Errorf("workRoot %w", err)
 	}
+	if _, err := sftpBatchTimeout(host); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -89,9 +97,9 @@ func runSSHCommand(host mayaHostConfig, remoteCommand []string) error {
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("ssh command timed out after %s", sshCommandTimeout)
+			return withStderrTail(fmt.Errorf("ssh command timed out after %s", sshCommandTimeout), stderr.String())
 		}
-		return fmt.Errorf("ssh command failed: %w", err)
+		return withStderrTail(fmt.Errorf("ssh command failed: %w", err), stderr.String())
 	}
 	return nil
 }
@@ -286,17 +294,72 @@ func runSFTPBatch(host mayaHostConfig, batch string) error {
 		"-o", "ServerAliveCountMax=2",
 	)
 	args = append(args, sshTarget(host))
-	ctx, cancel := context.WithTimeout(context.Background(), sshCommandTimeout)
-	defer cancel()
-	command := exec.CommandContext(ctx, binary, args...)
+	timeout, err := sftpBatchTimeout(host)
+	if err != nil {
+		return err
+	}
+	var ctx context.Context
+	var cancel context.CancelFunc
+	var command *exec.Cmd
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		command = exec.CommandContext(ctx, binary, args...)
+	} else {
+		command = exec.Command(binary, args...)
+	}
 	command.Stdin = strings.NewReader(batch)
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("sftp command timed out after %s", sshCommandTimeout)
+		if timeout > 0 && ctx.Err() == context.DeadlineExceeded {
+			return withStderrTail(fmt.Errorf("sftp command timed out after %s", timeout), stderr.String())
 		}
-		return fmt.Errorf("sftp command failed: %w", err)
+		return withStderrTail(fmt.Errorf("sftp command failed: %w", err), stderr.String())
 	}
 	return nil
+}
+
+func sftpBatchTimeout(host mayaHostConfig) (time.Duration, error) {
+	value := strings.TrimSpace(host.SSH.SFTPTimeout)
+	if value == "" {
+		return defaultSFTPBatchTimeout, nil
+	}
+	timeout, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("ssh.sftpTimeout %q must be a Go duration such as 30m or 0 to disable", value)
+	}
+	if timeout < 0 {
+		return 0, fmt.Errorf("ssh.sftpTimeout must not be negative")
+	}
+	return timeout, nil
+}
+
+func withStderrTail(err error, stderr string) error {
+	stderr = sanitizeStderrTail(stderr)
+	if stderr == "" {
+		return err
+	}
+	return fmt.Errorf("%w: %s", err, stderr)
+}
+
+func sanitizeStderrTail(stderr string) string {
+	stderr = strings.TrimSpace(strings.ToValidUTF8(stderr, ""))
+	const maxStderrTailRunes = 4096
+	runes := []rune(stderr)
+	if len(runes) > maxStderrTailRunes {
+		runes = runes[len(runes)-maxStderrTailRunes:]
+	}
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\t':
+			return r
+		}
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) || unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, string(runes))
 }
 
 type sftpBatch struct {
@@ -324,7 +387,11 @@ func (batch *sftpBatch) mkdir(path string) {
 
 func (batch *sftpBatch) mkdirAll(path string) {
 	current := ""
-	for _, part := range strings.Split(strings.Trim(strings.ReplaceAll(path, `\`, "/"), "/"), "/") {
+	normalized := strings.ReplaceAll(path, `\`, "/")
+	if strings.HasPrefix(normalized, "/") {
+		current = "/"
+	}
+	for _, part := range strings.Split(strings.Trim(normalized, "/"), "/") {
 		if part == "" {
 			continue
 		}
@@ -333,6 +400,8 @@ func (batch *sftpBatch) mkdirAll(path string) {
 			if strings.HasSuffix(current, ":") {
 				continue
 			}
+		} else if current == "/" {
+			current += part
 		} else {
 			current += "/" + part
 		}

@@ -446,6 +446,11 @@ scenarios:
 			t.Fatalf("expected published artifact %s: %v", path, err)
 		}
 	}
+	if info, err := os.Stat(published); err != nil {
+		t.Fatalf("stat published Evidence Bundle: %v", err)
+	} else if info.Mode().Perm()&0o055 != 0o055 {
+		t.Fatalf("published Evidence Bundle mode = %v, want traversable by group/other", info.Mode().Perm())
+	}
 
 	artifactManifestBytes, err := os.ReadFile(filepath.Join(published, "artifact-manifest.json"))
 	if err != nil {
@@ -1522,6 +1527,70 @@ hostPools:
 	}
 }
 
+func TestRunScenarioRealSSHReportsSFTPStderr(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sftpPath := writeFailingCommandWithStderr(t, dir, "fake-sftp-stderr", "remote disk full")
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "remote disk full") {
+		t.Fatalf("run error missing sftp stderr: %s", stderr.String())
+	}
+}
+
+func TestWithStderrTailStripsControlCharacters(t *testing.T) {
+	err := withStderrTail(fmt.Errorf("ssh command failed"), "ok\x1b]52;c;secret\x07\rspoof\u009dhidden\u009c\u202Eevil\nnext")
+	message := err.Error()
+	if strings.ContainsAny(message, "\x1b\x07\r\u009d\u009c\u202E") {
+		t.Fatalf("stderr tail kept terminal control characters: %q", message)
+	}
+	for _, want := range []string{"ssh command failed", "ok]52;c;secretspoofhiddenevil", "next"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("stderr tail missing %q: %q", want, message)
+		}
+	}
+}
+
+func TestSFTPBatchTimeoutConfig(t *testing.T) {
+	timeout, err := sftpBatchTimeout(mayaHostConfig{})
+	if err != nil {
+		t.Fatalf("default sftp timeout: %v", err)
+	}
+	if timeout != defaultSFTPBatchTimeout {
+		t.Fatalf("default sftp timeout = %s, want %s", timeout, defaultSFTPBatchTimeout)
+	}
+
+	timeout, err = sftpBatchTimeout(mayaHostConfig{SSH: sshConfig{SFTPTimeout: "0"}})
+	if err != nil {
+		t.Fatalf("disabled sftp timeout: %v", err)
+	}
+	if timeout != 0 {
+		t.Fatalf("disabled sftp timeout = %s, want 0", timeout)
+	}
+
+	if _, err := sftpBatchTimeout(mayaHostConfig{SSH: sshConfig{SFTPTimeout: "-1s"}}); err == nil {
+		t.Fatal("negative sftp timeout succeeded")
+	}
+}
+
 func TestRunScenarioRealSSHDownloadsValidatorOnlyOutputs(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	configPath := filepath.Join(dir, ".maya-stall.yaml")
@@ -1676,6 +1745,24 @@ hostPools:
 	}
 }
 
+func TestSFTPBatchMkdirAllPreservesAbsolutePOSIXRoot(t *testing.T) {
+	batch := newSFTPBatch()
+	batch.mkdirAll("/opt/maya-stall/runs")
+
+	for _, want := range []string{
+		`-mkdir "/opt"`,
+		`-mkdir "/opt/maya-stall"`,
+		`-mkdir "/opt/maya-stall/runs"`,
+	} {
+		if !strings.Contains(batch.String(), want) {
+			t.Fatalf("sftp mkdirAll missing %q:\n%s", want, batch.String())
+		}
+	}
+	if strings.Contains(batch.String(), `-mkdir "opt"`) {
+		t.Fatalf("sftp mkdirAll emitted relative POSIX path:\n%s", batch.String())
+	}
+}
+
 func TestRunScenarioRealSSHRejectsSymlinkedDownloadDestination(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation is not consistently available on Windows test runners")
@@ -1742,6 +1829,184 @@ hostPools:
 	if !strings.Contains(stdout.String(), "host: beta") {
 		t.Fatalf("run output missing next unlocked host:\n%s", stdout.String())
 	}
+}
+
+func TestRunScenarioDoesNotWaitWhenNoHealthyHostExists(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        health: unhealthy
+`)
+	var stdout, stderr bytes.Buffer
+
+	start := time.Now()
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--host-lock-wait", "2s", "smoke"}, &stdout, &stderr, dir, "test-version")
+	elapsed := time.Since(start)
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("run waited %s despite no healthy host", elapsed)
+	}
+	if !strings.Contains(stderr.String(), "no healthy Maya Host") {
+		t.Fatalf("run error missing no healthy host detail: %s", stderr.String())
+	}
+}
+
+func TestRunScenarioReportsStaleHostLockReapGuard(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := writeSingleHealthyHostConfig(t, dir)
+	guardPath := filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "reap", "alpha.lock")
+	mustWriteFile(t, guardPath, "host: alpha\npid: 99999999\n")
+	var stdout, stderr bytes.Buffer
+
+	start := time.Now()
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--host-lock-wait", "2s", "smoke"}, &stdout, &stderr, dir, "test-version")
+	elapsed := time.Since(start)
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("run waited %s despite stale reap guard requiring manual cleanup", elapsed)
+	}
+	for _, want := range []string{"Host Lock reap guard", "stale guard", guardPath, "remove it after verifying"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("run error missing %q:\n%s", want, stderr.String())
+		}
+	}
+}
+
+func TestDoctorReportsStaleHostLockReapGuard(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := writeSingleHealthyHostConfig(t, dir)
+	guardPath := filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "reap", "alpha.lock")
+	mustWriteFile(t, guardPath, "host: alpha\npid: 99999999\n")
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"host-lock: fail", "Host Lock reap guard", guardPath} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("doctor output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestDoctorRejectsInvalidSFTPTimeout(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          sftpTimeout: 30min
+        workRoot: C:/maya-stall
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"ssh: fail", "sftpTimeout", "30min", "work-root: fail - skipped"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("doctor output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestRunScenarioSkipsHostWithStaleReapGuard(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        health: healthy
+      - id: beta
+        health: healthy
+`)
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "reap", "alpha.lock"), "host: alpha\npid: 99999999\n")
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "host: beta") {
+		t.Fatalf("run output missing fallback host:\n%s", stdout.String())
+	}
+}
+
+func TestHostLockTreatsLiveReapGuardAsLocked(t *testing.T) {
+	dir := t.TempDir()
+	guardPath := filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "reap", "alpha.lock")
+	mustWriteFile(t, guardPath, fmt.Sprintf("host: alpha\npid: %d\n", os.Getpid()))
+
+	release, locked, err := acquireHostLock(dir, "alpha")
+	if err != nil {
+		t.Fatalf("acquire with live reap guard: %v", err)
+	}
+	if !locked {
+		defer release()
+		t.Fatal("host was not reported locked while reap guard was live")
+	}
+}
+
+func TestHostLockTreatsFreshEmptyReapGuardAsLocked(t *testing.T) {
+	dir := t.TempDir()
+	guardPath := filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "reap", "alpha.lock")
+	mustWriteFile(t, guardPath, "")
+
+	release, locked, err := acquireHostLock(dir, "alpha")
+	if err != nil {
+		t.Fatalf("acquire with fresh reap guard: %v", err)
+	}
+	if !locked {
+		defer release()
+		t.Fatal("host was not reported locked while reap guard was being populated")
+	}
+}
+
+func TestHostLockReapGuardDoesNotCollideWithDottedHostID(t *testing.T) {
+	dir := t.TempDir()
+	releaseDotted, locked, err := acquireHostLock(dir, "alpha.reap")
+	if err != nil {
+		t.Fatalf("lock dotted host: %v", err)
+	}
+	if locked {
+		t.Fatal("dotted host was unexpectedly locked")
+	}
+	defer releaseDotted()
+
+	releaseAlpha, locked, err := acquireHostLock(dir, "alpha")
+	if err != nil {
+		t.Fatalf("lock alpha host: %v", err)
+	}
+	if locked {
+		t.Fatal("alpha host was blocked by alpha.reap lock")
+	}
+	defer releaseAlpha()
 }
 
 func TestRunScenarioRemovesStaleHostLock(t *testing.T) {
@@ -1995,6 +2260,32 @@ func TestAttachWorksWhenEvidenceIsMissing(t *testing.T) {
 	for _, want := range []string{"events:", "run.started", "logs:", "fake Session Broker ran Scenario"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("attach output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestStatusShowsUnknownWhenEvidenceIsMissing(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+	if err := os.Rename(filepath.Join(dir, "artifacts", "maya-stall", runID, "evidence.json"), filepath.Join(dir, "artifacts", "maya-stall", runID, "evidence.json.moved")); err != nil {
+		t.Fatalf("move evidence fixture: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"status", "--run", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("status exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"run: " + runID, "state: kept", "status: unknown", "evidence: unavailable"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("status output missing %q:\n%s", want, stdout.String())
 		}
 	}
 }
@@ -3199,6 +3490,9 @@ func mustWriteFile(t *testing.T, path string, content string) {
 
 func writeFakeCommand(t *testing.T, dir string, name string, logPath string, exitCode int) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake command fixtures need /bin/sh")
+	}
 	path := filepath.Join(dir, name)
 	content := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$0 $*\" >> %s\nexit %d\n", shellQuote(logPath), exitCode)
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
@@ -3209,6 +3503,9 @@ func writeFakeCommand(t *testing.T, dir string, name string, logPath string, exi
 
 func writeFakeSFTPCommand(t *testing.T, dir string, logPath string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake sftp fixtures need /bin/sh")
+	}
 	path := filepath.Join(dir, "fake-sftp")
 	content := fmt.Sprintf(`#!/bin/sh
 while IFS= read -r line; do
@@ -3233,6 +3530,9 @@ exit 0
 
 func writeFailingGetSFTPCommand(t *testing.T, dir string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake sftp fixtures need /bin/sh")
+	}
 	path := filepath.Join(dir, "fake-sftp-failing-get")
 	content := `#!/bin/sh
 while IFS= read -r line; do
@@ -3244,6 +3544,19 @@ exit 0
 `
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("write failing fake sftp command: %v", err)
+	}
+	return path
+}
+
+func writeFailingCommandWithStderr(t *testing.T, dir string, name string, stderr string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake command fixtures need /bin/sh")
+	}
+	path := filepath.Join(dir, name)
+	content := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' %s >&2\nexit 1\n", shellQuote(stderr))
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write failing fake command: %v", err)
 	}
 	return path
 }

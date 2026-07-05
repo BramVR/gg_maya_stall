@@ -15,10 +15,11 @@ type statusOptions struct {
 }
 
 type keptRun struct {
-	RunID    string
-	StateDir string
-	Manifest runManifest
-	Bundle   evidenceBundle
+	RunID         string
+	StateDir      string
+	Manifest      runManifest
+	Bundle        evidenceBundle
+	EvidenceError string
 }
 
 func parseStatusArgs(args []string) (statusOptions, error) {
@@ -94,6 +95,9 @@ func printKeptRunStatus(stdout io.Writer, run keptRun) {
 	fmt.Fprintf(stdout, "targetProfile: %s\n", run.Manifest.TargetProfile)
 	fmt.Fprintf(stdout, "host: %s\n", run.Manifest.Host)
 	fmt.Fprintf(stdout, "status: %s\n", run.Bundle.Status)
+	if run.EvidenceError != "" {
+		fmt.Fprintf(stdout, "evidence: unavailable - %s\n", run.EvidenceError)
+	}
 	fmt.Fprintf(stdout, "stateDir: %s\n", run.StateDir)
 }
 
@@ -252,11 +256,15 @@ func readKeptRun(repoDir string, runID string) (keptRun, error) {
 	}
 	evidenceBytes, err := os.ReadFile(filepath.Join(repoDir, "artifacts", "maya-stall", runID, "evidence.json"))
 	if err != nil {
-		return keptRun{}, err
+		run.Bundle.Status = "unknown"
+		run.EvidenceError = err.Error()
+		return run, nil
 	}
 	var bundle evidenceBundle
 	if err := json.Unmarshal(evidenceBytes, &bundle); err != nil {
-		return keptRun{}, fmt.Errorf("parse kept run evidence: %w", err)
+		run.Bundle.Status = "unknown"
+		run.EvidenceError = fmt.Sprintf("parse kept run evidence: %v", err)
+		return run, nil
 	}
 	run.Bundle = bundle
 	return run, nil

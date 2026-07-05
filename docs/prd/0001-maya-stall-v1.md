@@ -152,6 +152,8 @@ Maya Stall uses Crabbox as a reference and may selectively vendor MIT-licensed C
 
 - Live smoke tests must assert the Maya process is in the interactive Windows desktop session before accepting screenshot or recording proof.
 
+- PRs that change live product behavior must use a checked-in proof selector and Proof Manifest. Fake-first tests remain required, but they do not satisfy real-product proof; the live Maya proof gate must fail closed when required proof is skipped, missing, or fake-only.
+
 ## Out of Scope
 
 - Paid cloud provisioning, brokered cloud leases, and Crabbox coordinator integration.

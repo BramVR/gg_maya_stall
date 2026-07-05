@@ -69,3 +69,11 @@ descriptive; code is the source-backed check when behavior claims disagree.
 - Architectural decisions: `docs/adr/`
 - Agent routing docs: `docs/agents/`
 - Public host setup checklist: `docs/setup/windows-maya-host.md`
+
+## PR Proof
+
+- Changed-path live Maya proof policy: `proof/live-maya-policy.json`
+- Proof Manifest selector and fail-closed live assertion:
+  `scripts/proof/select-proof.mjs`, `scripts/proof/assert-live-proof.mjs`
+- Proof workflow: `.github/workflows/proof.yml`
+- PR closeout and merge proof docs: `docs/agents/pr-merge.md`

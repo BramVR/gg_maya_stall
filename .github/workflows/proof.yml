@@ -1,0 +1,316 @@
+name: Proof
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  local-proof:
+    name: Proof Manifest, Local Gates
+    runs-on: ubuntu-latest
+    outputs:
+      live_maya_required: ${{ steps.guard.outputs.live_maya_required }}
+    env:
+      PROOF_MANIFEST: artifacts/proof/proof-manifest.json
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Select Proof
+        id: select
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          mkdir -p artifacts/proof
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            BASE_SHA="$(git rev-parse HEAD^)"
+          fi
+          node scripts/proof/select-proof.mjs \
+            --base "$BASE_SHA" \
+            --head "$HEAD_SHA" \
+            --output "$PROOF_MANIFEST"
+
+      - name: Trusted Live Diff Guard
+        id: guard
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            BASE_SHA="$(git rev-parse HEAD^)"
+          fi
+          policy_path="$RUNNER_TEMP/live-maya-policy.json"
+          if ! git show "$BASE_SHA:proof/live-maya-policy.json" > "$policy_path" 2>/dev/null; then
+            cp proof/live-maya-policy.json "$policy_path"
+          fi
+          changed_path="$RUNNER_TEMP/proof-name-status.txt"
+          git diff --name-status --diff-filter=ACDMRT "$BASE_SHA...$HEAD_SHA" > "$changed_path"
+          node - "$PROOF_MANIFEST" "$policy_path" "$changed_path" "$GITHUB_OUTPUT" <<'NODE'
+          const fs = require("node:fs");
+          const [manifestPath, policyPath, changedPath, githubOutput] = process.argv.slice(2);
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+          const policy = JSON.parse(fs.readFileSync(policyPath, "utf8"));
+          const changedFiles = [];
+          for (const line of fs.readFileSync(changedPath, "utf8").split(/\r?\n/)) {
+            if (!line.trim()) continue;
+            const fields = line.trim().split(/\t+/);
+            if (fields.length === 1) changedFiles.push(fields[0]);
+            else if (/^[RC]\d*/.test(fields[0])) changedFiles.push(...fields.slice(1, 3));
+            else changedFiles.push(fields[1]);
+          }
+          const reasons = [];
+          for (const file of changedFiles.map((value) => value.replaceAll("\\", "/"))) {
+            for (const rule of policy.rules || []) {
+              const matched = (rule.paths || []).includes(file) ||
+                (rule.prefixes || []).some((prefix) => file.startsWith(prefix));
+              if (matched) {
+                reasons.push({ path: file, rule: rule.id, reason: rule.reason });
+                break;
+              }
+            }
+          }
+          const required = reasons.length > 0;
+          fs.appendFileSync(githubOutput, `live_maya_required=${required ? "true" : "false"}\n`);
+          if (required) {
+            manifest.live_maya_required = true;
+            manifest.live_maya_reasons = manifest.live_maya_reasons || [];
+            for (const reason of reasons) {
+              const exists = manifest.live_maya_reasons.some((existing) =>
+                existing.path === reason.path && existing.rule === reason.rule
+              );
+              if (!exists) manifest.live_maya_reasons.push(reason);
+            }
+            manifest.gates = manifest.gates || {};
+            manifest.gates.live_maya = {
+              ...(manifest.gates.live_maya || {}),
+              status: "required",
+              fail_closed: true,
+            };
+          }
+          fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+          NODE
+
+      - name: Local Gate
+        run: |
+          go test ./...
+          node scripts/proof/mark-gate.mjs \
+            --manifest "$PROOF_MANIFEST" \
+            --gate local \
+            --status passed \
+            --command "go test ./..."
+
+      - name: Docs Gate
+        run: |
+          scripts/check-docs.sh
+          node scripts/proof/mark-gate.mjs \
+            --manifest "$PROOF_MANIFEST" \
+            --gate docs \
+            --status passed \
+            --command "scripts/check-docs.sh"
+
+      - name: Proof Script Tests
+        run: |
+          node --test scripts/proof/*.test.mjs
+          node scripts/proof/mark-gate.mjs \
+            --manifest "$PROOF_MANIFEST" \
+            --gate artifacts \
+            --status passed \
+            --command "node --test scripts/proof/*.test.mjs"
+
+      - name: Assert Non-Live Gate
+        if: steps.guard.outputs.live_maya_required != 'true'
+        run: |
+          node scripts/proof/assert-live-proof.mjs \
+            --manifest "$PROOF_MANIFEST" \
+            --live-status skipped \
+            --host-config-state missing
+
+      - name: Upload Proof Manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-manifest-local
+          path: artifacts/proof/
+          if-no-files-found: error
+
+  live-maya-proof:
+    name: Live Maya Gate
+    needs: local-proof
+    if: needs.local-proof.outputs.live_maya_required == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    environment: maya-live-proof
+    env:
+      PROOF_MANIFEST: artifacts/proof/proof-manifest.json
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Download Proof Manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: proof-manifest-local
+          path: artifacts/proof/
+
+      - name: Prepare Live Maya Host Config
+        id: live-config
+        env:
+          HOST_CONFIG_B64: ${{ secrets.MAYA_STALL_LIVE_HOST_CONFIG_B64 }}
+        run: |
+          if [ -n "$HOST_CONFIG_B64" ]; then
+            mkdir -p "$RUNNER_TEMP/maya-stall"
+            printf '%s' "$HOST_CONFIG_B64" | base64 --decode > "$RUNNER_TEMP/maya-stall/live-hosts.yaml"
+            echo "state=present" >> "$GITHUB_OUTPUT"
+            echo "path=$RUNNER_TEMP/maya-stall/live-hosts.yaml" >> "$GITHUB_OUTPUT"
+          else
+            echo "state=missing" >> "$GITHUB_OUTPUT"
+            echo "path=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Live Maya Smoke
+        id: live-smoke
+        if: steps.live-config.outputs.state == 'present'
+        continue-on-error: true
+        env:
+          MAYA_STALL_SMOKE_HOST_CONFIG: ${{ steps.live-config.outputs.path }}
+          MAYA_STALL_SMOKE_TARGET_PROFILE: ${{ vars.MAYA_STALL_LIVE_TARGET_PROFILE }}
+          MAYA_STALL_SMOKE_HOST: ${{ vars.MAYA_STALL_LIVE_HOST }}
+        run: |
+          set -euo pipefail
+          go test -json ./internal/cli -run 'TestOptInRealSSH(Doctor|Run)Smoke' -count=1 | tee artifacts/proof/live-smoke.jsonl
+
+      - name: Assert Live Maya Gate
+        if: always()
+        env:
+          HOST_CONFIG_STATE: ${{ steps.live-config.outputs.state }}
+          LIVE_OUTCOME: ${{ steps.live-smoke.outcome }}
+        run: |
+          live_status="skipped"
+          if [ "$LIVE_OUTCOME" = "success" ]; then
+            live_status="passed"
+          elif [ "$LIVE_OUTCOME" = "failure" ]; then
+            live_status="failed"
+          fi
+          node - "$PROOF_MANIFEST" "${HOST_CONFIG_STATE:-missing}" "$live_status" artifacts/proof/live-smoke.jsonl <<'NODE'
+          const fs = require("node:fs");
+          const [manifestPath, hostConfigState, liveStatus, smokePath] = process.argv.slice(2);
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+          const expected = new Set(["TestOptInRealSSHDoctorSmoke", "TestOptInRealSSHRunSmoke"]);
+          const passed = new Set();
+          const skipped = new Set();
+          if (fs.existsSync(smokePath)) {
+            for (const line of fs.readFileSync(smokePath, "utf8").split(/\r?\n/)) {
+              if (!line.trim()) continue;
+              const event = JSON.parse(line);
+              if (!expected.has(event.Test)) continue;
+              if (event.Action === "pass") passed.add(event.Test);
+              if (event.Action === "skip") skipped.add(event.Test);
+            }
+          }
+          const missing = [...expected].filter((test) => !passed.has(test));
+          let status = "passed";
+          let detail = "live smoke tests passed";
+          if (hostConfigState !== "present") {
+            status = "failed_missing_host_config";
+            detail = "live Maya host config missing";
+          } else if (liveStatus !== "passed") {
+            status = `failed_${liveStatus}`;
+            detail = "live smoke command failed";
+          } else if (missing.length > 0 || skipped.size > 0) {
+            status = "failed_missing_smoke_tests";
+            detail = `missing pass: ${missing.join(", ") || "none"}; skipped: ${[...skipped].join(", ") || "none"}`;
+          }
+          manifest.gates = manifest.gates || {};
+          manifest.gates.live_maya = {
+            ...(manifest.gates.live_maya || {}),
+            status,
+            detail,
+            host_config_state: hostConfigState,
+            fail_closed: true,
+          };
+          fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+          if (status !== "passed") {
+            console.error(`live Maya proof is required: ${detail}`);
+            process.exit(1);
+          }
+          console.log("live_maya_status: passed");
+          NODE
+
+      - name: Upload Proof Manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-manifest-live
+          path: artifacts/proof/
+          if-no-files-found: error
+
+  live-maya-proof-untrusted-fork:
+    name: Live Maya Gate
+    needs: local-proof
+    if: needs.local-proof.outputs.live_maya_required == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Proof Manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: proof-manifest-local
+          path: artifacts/proof/
+
+      - name: Fail Closed For Untrusted Fork
+        run: |
+          node - artifacts/proof/proof-manifest.json <<'NODE'
+          const fs = require("node:fs");
+          const manifestPath = process.argv[2];
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+          manifest.gates = manifest.gates || {};
+          manifest.gates.live_maya = {
+            ...(manifest.gates.live_maya || {}),
+            status: "failed_untrusted_fork",
+            detail: "live Maya proof requires a trusted same-repository branch or promoted ref before host credentials are exposed",
+            host_config_state: "withheld",
+            fail_closed: true,
+          };
+          fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+          console.error(manifest.gates.live_maya.detail);
+          process.exit(1);
+          NODE
+
+      - name: Upload Proof Manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-manifest-untrusted-fork
+          path: artifacts/proof/
+          if-no-files-found: error

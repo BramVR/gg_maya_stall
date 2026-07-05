@@ -128,3 +128,12 @@ Markdown in this directory is the user-facing documentation source.
 Implementation truth stays in code. Use the [Source map](source-map.md) before
 changing behavior claims, and keep ADRs focused on decisions rather than command
 reference text.
+
+Before publishing docs changes, run the local docs workflow:
+
+```sh
+scripts/check-docs.sh
+```
+
+It checks the CLI command docs, validates internal Markdown links, and builds a
+static preview at `dist/docs-site/`.

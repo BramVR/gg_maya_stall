@@ -337,7 +337,11 @@ Set-Location -LiteralPath %s
 		}
 		return nil, fmt.Errorf("run gg_mayasessiond %s: %w", args[0], err)
 	}
-	return trimToJSON(raw), nil
+	jsonOutput := trimToJSON(raw)
+	if !isSessiondJSONDocument(jsonOutput) {
+		return nil, fmt.Errorf("gg_mayasessiond %s returned no sessiond JSON result", args[0])
+	}
+	return jsonOutput, nil
 }
 
 func (broker ggMayaSessiondBroker) stageRemoteFile(path string, content []byte) error {

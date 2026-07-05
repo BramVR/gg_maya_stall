@@ -82,10 +82,11 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}
 	cleanupState := true
+	cleanupEvidence := true
 	defer func() {
 		if cleanupState {
 			_ = cleanupRunState(repoDir, runID)
-			if err != nil {
+			if err != nil && cleanupEvidence {
 				_ = os.RemoveAll(evidenceDir)
 			}
 		}
@@ -140,6 +141,7 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 	if err := writeEvidenceBundle(context, manifest, scenarioConfig{}, result, []visualEvidenceArtifact{artifact}, nil); err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}
+	cleanupEvidence = false
 	if err := cleanupRunState(repoDir, runID); err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}

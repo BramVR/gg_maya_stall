@@ -2611,6 +2611,32 @@ func TestSessiondJSONFromFailedOutputSkipsStructuredJSONLogNoise(t *testing.T) {
 	}
 }
 
+func TestRunSessiondCLIRejectsStructuredLogWithoutResult(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		`{"level":"error","ok":false,"msg":"connection refused","error":"temporary"}`,
+	})
+	broker := ggMayaSessiondBroker{host: mayaHostConfig{
+		Transport: "ssh",
+		SSH:       sshConfig{Host: "maya-win-01", Binary: sshPath},
+		WorkRoot:  "C:/maya-stall",
+		Broker: brokerConfig{
+			Type:     "gg-mayasessiond",
+			StateDir: "C:/maya-stall/sessiond-ui",
+			Python:   "C:/maya-stall/sessiond-venv311/Scripts/python.exe",
+			Repo:     "C:/PROJECTS/GG/GG_MayaSessiond",
+		},
+	}}
+
+	_, err := broker.runSessiondCLI([]string{"status", "--json"}, sessiondCommandTimeout)
+	if err == nil {
+		t.Fatal("runSessiondCLI returned nil error for structured log without sessiond result")
+	}
+	if !strings.Contains(err.Error(), "returned no sessiond JSON result") {
+		t.Fatalf("runSessiondCLI error = %v, want no sessiond JSON result", err)
+	}
+}
+
 func TestRunScenarioRealSSHRequiresDownloadedScenarioResult(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	sftpPath := writeFailingGetSFTPCommand(t, dir)

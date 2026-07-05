@@ -131,6 +131,9 @@ func (broker ggMayaSessiondBroker) validate() error {
 	if !broker.host.usesRealSSH() {
 		return fmt.Errorf("gg_mayasessiond broker requires transport: ssh")
 	}
+	if err := validateRealSSHConnection(broker.host); err != nil {
+		return err
+	}
 	if strings.TrimSpace(broker.host.WorkRoot) == "" {
 		return fmt.Errorf("gg_mayasessiond broker requires workRoot")
 	}
@@ -460,7 +463,13 @@ func trimToJSON(raw []byte) []byte {
 	if start < 0 {
 		return trimmed
 	}
-	return trimmed[start:]
+	jsonOutput := trimmed[start:]
+	var document json.RawMessage
+	decoder := json.NewDecoder(bytes.NewReader(jsonOutput))
+	if err := decoder.Decode(&document); err == nil {
+		return document
+	}
+	return jsonOutput
 }
 
 func sessiondJSONFromFailedOutput(raw []byte) ([]byte, bool) {

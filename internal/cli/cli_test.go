@@ -2235,6 +2235,36 @@ hostPools:
 	}
 }
 
+func TestStandaloneSessiondScreenshotRequiresSSHHost(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/PROJECTS/GG/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"screenshot", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("screenshot exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "ssh.host is required") {
+		t.Fatalf("screenshot error did not validate ssh.host: %s", stderr.String())
+	}
+}
+
 func TestGGMayaSessiondScreenshotNameFollowsDaemonMediaType(t *testing.T) {
 	if got := visualEvidenceNameForMediaType("smoke.png", "image/jpeg"); got != "smoke.jpg" {
 		t.Fatalf("jpeg screenshot name = %q, want smoke.jpg", got)
@@ -2484,6 +2514,13 @@ func TestSessiondJSONFromFailedOutputRequiresCompleteCLIJSON(t *testing.T) {
 		if got, ok := sessiondJSONFromFailedOutput(raw); ok {
 			t.Fatalf("sessiondJSONFromFailedOutput accepted %q as %s", string(raw), string(got))
 		}
+	}
+}
+
+func TestTrimToJSONReturnsFirstDocumentWithTrailingNoise(t *testing.T) {
+	got := trimToJSON([]byte("startup noise\n{\"ok\":true,\"tool\":\"status\"}\nshutdown noise\n"))
+	if string(got) != `{"ok":true,"tool":"status"}` {
+		t.Fatalf("trimToJSON = %q, want first JSON document", string(got))
 	}
 }
 

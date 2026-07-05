@@ -85,6 +85,9 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 	defer func() {
 		if cleanupState {
 			_ = cleanupRunState(repoDir, runID)
+			if err != nil {
+				_ = os.RemoveAll(evidenceDir)
+			}
 		}
 	}()
 

@@ -502,7 +502,7 @@ func isSessiondJSONDocument(document []byte) bool {
 	}
 	if raw, ok := object["ok"]; ok {
 		var okValue bool
-		if err := json.Unmarshal(raw, &okValue); err == nil && !hasAnyJSONKey(object, "level", "msg") {
+		if err := json.Unmarshal(raw, &okValue); err == nil && !hasAnyJSONKey(object, "level") {
 			return hasAnyJSONKey(object, "tool", "checks", "content", "output", "error")
 		}
 	}

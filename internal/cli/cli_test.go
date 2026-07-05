@@ -2263,6 +2263,9 @@ hostPools:
 	if !strings.Contains(stderr.String(), "ssh.host is required") {
 		t.Fatalf("screenshot error did not validate ssh.host: %s", stderr.String())
 	}
+	if entries, err := os.ReadDir(filepath.Join(dir, "artifacts", "maya-stall")); err == nil && len(entries) > 0 {
+		t.Fatalf("failed standalone screenshot left Evidence Bundle dirs: %v", entries)
+	}
 }
 
 func TestGGMayaSessiondScreenshotNameFollowsDaemonMediaType(t *testing.T) {
@@ -2557,6 +2560,20 @@ func TestTrimToJSONSkipsStructuredLogWithBooleanOK(t *testing.T) {
 	got := trimToJSON([]byte("{\"level\":\"info\",\"ok\":true,\"msg\":\"connected\"}\n{\"ok\":true,\"tool\":\"status\"}\n"))
 	if string(got) != `{"ok":true,"tool":"status"}` {
 		t.Fatalf("trimToJSON = %q, want sessiond JSON after boolean ok structured log", string(got))
+	}
+}
+
+func TestTrimToJSONAcceptsSessiondResultWithMessageField(t *testing.T) {
+	got := trimToJSON([]byte("{\"level\":\"info\",\"ok\":true,\"msg\":\"connected\"}\n{\"ok\":false,\"error\":\"tool failed\",\"msg\":\"details\"}\n"))
+	if string(got) != `{"ok":false,"error":"tool failed","msg":"details"}` {
+		t.Fatalf("trimToJSON = %q, want sessiond JSON with message field", string(got))
+	}
+}
+
+func TestTrimToJSONSkipsStructuredErrorLog(t *testing.T) {
+	got := trimToJSON([]byte("{\"level\":\"error\",\"ok\":false,\"msg\":\"retrying\",\"error\":\"temporary\"}\n{\"ok\":true,\"tool\":\"status\"}\n"))
+	if string(got) != `{"ok":true,"tool":"status"}` {
+		t.Fatalf("trimToJSON = %q, want sessiond JSON after structured error log", string(got))
 	}
 }
 

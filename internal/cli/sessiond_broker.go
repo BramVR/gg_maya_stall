@@ -52,6 +52,9 @@ func sessionBrokerForConfig(host mayaHostConfig) sessionBroker {
 	if strings.TrimSpace(host.Broker.Type) != "" {
 		return invalidSessionBroker{err: fmt.Errorf("unknown broker.type %q", host.Broker.Type)}
 	}
+	if !host.Broker.isLegacyFakeStatus() {
+		return invalidSessionBroker{err: fmt.Errorf("unknown broker status %q", host.Broker.FakeStatus)}
+	}
 	return fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "fake Scenario completed"}}
 }
 
@@ -97,12 +100,6 @@ func (broker ggMayaSessiondBroker) CaptureScreenshot(context runContext, request
 		return visualEvidenceArtifact{}, err
 	}
 	name := filepath.Base(filepath.ToSlash(request.Name))
-	if name == "" || name == "." || name == ".." {
-		name = "screenshot.jpg"
-	}
-	if strings.EqualFold(filepath.Ext(name), ".png") {
-		name = strings.TrimSuffix(name, filepath.Ext(name)) + ".jpg"
-	}
 	result, err := broker.callCapture()
 	if err != nil {
 		return visualEvidenceArtifact{}, err
@@ -114,6 +111,7 @@ func (broker ggMayaSessiondBroker) CaptureScreenshot(context runContext, request
 	if err != nil {
 		return visualEvidenceArtifact{}, err
 	}
+	name = visualEvidenceNameForMediaType(name, mediaType)
 	relative := filepath.Join("screenshots", name)
 	path := filepath.Join(context.EvidenceDir, relative)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -176,8 +174,8 @@ func (broker ggMayaSessiondBroker) scenarioWrapper(context runContext, scenario 
 	builder.WriteString("os.chdir(")
 	builder.WriteString(pythonString(remoteWorkspace))
 	builder.WriteString(")\n")
-	builder.WriteString("def _maya_stall_write_result(status, summary, traceback_text=None):\n")
-	builder.WriteString("    if os.path.exists(result_path):\n")
+	builder.WriteString("def _maya_stall_write_result(status, summary, traceback_text=None, overwrite=False):\n")
+	builder.WriteString("    if os.path.exists(result_path) and not overwrite:\n")
 	builder.WriteString("        return\n")
 	builder.WriteString("    payload = {'status': status, 'summary': summary}\n")
 	builder.WriteString("    if traceback_text is not None:\n")
@@ -185,6 +183,15 @@ func (broker ggMayaSessiondBroker) scenarioWrapper(context runContext, scenario 
 	builder.WriteString("    with open(result_path, 'w', encoding='utf-8') as handle:\n")
 	builder.WriteString("        json.dump(payload, handle)\n")
 	builder.WriteString("        handle.write('\\n')\n")
+	builder.WriteString("def _maya_stall_should_overwrite_failure():\n")
+	builder.WriteString("    if not os.path.exists(result_path):\n")
+	builder.WriteString("        return True\n")
+	builder.WriteString("    try:\n")
+	builder.WriteString("        with open(result_path, 'r', encoding='utf-8') as handle:\n")
+	builder.WriteString("            payload = json.load(handle)\n")
+	builder.WriteString("    except Exception:\n")
+	builder.WriteString("        return True\n")
+	builder.WriteString("    return payload.get('status') in (None, '', 'passed')\n")
 	builder.WriteString("for include_path in ")
 	builder.WriteString(pythonStringList(includePaths))
 	builder.WriteString(":\n    sys.path.insert(0, include_path)\n")
@@ -198,9 +205,9 @@ func (broker ggMayaSessiondBroker) scenarioWrapper(context runContext, scenario 
 	builder.WriteString("    if code is None or code == 0:\n")
 	builder.WriteString("        _maya_stall_write_result('passed', 'gg_mayasessiond Scenario completed')\n")
 	builder.WriteString("    else:\n")
-	builder.WriteString("        _maya_stall_write_result('failed', 'Scenario exited with code %s' % code)\n")
+	builder.WriteString("        _maya_stall_write_result('failed', 'Scenario exited with code %s' % code, overwrite=_maya_stall_should_overwrite_failure())\n")
 	builder.WriteString("except Exception as exc:\n")
-	builder.WriteString("    _maya_stall_write_result('failed', str(exc), traceback.format_exc())\n")
+	builder.WriteString("    _maya_stall_write_result('failed', str(exc), traceback.format_exc(), overwrite=_maya_stall_should_overwrite_failure())\n")
 	return builder.String(), nil
 }
 
@@ -363,6 +370,29 @@ func captureImageData(result sessiondCaptureResult) ([]byte, string, error) {
 		return data, mediaType, nil
 	}
 	return nil, "", fmt.Errorf("gg_mayasessiond viewport.capture returned no image data")
+}
+
+func visualEvidenceNameForMediaType(name string, mediaType string) string {
+	if name == "" || name == "." || name == ".." {
+		name = "screenshot"
+	}
+	extension := ".jpg"
+	switch mediaType {
+	case "image/png":
+		extension = ".png"
+	case "image/jpeg", "":
+		extension = ".jpg"
+	default:
+		if filepath.Ext(name) != "" {
+			return name
+		}
+		return name + ".bin"
+	}
+	base := strings.TrimSuffix(name, filepath.Ext(name))
+	if base == "" || base == "." || base == ".." {
+		base = "screenshot"
+	}
+	return base + extension
 }
 
 func pythonString(value string) string {

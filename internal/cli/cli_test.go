@@ -1769,6 +1769,30 @@ hostPools:
 	}
 }
 
+func TestRunScenarioRejectsUnknownScalarBrokerStatus(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        broker: gg-mayasessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `unknown broker status "gg-mayasessiond"`) {
+		t.Fatalf("run error did not reject unknown scalar broker status: %s", stderr.String())
+	}
+}
+
 func TestStandaloneSessiondScreenshotLabelsRealBrokerEvidence(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
@@ -1817,6 +1841,15 @@ hostPools:
 	}
 }
 
+func TestGGMayaSessiondScreenshotNameFollowsDaemonMediaType(t *testing.T) {
+	if got := visualEvidenceNameForMediaType("smoke.png", "image/jpeg"); got != "smoke.jpg" {
+		t.Fatalf("jpeg screenshot name = %q, want smoke.jpg", got)
+	}
+	if got := visualEvidenceNameForMediaType("smoke.jpg", "image/png"); got != "smoke.png" {
+		t.Fatalf("png screenshot name = %q, want smoke.png", got)
+	}
+}
+
 func TestGGMayaSessiondScenarioWrapperPreservesFailingScenarioResult(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	broker := ggMayaSessiondBroker{host: mayaHostConfig{
@@ -1837,9 +1870,11 @@ func TestGGMayaSessiondScenarioWrapperPreservesFailingScenarioResult(t *testing.
 		t.Fatalf("build wrapper: %v", err)
 	}
 	for _, want := range []string{
-		"_maya_stall_write_result('failed', str(exc), traceback.format_exc())",
+		"def _maya_stall_should_overwrite_failure():",
+		"return payload.get('status') in (None, '', 'passed')",
+		"_maya_stall_write_result('failed', str(exc), traceback.format_exc(), overwrite=_maya_stall_should_overwrite_failure())",
 		"except SystemExit as exc:",
-		"_maya_stall_write_result('failed', 'Scenario exited with code %s' % code)",
+		"_maya_stall_write_result('failed', 'Scenario exited with code %s' % code, overwrite=_maya_stall_should_overwrite_failure())",
 		"run_name='__main__'",
 	} {
 		if !strings.Contains(wrapper, want) {

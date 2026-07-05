@@ -83,6 +83,15 @@ func (config brokerConfig) fakeStatus() string {
 	return config.FakeStatus
 }
 
+func (config brokerConfig) isLegacyFakeStatus() bool {
+	switch strings.ToLower(strings.TrimSpace(config.FakeStatus)) {
+	case "", "ok", "healthy", "reachable":
+		return true
+	default:
+		return false
+	}
+}
+
 type sshConfig struct {
 	FakeStatus   string
 	Host         string `yaml:"host"`

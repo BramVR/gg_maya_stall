@@ -49,6 +49,9 @@ func sessionBrokerForConfig(host mayaHostConfig) sessionBroker {
 	if host.Broker.isGGMayaSessiond() {
 		return ggMayaSessiondBroker{host: host}
 	}
+	if strings.TrimSpace(host.Broker.Type) != "" {
+		return invalidSessionBroker{err: fmt.Errorf("unknown broker.type %q", host.Broker.Type)}
+	}
 	return fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "fake Scenario completed"}}
 }
 
@@ -70,7 +73,7 @@ func (broker ggMayaSessiondBroker) RunScenario(context runContext, scenario scen
 	if err != nil {
 		return ScenarioResult{}, err
 	}
-	if err := broker.writeRemoteFile(wrapperPath, []byte(wrapper)); err != nil {
+	if err := broker.stageRemoteFile(wrapperPath, []byte(wrapper)); err != nil {
 		return ScenarioResult{}, fmt.Errorf("stage gg_mayasessiond Scenario wrapper: %w", err)
 	}
 	result, err := broker.callTool("script.execute", []string{
@@ -83,7 +86,7 @@ func (broker ggMayaSessiondBroker) RunScenario(context runContext, scenario scen
 	if !result.OK {
 		return ScenarioResult{}, fmt.Errorf("gg_mayasessiond script.execute failed: %s", result.Error)
 	}
-	if err := appendEvent(context.EventsPath, "broker.session.finished", resultStatusPassed); err != nil {
+	if err := appendEvent(context.EventsPath, "broker.session.finished", "completed"); err != nil {
 		return ScenarioResult{}, err
 	}
 	return ScenarioResult{Status: resultStatusPassed, Summary: "gg_mayasessiond Scenario completed"}, nil
@@ -279,8 +282,7 @@ Set-Location -LiteralPath %s
 & %s -m gg_maya_sessiond.cli @(%s)`, powerShellSingleQuoted(broker.host.Broker.Repo), powerShellSingleQuoted(broker.host.Broker.Python), strings.Join(quoted, ","))
 	raw, err := runSSHCommandOutput(broker.host, encodedPowerShellCommand(script), timeout)
 	if err != nil {
-		jsonOutput := trimToJSON(raw)
-		if len(jsonOutput) > 0 && (jsonOutput[0] == '{' || jsonOutput[0] == '[') {
+		if jsonOutput, ok := sessiondJSONFromFailedOutput(raw); ok {
 			return jsonOutput, nil
 		}
 		return nil, fmt.Errorf("run gg_mayasessiond %s: %w", args[0], err)
@@ -288,24 +290,40 @@ Set-Location -LiteralPath %s
 	return trimToJSON(raw), nil
 }
 
-func (broker ggMayaSessiondBroker) writeRemoteFile(path string, content []byte) error {
+func (broker ggMayaSessiondBroker) stageRemoteFile(path string, content []byte) error {
 	if err := broker.validate(); err != nil {
 		return err
 	}
-	script := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
-$path = %s
-New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
-[IO.File]::WriteAllBytes($path, [Convert]::FromBase64String(%s))`, powerShellSingleQuoted(path), powerShellSingleQuoted(base64.StdEncoding.EncodeToString(content)))
-	_, err := runSSHCommandOutput(broker.host, encodedPowerShellCommand(script), sessiondCommandTimeout)
-	return err
+	if err := rejectSFTPBatchUnsafePath(path); err != nil {
+		return err
+	}
+	tempFile, err := os.CreateTemp("", "maya-stall-sessiond-*")
+	if err != nil {
+		return err
+	}
+	tempPath := tempFile.Name()
+	defer os.Remove(tempPath)
+	if _, err := tempFile.Write(content); err != nil {
+		tempFile.Close()
+		return err
+	}
+	if err := tempFile.Close(); err != nil {
+		return err
+	}
+	batch := newSFTPBatch()
+	batch.mkdirAll(remoteDir(path))
+	batch.put(tempPath, path)
+	return runSFTPBatch(broker.host, batch.String())
 }
 
 func (broker ggMayaSessiondBroker) probeScriptExecute() error {
 	runID := fmt.Sprintf("doctor-%d", time.Now().UTC().UnixNano())
-	probePath := remoteJoin(broker.host.WorkRoot, "runs", runID, "workspace", ".maya-stall-doctor.py")
-	if err := broker.writeRemoteFile(probePath, []byte("print('maya-stall doctor script.execute ok')\n")); err != nil {
+	probeRoot := remoteJoin(broker.host.WorkRoot, "runs", runID)
+	probePath := remoteJoin(probeRoot, "workspace", ".maya-stall-doctor.py")
+	if err := broker.stageRemoteFile(probePath, []byte("print('maya-stall doctor script.execute ok')\n")); err != nil {
 		return fmt.Errorf("stage gg_mayasessiond script.execute probe: %w", err)
 	}
+	defer broker.removeRemotePath(probeRoot)
 	result, err := broker.callTool("script.execute", []string{
 		"file_path=" + probePath,
 		"timeout=30",
@@ -317,6 +335,13 @@ func (broker ggMayaSessiondBroker) probeScriptExecute() error {
 		return fmt.Errorf("gg_mayasessiond script.execute probe failed: %s", result.Error)
 	}
 	return nil
+}
+
+func (broker ggMayaSessiondBroker) removeRemotePath(path string) error {
+	script := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
+Remove-Item -LiteralPath %s -Recurse -Force -ErrorAction SilentlyContinue`, powerShellSingleQuoted(path))
+	_, err := runSSHCommandOutput(broker.host, encodedPowerShellCommand(script), sessiondCommandTimeout)
+	return err
 }
 
 func captureImageData(result sessiondCaptureResult) ([]byte, string, error) {
@@ -357,6 +382,18 @@ func trimToJSON(raw []byte) []byte {
 		return trimmed
 	}
 	return trimmed[start:]
+}
+
+func sessiondJSONFromFailedOutput(raw []byte) ([]byte, bool) {
+	jsonOutput := trimToJSON(raw)
+	var object map[string]any
+	if err := json.Unmarshal(jsonOutput, &object); err != nil {
+		return nil, false
+	}
+	if _, ok := object["ok"]; !ok {
+		return nil, false
+	}
+	return jsonOutput, true
 }
 
 func runSSHCommandOutput(host mayaHostConfig, remoteCommand []string, timeout time.Duration) ([]byte, error) {

@@ -1233,6 +1233,31 @@ func (fakeSessionBroker) CaptureRecording(context runContext, request recordingR
 	return visualEvidenceArtifact{Kind: "recording", Path: filepath.ToSlash(relative), MediaType: "video/mp4"}, nil
 }
 
+type invalidSessionBroker struct {
+	err error
+}
+
+func (broker invalidSessionBroker) RunScenario(runContext, scenarioConfig) (ScenarioResult, error) {
+	return ScenarioResult{}, broker.err
+}
+
+func (broker invalidSessionBroker) CaptureScreenshot(runContext, screenshotRequest) (visualEvidenceArtifact, error) {
+	return visualEvidenceArtifact{}, broker.err
+}
+
+func (broker invalidSessionBroker) CaptureRecording(runContext, recordingRequest) (visualEvidenceArtifact, error) {
+	return visualEvidenceArtifact{}, broker.err
+}
+
+func sessionBrokerDisplayName(broker sessionBroker) string {
+	switch broker.(type) {
+	case ggMayaSessiondBroker:
+		return "gg_mayasessiond Session Broker"
+	default:
+		return "fake Session Broker"
+	}
+}
+
 func copyPath(source string, destination string) error {
 	linkInfo, err := os.Lstat(source)
 	if err != nil {

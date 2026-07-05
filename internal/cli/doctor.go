@@ -177,6 +177,8 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 	}
 	if host.Broker.isGGMayaSessiond() {
 		add(realSessionBrokerLayer(host))
+	} else if strings.TrimSpace(host.Broker.Type) != "" {
+		add(failedCheck("session-broker", fmt.Sprintf("unknown broker.type %q", host.Broker.Type), "Use broker.type: gg-mayasessiond or a legacy fake broker status. See docs/setup/windows-maya-host.md#session-broker."))
 	} else {
 		add(statusLayer("session-broker", host.Broker.fakeStatus(), "reachable", []string{"", "ok", "healthy", "reachable"}, "Start or repair the Session Broker on this Maya Host. See docs/setup/windows-maya-host.md#session-broker."))
 	}

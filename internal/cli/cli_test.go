@@ -1223,14 +1223,15 @@ hostPools:
 func TestDoctorGGMayaSessiondVerifiesScriptExecuteProbe(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	sshLog := filepath.Join(dir, "ssh.log")
+	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
 	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
 		``,
 		``,
 		`{"ok":true,"checks":[{"id":"state_dir","ok":true}]}`,
 		`{"derived_status":"running","state":{"status":"running","call_server_ready":true,"maya_alive":true,"mcp_alive":true}}`,
 		`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
-		``,
 		`{"ok":true,"tool":"script.execute"}`,
+		``,
 		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -1246,6 +1247,7 @@ hostPools:
         ssh:
           host: maya-win-01
           binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
         workRoot: C:/maya-stall
         broker:
           type: gg-mayasessiond
@@ -1311,6 +1313,31 @@ hostPools:
 	}
 	if !strings.Contains(stdout.String(), "session-broker: fail - gg_mayasessiond is not running") {
 		t.Fatalf("doctor did not reject stale derived status:\n%s", stdout.String())
+	}
+}
+
+func TestDoctorRejectsUnknownStructuredBrokerType(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        broker:
+          type: ok
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `session-broker: fail - unknown broker.type "ok"`) {
+		t.Fatalf("doctor did not reject unknown broker type:\n%s", stdout.String())
 	}
 }
 
@@ -1651,7 +1678,6 @@ func TestRunScenarioGGMayaSessiondBrokerExecutesRemoteScenarioAndCapturesScreens
 	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
 	sshLog := filepath.Join(dir, "ssh.log")
 	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
-		``,
 		`{"ok":true,"tool":"script.execute"}`,
 		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}],"output":{"mime_type":"image/jpeg"}}`,
 	})
@@ -1709,6 +1735,86 @@ hostPools:
 	if len(bundle.VisualEvidence) != 1 || bundle.VisualEvidence[0].MediaType != "image/jpeg" {
 		t.Fatalf("sessiond screenshot metadata = %+v, want image/jpeg", bundle.VisualEvidence)
 	}
+	sftpBytes, err := os.ReadFile(sftpLog)
+	if err != nil {
+		t.Fatalf("read sftp log: %v", err)
+	}
+	if !strings.Contains(string(sftpBytes), ".maya-stall-scenario.py") {
+		t.Fatalf("sftp log missing staged scenario wrapper:\n%s", string(sftpBytes))
+	}
+}
+
+func TestRunScenarioRejectsUnknownStructuredBrokerType(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        broker:
+          type: gg_mayasessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `unknown broker.type "gg_mayasessiond"`) {
+		t.Fatalf("run error did not reject unknown broker type: %s", stderr.String())
+	}
+}
+
+func TestStandaloneSessiondScreenshotLabelsRealBrokerEvidence(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/PROJECTS/GG/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"screenshot", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("screenshot exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	logBytes, err := os.ReadFile(filepath.Join(evidence, "logs", "session.log"))
+	if err != nil {
+		t.Fatalf("read evidence log: %v", err)
+	}
+	if strings.Contains(string(logBytes), "fake") || !strings.Contains(string(logBytes), "gg_mayasessiond") {
+		t.Fatalf("standalone log mislabeled broker:\n%s", string(logBytes))
+	}
+	resultBytes, err := os.ReadFile(filepath.Join(evidence, "scenario-result.json"))
+	if err != nil {
+		t.Fatalf("read scenario result: %v", err)
+	}
+	if strings.Contains(string(resultBytes), "fake") || !strings.Contains(string(resultBytes), "gg_mayasessiond") {
+		t.Fatalf("standalone result mislabeled broker:\n%s", string(resultBytes))
+	}
 }
 
 func TestGGMayaSessiondScenarioWrapperPreservesFailingScenarioResult(t *testing.T) {
@@ -1755,6 +1861,48 @@ func TestGGMayaSessiondScenarioWrapperRejectsBackslashScenarioResultPath(t *test
 	}
 	if !strings.Contains(err.Error(), "forward slashes") {
 		t.Fatalf("backslash Scenario Result error = %v", err)
+	}
+}
+
+func TestGGMayaSessiondStageRemoteFileRejectsSFTPControlCharacters(t *testing.T) {
+	broker := ggMayaSessiondBroker{host: mayaHostConfig{
+		Transport: "ssh",
+		SSH:       sshConfig{Host: "maya-win-01"},
+		WorkRoot:  "C:/maya-stall",
+		Broker: brokerConfig{
+			Type:     "gg-mayasessiond",
+			StateDir: "C:/maya-stall/sessiond-ui",
+			Python:   "C:/maya-stall/sessiond-venv311/Scripts/python.exe",
+			Repo:     "C:/PROJECTS/GG/GG_MayaSessiond",
+		},
+	}}
+
+	err := broker.stageRemoteFile("C:/maya-stall/runs/probe\nput /tmp/leak C:/leak.py", []byte("probe\n"))
+	if err == nil {
+		t.Fatal("stageRemoteFile returned nil error for SFTP control characters")
+	}
+	if !strings.Contains(err.Error(), "control characters") {
+		t.Fatalf("stageRemoteFile error = %v, want control characters", err)
+	}
+}
+
+func TestSessiondJSONFromFailedOutputRequiresCompleteCLIJSON(t *testing.T) {
+	valid, ok := sessiondJSONFromFailedOutput([]byte("traceback noise\n{\"ok\":false,\"error\":\"tool failed\"}\n"))
+	if !ok {
+		t.Fatal("sessiondJSONFromFailedOutput rejected complete sessiond JSON")
+	}
+	if !strings.Contains(string(valid), `"ok":false`) {
+		t.Fatalf("sessiond JSON = %s", string(valid))
+	}
+
+	for _, raw := range [][]byte{
+		[]byte("ssh failed before JSON"),
+		[]byte("traceback {'not': 'json'}"),
+		[]byte(`{"error":"missing ok"}`),
+	} {
+		if got, ok := sessiondJSONFromFailedOutput(raw); ok {
+			t.Fatalf("sessiondJSONFromFailedOutput accepted %q as %s", string(raw), string(got))
+		}
 	}
 }
 

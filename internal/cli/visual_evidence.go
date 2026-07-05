@@ -103,7 +103,8 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 	if err := appendEvent(context.EventsPath, "visual-evidence.started", kind); err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}
-	if err := os.WriteFile(context.LogPath, []byte("fake Session Broker captured Visual Evidence\n"), 0o644); err != nil {
+	brokerName := sessionBrokerDisplayName(runtime.Broker)
+	if err := os.WriteFile(context.LogPath, []byte(brokerName+" captured Visual Evidence\n"), 0o644); err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}
 
@@ -126,7 +127,7 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 	if err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}
-	result := ScenarioResult{Status: resultStatusPassed, Summary: "fake Visual Evidence captured"}
+	result := ScenarioResult{Status: resultStatusPassed, Summary: brokerName + " Visual Evidence captured"}
 	if err := writeJSONFile(filepath.Join(evidenceDir, "scenario-result.json"), result); err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}

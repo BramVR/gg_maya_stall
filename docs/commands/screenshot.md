@@ -10,6 +10,8 @@ maya-stall screenshot --host-config ci-hosts.yaml --target-profile ci --host may
 ```
 
 Default commands use the fake Session Broker. Real capture depends on host
-config, an interactive desktop, and Session Broker support.
+config, an interactive desktop, and Session Broker support. With
+`broker.type: gg-mayasessiond`, screenshots are captured through
+`viewport.capture`.
 
 The command writes a local Evidence Bundle under `artifacts/maya-stall/`.

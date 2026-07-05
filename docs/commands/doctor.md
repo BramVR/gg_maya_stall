@@ -30,6 +30,12 @@ Doctor reports the layer that failed and a repair hint where possible:
 Default checks stay fake/local. Real SSH is opt-in through host config outside
 the consuming repo.
 
+With `broker.type: gg-mayasessiond`, doctor runs the daemon `doctor` and
+`status` commands, checks that `maya.exe` is in the interactive desktop session,
+stages and executes a tiny `script.execute` probe under `workRoot/runs/doctor-*`,
+checks `viewport.capture`, and fails if Maya is running in Windows Services
+session `0`.
+
 ## When To Run
 
 Run doctor before a long workflow, after changing host config, before enabling a

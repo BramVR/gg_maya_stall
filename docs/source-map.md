@@ -31,9 +31,13 @@ descriptive; code is the source-backed check when behavior claims disagree.
 - Host Pool selection and Host Locks: `internal/cli/host_pool.go`
 - Real SSH and SFTP transport, PowerShell wrapping, upload/download behavior,
   and `ssh.sftpTimeout`: `internal/cli/ssh_transport.go`
+- `gg_mayasessiond` Session Broker adapter, `script.execute` wrapper behavior,
+  interactive session checks, and `viewport.capture` evidence:
+  `internal/cli/sessiond_broker.go`
 - Platform process helpers: `internal/cli/process_posix.go`,
   `internal/cli/process_windows.go`
-- Opt-in live SSH smoke test: `internal/cli/live_ssh_smoke_test.go`
+- Opt-in live SSH doctor and run smoke tests:
+  `internal/cli/live_ssh_smoke_test.go`
 
 ## Run Lifecycle
 

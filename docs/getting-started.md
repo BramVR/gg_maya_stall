@@ -201,7 +201,12 @@ hostPools:
           identityFile: ~/.ssh/maya-stall-ci
           sftpTimeout: 30m
         workRoot: C:/maya-stall
-        broker: ok
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/PROJECTS/GG/GG_MayaSessiond
+          mcpSource: C:/PROJECTS/GG/GG_MayaMCP
         mayaVersions: ["2025"]
         visualEvidence: true
 ```
@@ -211,4 +216,12 @@ Run doctor against the exact profile or host before a long workflow:
 ```sh
 maya-stall doctor --host-config ci-hosts.yaml --target-profile ci
 maya-stall doctor --host-config ci-hosts.yaml --target-profile ci --host maya-win-01 --scenario smoke
+```
+
+Start `gg_mayasessiond` with script execution allowed for staged run wrappers,
+for example `--mcp-script-dirs C:/maya-stall/runs`. The full live smoke is
+opt-in:
+
+```sh
+MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run)Smoke' -count=1
 ```

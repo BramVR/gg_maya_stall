@@ -24,6 +24,11 @@ The bundle includes:
 
 Validator failures are recorded in `evidence.json` and mark the run failed.
 
+The fake broker supports configured Visual Evidence. With
+`broker.type: gg-mayasessiond`, screenshot Visual Evidence uses
+`viewport.capture`; recording is not required for live smoke while the daemon
+exposes screenshot capture but not recording capture.
+
 ## publish
 
 `maya-stall evidence publish` copies one Evidence Bundle to a filesystem

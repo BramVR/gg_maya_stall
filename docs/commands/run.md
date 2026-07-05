@@ -32,6 +32,12 @@ The run flow is:
 9. Run Validators.
 10. Apply the Stop Policy and release or retain the Host Lock.
 
+With `broker.type: gg-mayasessiond`, `run` stages declared payloads under
+`workRoot/runs/<run-id>/`, writes a small Scenario wrapper into the remote
+workspace, executes it through `gg_maya_sessiond.cli call ... script.execute`,
+downloads declared outputs, and captures screenshots through `viewport.capture`.
+Remote Scenario execution through `script.execute` is capped at 10 minutes.
+
 Default output:
 
 ```text

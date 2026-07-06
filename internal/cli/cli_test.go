@@ -2254,6 +2254,7 @@ func TestRunScenarioRealSSHUploadsPayloadAndDownloadsDeclaredOutputs(t *testing.
 	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		`{"ok":true,"tool":"script.execute"}`,
+		sessiondStatusFixture("session-alpha"),
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
 	mustWriteFile(t, hostConfigPath, `version: 1
@@ -2347,6 +2348,7 @@ func TestRunScenarioGGMayaSessiondBrokerExecutesRemoteScenarioAndCapturesScreens
 	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
 		`{"ok":true,"tool":"script.execute"}`,
 		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}],"output":{"mime_type":"image/jpeg"}}`,
+		sessiondStatusFixture("session-alpha"),
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
 	mustWriteFile(t, hostConfigPath, `version: 1
@@ -2417,6 +2419,7 @@ func TestRunScenarioGGMayaSessiondDownloadedFailedResultFailsRun(t *testing.T) {
 	sftpPath := writeScenarioResultSFTPCommand(t, dir, sftpLog, resultStatusFailed, "remote script failed")
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		`{"ok":true,"tool":"script.execute"}`,
+		sessiondStatusFixture("session-alpha"),
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
 	mustWriteFile(t, hostConfigPath, `version: 1
@@ -2456,6 +2459,641 @@ hostPools:
 	}
 	if bundle.Status != resultStatusFailed {
 		t.Fatalf("Evidence Bundle status = %q, want failed; stdout: %s stderr: %s", bundle.Status, stdout.String(), stderr.String())
+	}
+}
+
+func TestRunRetentionCommandsUseSessiondBrokerForStatusAttachAndStop(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sftpLog := filepath.Join(dir, "sftp.log")
+	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
+	sshLog := filepath.Join(dir, "ssh.log")
+	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
+		`{"ok":true,"tool":"script.execute"}`,
+		sessiondStatusFixture("session-alpha"),
+		sessiondStatusFixture("session-alpha"),
+		sessiondStatusFixture("session-alpha"),
+		`{"events":[{"kind":"session","message":"retained run log"}]}`,
+		sessiondStatusFixture("session-alpha"),
+		`{"ok":true,"status":"stopped"}`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"status", "--run", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("status exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"state: kept", "remoteState: running", "brokerSession: session-alpha", "remoteWorkspace: C:/maya-stall/runs/" + runID + "/workspace"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("status output missing %q:\n%s", want, stdout.String())
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"attach", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("attach exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"broker:", "adapter: gg-mayasessiond", "brokerReport:", "retained run log"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("attach output missing %q:\n%s", want, stdout.String())
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"stop", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("stop exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	lockPath := filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("Host Lock after stop = %v, want missing", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".maya-stall", "state", "runs", runID)); !os.IsNotExist(err) {
+		t.Fatalf("run state after stop = %v, want missing", err)
+	}
+	sshBytes, err := os.ReadFile(sshLog)
+	if err != nil {
+		t.Fatalf("read ssh log: %v", err)
+	}
+	if got := strings.Count(string(sshBytes), "CALL "); got < 8 {
+		t.Fatalf("retention commands made %d SSH calls, want at least 8:\n%s", got, string(sshBytes))
+	}
+}
+
+func TestRunRetentionFailureKeepsHostLock(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		`{"ok":true,"tool":"script.execute"}`,
+		`{"ok":false,"error":"status unavailable"}`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "status unavailable") {
+		t.Fatalf("run error missing retain status failure: %s", stderr.String())
+	}
+	lockBytes, err := os.ReadFile(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock"))
+	if err != nil {
+		t.Fatalf("Host Lock missing after retention failure: %v", err)
+	}
+	runID := filepath.Base(onlyRunDir(t, filepath.Join(dir, ".maya-stall", "state", "runs")))
+	if !strings.Contains(string(lockBytes), "keptRun: "+runID) {
+		t.Fatalf("Host Lock after retention failure was not kept:\n%s", string(lockBytes))
+	}
+}
+
+func TestRunRetentionStopWithMissingRecordedSessionIDCleansWithoutStoppingCurrentSession(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		`{"ok":true,"tool":"script.execute"}`,
+		`{"ok":false,"error":"retain status unavailable"}`,
+		sessiondStatusFixture("session-beta"),
+		`{"ok":true,"status":"stopped"}`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := filepath.Base(onlyRunDir(t, filepath.Join(dir, ".maya-stall", "state", "runs")))
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"stop", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("stop exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")); !os.IsNotExist(err) {
+		t.Fatalf("Host Lock after missing-session-id cleanup = %v, want missing", err)
+	}
+	sshBytes, err := os.ReadFile(filepath.Join(dir, "ssh.log"))
+	if err != nil {
+		t.Fatalf("read ssh log: %v", err)
+	}
+	if got := strings.Count(string(sshBytes), "CALL "); got != 4 {
+		t.Fatalf("missing-session-id stop made %d SSH calls, want status plus cleanup but no broker stop:\n%s", got, string(sshBytes))
+	}
+}
+
+func TestRunRetentionStatusReportsStaleWhenSessiondSessionChanged(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		`{"ok":true,"tool":"script.execute"}`,
+		sessiondStatusFixture("session-alpha"),
+		sessiondStatusFixture("session-beta"),
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"status", "--run", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("status exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"state: stale", "brokerSession: session-beta", "orphaned"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stale status output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestRunRetentionStopFailureKeepsRunStateAndHostLock(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		`{"ok":true,"tool":"script.execute"}`,
+		sessiondStatusFixture("session-alpha"),
+		sessiondStatusFixture("session-alpha"),
+		`{"ok":false,"error":"cannot stop retained session"}`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"stop", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("stop exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "cannot stop retained session") {
+		t.Fatalf("stop error missing broker failure: %s", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".maya-stall", "state", "runs", runID)); err != nil {
+		t.Fatalf("run state missing after failed stop: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")); err != nil {
+		t.Fatalf("Host Lock missing after failed stop: %v", err)
+	}
+}
+
+func TestRunRetentionStopStatusFailureKeepsRunStateAndHostLock(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		`{"ok":true,"tool":"script.execute"}`,
+		sessiondStatusFixture("session-alpha"),
+		`{"ok":false,"error":"status unavailable"}`,
+		`{"ok":true,"status":"stopped"}`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"stop", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("stop exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "status unavailable") {
+		t.Fatalf("stop error missing status failure: %s", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".maya-stall", "state", "runs", runID)); err != nil {
+		t.Fatalf("run state missing after status failed stop: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")); err != nil {
+		t.Fatalf("Host Lock missing after status failed stop: %v", err)
+	}
+	sshBytes, err := os.ReadFile(filepath.Join(dir, "ssh.log"))
+	if err != nil {
+		t.Fatalf("read ssh log: %v", err)
+	}
+	if got := strings.Count(string(sshBytes), "CALL "); got != 3 {
+		t.Fatalf("status-failed stop made %d SSH calls, want no stop call after failed status:\n%s", got, string(sshBytes))
+	}
+}
+
+func TestRunRetentionStopRequiresConfirmedBrokerStop(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		`{"ok":true,"tool":"script.execute"}`,
+		sessiondStatusFixture("session-alpha"),
+		sessiondStatusFixture("session-alpha"),
+		`{"status":"stopped"}`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"stop", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("stop exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gg_mayasessiond stop failed") {
+		t.Fatalf("stop error missing unconfirmed stop failure: %s", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")); err != nil {
+		t.Fatalf("Host Lock missing after unconfirmed stop: %v", err)
+	}
+}
+
+func TestRunRetentionStopRejectsTamperedRemoteCleanupPath(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		`{"ok":true,"tool":"script.execute"}`,
+		sessiondStatusFixture("session-alpha"),
+		sessiondStatusFixture("session-alpha"),
+		`{"ok":true,"status":"stopped"}`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+	recordPath := filepath.Join(dir, ".maya-stall", "state", "runs", runID, "run-record.json")
+	recordBytes, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatalf("read run record: %v", err)
+	}
+	var record map[string]any
+	if err := json.Unmarshal(recordBytes, &record); err != nil {
+		t.Fatalf("parse run record: %v", err)
+	}
+	record["remoteRunRoot"] = "C:/maya-stall/not-this-run"
+	if err := writeJSONFile(recordPath, record); err != nil {
+		t.Fatalf("write tampered run record: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"stop", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("stop exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "does not match expected") {
+		t.Fatalf("stop error missing cleanup path validation: %s", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")); err != nil {
+		t.Fatalf("Host Lock missing after rejected cleanup path: %v", err)
+	}
+	sshBytes, err := os.ReadFile(filepath.Join(dir, "ssh.log"))
+	if err != nil {
+		t.Fatalf("read ssh log: %v", err)
+	}
+	if got := strings.Count(string(sshBytes), "CALL "); got != 2 {
+		t.Fatalf("tampered cleanup made %d SSH calls, want no stop/cleanup after run retention:\n%s", got, string(sshBytes))
+	}
+}
+
+func TestRunRetentionStopRefusesStaleSessiondSession(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		`{"ok":true,"tool":"script.execute"}`,
+		sessiondStatusFixture("session-alpha"),
+		sessiondStatusFixture("session-beta"),
+		`{"ok":true,"status":"stopped"}`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"stop", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("stop exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")); !os.IsNotExist(err) {
+		t.Fatalf("Host Lock after stale stop cleanup = %v, want missing", err)
+	}
+	sshBytes, err := os.ReadFile(filepath.Join(dir, "ssh.log"))
+	if err != nil {
+		t.Fatalf("read ssh log: %v", err)
+	}
+	if got := strings.Count(string(sshBytes), "CALL "); got != 4 {
+		t.Fatalf("stale stop made %d SSH calls, want status plus cleanup but no stop call:\n%s", got, string(sshBytes))
+	}
+}
+
+func TestRunRetentionStopTreatsMissingCurrentSessionIDAsStale(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		`{"ok":true,"tool":"script.execute"}`,
+		sessiondStatusFixture("session-alpha"),
+		`{"has_state":true,"derived_status":"running","state":{"status":"running","maya_alive":true,"mcp_alive":true,"call_server_ready":true}}`,
+		`{"ok":true,"status":"stopped"}`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"stop", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("stop exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	sshBytes, err := os.ReadFile(filepath.Join(dir, "ssh.log"))
+	if err != nil {
+		t.Fatalf("read ssh log: %v", err)
+	}
+	if got := strings.Count(string(sshBytes), "CALL "); got != 4 {
+		t.Fatalf("missing-current-session stop made %d SSH calls, want status plus cleanup but no broker stop:\n%s", got, string(sshBytes))
+	}
+}
+
+func TestRunRetentionLegacySessiondRecordCanReleaseLocalLock(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	runID := "20260704T112600.000000000Z"
+	stateDir := filepath.Join(dir, ".maya-stall", "state", "runs", runID)
+	mustWriteFile(t, filepath.Join(stateDir, "manifest.json"), `{
+  "runId": "`+runID+`",
+  "scenario": "smoke",
+  "targetProfile": "ci",
+  "host": "alpha",
+  "runtime": {
+    "profile": "ssh-sessiond",
+    "hostAdapter": "ssh",
+    "brokerAdapter": "gg-mayasessiond",
+    "brokerConfigSource": "legacy",
+    "liveProofEligible": true
+  }
+}
+`)
+	mustWriteFile(t, filepath.Join(stateDir, "events.jsonl"), "{}\n")
+	mustWriteFile(t, filepath.Join(stateDir, "logs", "session.log"), "legacy\n")
+	lockPath := filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")
+	mustWriteFile(t, lockPath, "host: alpha\nkeptRun: "+runID+"\n")
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"status", "--run", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("legacy status exit code = %d, want evidence-missing failure before bundle exists; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"stop", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("legacy stop exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("legacy Host Lock after stop = %v, want missing", err)
+	}
+	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
+		t.Fatalf("legacy run state after stop = %v, want missing", err)
 	}
 }
 
@@ -3005,6 +3643,13 @@ func TestTrimToJSONSkipsStructuredLogWithBooleanOK(t *testing.T) {
 	got := trimToJSON([]byte("{\"level\":\"info\",\"ok\":true,\"msg\":\"connected\"}\n{\"ok\":true,\"tool\":\"status\"}\n"))
 	if string(got) != `{"ok":true,"tool":"status"}` {
 		t.Fatalf("trimToJSON = %q, want sessiond JSON after boolean ok structured log", string(got))
+	}
+}
+
+func TestTrimToJSONSkipsOkShapedLogNoise(t *testing.T) {
+	got := trimToJSON([]byte("{\"ok\":true,\"msg\":\"starting\"}\n{\"ok\":true,\"tool\":\"script.execute\"}\n"))
+	if string(got) != `{"ok":true,"tool":"script.execute"}` {
+		t.Fatalf("trimToJSON = %q, want protocol JSON after ok-shaped log", string(got))
 	}
 }
 
@@ -3903,6 +4548,44 @@ func TestAttachRejectsSymlinkedEventOrLogFiles(t *testing.T) {
 				t.Fatalf("attach printed symlink target:\n%s", stdout.String())
 			}
 		})
+	}
+}
+
+func TestAttachRejectsScenarioResultPathOutsideRunState(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"run", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+	recordPath := filepath.Join(dir, ".maya-stall", "state", "runs", runID, "run-record.json")
+	recordBytes, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatalf("read run record: %v", err)
+	}
+	var record map[string]any
+	if err := json.Unmarshal(recordBytes, &record); err != nil {
+		t.Fatalf("parse run record: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	mustWriteFile(t, outside, "do not print\n")
+	record["scenarioResultPath"] = outside
+	if err := writeJSONFile(recordPath, record); err != nil {
+		t.Fatalf("write tampered run record: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"attach", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("attach exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "do not print") {
+		t.Fatalf("attach printed outside scenario result:\n%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "must stay under kept run workspace") {
+		t.Fatalf("attach error missing path validation: %s", stderr.String())
 	}
 }
 
@@ -4876,6 +5559,10 @@ exit 0
 		t.Fatalf("write sequenced fake ssh command: %v", err)
 	}
 	return path
+}
+
+func sessiondStatusFixture(sessionID string) string {
+	return `{"has_state":true,"derived_status":"running","state":{"status":"running","session_id":` + strconv.Quote(sessionID) + `,"daemon_pid":101,"maya_pid":202,"mcp_pid":303,"maya_alive":true,"mcp_alive":true,"call_server_ready":true,"daemon_log":"C:/maya-stall/sessiond-ui/daemon.log","heartbeat_at":"2026-07-06T08:00:00Z"},"process_alive":{"daemon":true,"maya":true,"mcp":true}}`
 }
 
 func writeFakeSFTPCommand(t *testing.T, dir string, logPath string) string {

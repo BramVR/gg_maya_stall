@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,6 +44,25 @@ type sessiondCaptureResult struct {
 		MimeType string `json:"mime_type"`
 		Format   string `json:"format"`
 	} `json:"output"`
+}
+
+type sessiondStatusResult struct {
+	StateDir      string `json:"state_dir"`
+	HasState      bool   `json:"has_state"`
+	DerivedStatus string `json:"derived_status"`
+	State         struct {
+		Status          string `json:"status"`
+		SessionID       string `json:"session_id"`
+		DaemonPID       int    `json:"daemon_pid"`
+		MayaPID         int    `json:"maya_pid"`
+		MCPPID          int    `json:"mcp_pid"`
+		MayaAlive       bool   `json:"maya_alive"`
+		MCPAlive        bool   `json:"mcp_alive"`
+		CallServerReady bool   `json:"call_server_ready"`
+		DaemonLog       string `json:"daemon_log"`
+		HeartbeatAt     string `json:"heartbeat_at"`
+	} `json:"state"`
+	ProcessAlive map[string]bool `json:"process_alive"`
 }
 
 func sessionBrokerForConfig(host mayaHostConfig) sessionBroker {
@@ -113,6 +133,161 @@ func (broker ggMayaSessiondBroker) CaptureRecording(runContext, recordingRequest
 	return visualEvidenceArtifact{}, recordingDeferredError()
 }
 
+func (broker ggMayaSessiondBroker) RetentionCapabilities() brokerCapabilities {
+	return brokerCapabilities{
+		RetainOnFailure:          true,
+		StatusRetainedSession:    true,
+		AttachLogObservation:     true,
+		StopRetainedSession:      true,
+		CleanupRetainedWorkspace: true,
+	}
+}
+
+func (broker ggMayaSessiondBroker) RetainRun(context runContext, manifest runManifest, reason string) (retainedSessionRecord, error) {
+	status, err := broker.status()
+	if err != nil {
+		return retainedSessionRecord{}, err
+	}
+	if status.DerivedStatus == "" {
+		status.DerivedStatus = status.State.Status
+	}
+	return retainedSessionRecord{
+		BrokerAdapter: "gg-mayasessiond",
+		SessionID:     status.State.SessionID,
+		Status:        status.DerivedStatus,
+		Metadata: map[string]any{
+			"reason":             reason,
+			"remoteRunRoot":      context.RunWorkspace.RemoteRunRoot(),
+			"remoteWorkspace":    context.RunWorkspace.RemoteWorkspace(),
+			"daemonPid":          status.State.DaemonPID,
+			"mayaPid":            status.State.MayaPID,
+			"mcpPid":             status.State.MCPPID,
+			"callServerReady":    status.State.CallServerReady,
+			"heartbeatAt":        status.State.HeartbeatAt,
+			"sessiondStateDir":   status.StateDir,
+			"sessiondDaemonLog":  status.State.DaemonLog,
+			"sessiondHasState":   status.HasState,
+			"sessiondMayaAlive":  status.State.MayaAlive,
+			"sessiondMCPAlive":   status.State.MCPAlive,
+			"sessiondStateValue": status.State.Status,
+		},
+	}, nil
+}
+
+func (broker ggMayaSessiondBroker) StatusRetainedRun(record runRetentionRecord) (retainedRunStatus, error) {
+	status, err := broker.status()
+	if err != nil {
+		return retainedRunStatus{}, err
+	}
+	derived := status.DerivedStatus
+	if derived == "" {
+		derived = status.State.Status
+	}
+	result := retainedRunStatus{
+		State:           "kept",
+		BrokerStatus:    derived,
+		SessionID:       status.State.SessionID,
+		RemoteWorkspace: record.RemoteWorkspace,
+		Detail:          "gg_mayasessiond reports retained session alive",
+	}
+	if record.RemoteSession.SessionID == "" {
+		result.State = "stale"
+		result.Detail = "retained run record has no broker session id; run state is incomplete"
+		return result, nil
+	}
+	if status.State.SessionID == "" {
+		result.State = "stale"
+		result.Detail = "gg_mayasessiond did not report a broker session id; retained session cannot be verified"
+		return result, nil
+	}
+	if !status.HasState || derived == "" || strings.EqualFold(derived, "stopped") {
+		result.State = "stale"
+		result.Detail = "gg_mayasessiond no longer reports this retained session; run state is stale and may need cleanup"
+		return result, nil
+	}
+	if record.RemoteSession.SessionID != "" && status.State.SessionID != "" && record.RemoteSession.SessionID != status.State.SessionID {
+		result.State = "stale"
+		result.Detail = "gg_mayasessiond session id changed since this run was retained; run state is orphaned"
+	}
+	return result, nil
+}
+
+func (broker ggMayaSessiondBroker) AttachRetainedRun(record runRetentionRecord, stdout io.Writer) error {
+	status, err := broker.StatusRetainedRun(record)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, "broker:")
+	fmt.Fprintln(stdout, "adapter: gg-mayasessiond")
+	fmt.Fprintf(stdout, "session: %s\n", status.SessionID)
+	fmt.Fprintf(stdout, "remoteWorkspace: %s\n", record.RemoteWorkspace)
+	fmt.Fprintf(stdout, "remoteState: %s\n", status.BrokerStatus)
+	report, err := broker.runSessiondCLI([]string{"report", "--state-dir", broker.host.Broker.StateDir, "--limit", "40", "--json"}, sessiondCommandTimeout)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, "brokerReport:")
+	_, err = stdout.Write(append(bytes.TrimSpace(report), '\n'))
+	return err
+}
+
+func (broker ggMayaSessiondBroker) StopRetainedRun(record runRetentionRecord) error {
+	remoteRunRoot, err := retainedRemoteRunRoot(record)
+	if err != nil {
+		return err
+	}
+	status, err := broker.StatusRetainedRun(record)
+	if err != nil {
+		return err
+	}
+	if status.State != "kept" {
+		if strings.TrimSpace(remoteRunRoot) == "" {
+			return fmt.Errorf("refusing to stop retained run %s because broker state is %s and no remote workspace cleanup path is recorded: %s", record.RunID, status.State, status.Detail)
+		}
+	} else {
+		raw, err := broker.runSessiondCLI([]string{"stop", "--state-dir", broker.host.Broker.StateDir, "--wait-timeout-seconds", "120", "--json"}, sessiondCommandTimeout+2*time.Minute)
+		if err != nil {
+			return err
+		}
+		var result map[string]any
+		if err := json.Unmarshal(raw, &result); err != nil {
+			return fmt.Errorf("parse gg_mayasessiond stop JSON: %w", err)
+		}
+		ok, found := result["ok"].(bool)
+		if !found || !ok {
+			if message, _ := result["error"].(string); message != "" {
+				return fmt.Errorf("gg_mayasessiond stop failed: %s", message)
+			}
+			return fmt.Errorf("gg_mayasessiond stop failed")
+		}
+	}
+	if strings.TrimSpace(remoteRunRoot) != "" {
+		if err := broker.removeRemotePath(remoteRunRoot); err != nil {
+			return fmt.Errorf("cleanup retained remote run workspace: %w", err)
+		}
+	}
+	return nil
+}
+
+func (broker ggMayaSessiondBroker) CleanupRun(context runContext) error {
+	return broker.removeRemotePath(context.RunWorkspace.RemoteRunRoot())
+}
+
+func retainedRemoteRunRoot(record runRetentionRecord) (string, error) {
+	if err := validateRunID(record.RunID); err != nil {
+		return "", err
+	}
+	workRoot := strings.TrimSpace(record.HostConfig.WorkRoot)
+	if workRoot == "" {
+		return "", fmt.Errorf("retained run %s is missing host workRoot for remote cleanup", record.RunID)
+	}
+	expected := remoteJoin(remotePath(workRoot), "runs", record.RunID)
+	if recorded := strings.TrimSpace(record.RemoteRunRoot); recorded != "" && recorded != expected {
+		return "", fmt.Errorf("retained run %s remote cleanup path %q does not match expected %q", record.RunID, recorded, expected)
+	}
+	return expected, nil
+}
+
 func (broker ggMayaSessiondBroker) validate() error {
 	if !broker.host.usesRealSSH() {
 		return fmt.Errorf("gg_mayasessiond broker requires transport: ssh")
@@ -133,6 +308,28 @@ func (broker ggMayaSessiondBroker) validate() error {
 		return fmt.Errorf("gg_mayasessiond broker requires broker.repo")
 	}
 	return nil
+}
+
+func (broker ggMayaSessiondBroker) status() (sessiondStatusResult, error) {
+	raw, err := broker.runSessiondCLI([]string{"status", "--state-dir", broker.host.Broker.StateDir, "--json"}, sessiondCommandTimeout)
+	if err != nil {
+		return sessiondStatusResult{}, err
+	}
+	var envelope struct {
+		OK    *bool  `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err == nil && envelope.OK != nil && !*envelope.OK {
+		if envelope.Error != "" {
+			return sessiondStatusResult{}, fmt.Errorf("gg_mayasessiond status failed: %s", envelope.Error)
+		}
+		return sessiondStatusResult{}, fmt.Errorf("gg_mayasessiond status failed")
+	}
+	var result sessiondStatusResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return sessiondStatusResult{}, fmt.Errorf("parse gg_mayasessiond status JSON: %w", err)
+	}
+	return result, nil
 }
 
 func (broker ggMayaSessiondBroker) scenarioWrapper(context runContext, scenario scenarioConfig) (string, error) {
@@ -314,7 +511,14 @@ Set-Location -LiteralPath %s
 	}
 	jsonOutput := trimToJSON(raw)
 	if !isSessiondJSONDocument(jsonOutput) {
-		return nil, fmt.Errorf("gg_mayasessiond %s returned no sessiond JSON result", args[0])
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(jsonOutput, &object); err == nil && hasAnyJSONKey(object, "level", "msg") {
+			return nil, fmt.Errorf("gg_mayasessiond %s returned no sessiond JSON result", args[0])
+		}
+		var document json.RawMessage
+		if err := json.Unmarshal(jsonOutput, &document); err != nil {
+			return nil, fmt.Errorf("gg_mayasessiond %s returned no sessiond JSON result", args[0])
+		}
 	}
 	return jsonOutput, nil
 }
@@ -479,7 +683,7 @@ func isSessiondJSONDocument(document []byte) bool {
 	if raw, ok := object["ok"]; ok {
 		var okValue bool
 		if err := json.Unmarshal(raw, &okValue); err == nil && !hasAnyJSONKey(object, "level") {
-			return hasAnyJSONKey(object, "tool", "checks", "content", "output", "error")
+			return hasAnyJSONKey(object, "tool", "checks", "content", "output", "error", "status")
 		}
 	}
 	if raw, ok := object["state"]; ok && !hasAnyJSONKey(object, "level", "msg") {

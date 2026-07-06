@@ -148,6 +148,9 @@ func (run *freshRunLifecycle) setup() error {
 	if err := writeJSONFile(filepath.Join(run.context.StateDir, "manifest.json"), run.manifest); err != nil {
 		return err
 	}
+	if err := writeRunRetentionRecord(run.context, newRunRetentionRecord(run.context, run.manifest, host.Config, "running", "")); err != nil {
+		return err
+	}
 	return appendEvent(run.context.EventsPath, "run.started", scenario.Name)
 }
 
@@ -222,10 +225,32 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 		return runOutcome{}, err
 	}
 	if run.stopPolicy == "kept" {
+		retention, ok := run.runtime.Broker.(runRetentionBroker)
+		if !ok || !retention.RetentionCapabilities().RetainOnFailure {
+			return runOutcome{}, unsupportedBrokerCapabilityError(run.manifest.Runtime.BrokerAdapter, "retain-on-failure")
+		}
+		reason := "stop-after-" + run.options.StopAfter
+		if run.options.StopAfter == stopAfterSuccess && run.result.Status != resultStatusPassed {
+			reason = "keep-on-failure"
+		}
 		if err := markHostLockKept(run.repoDir, run.host.HostID, run.manifest.RunID); err != nil {
 			return runOutcome{}, err
 		}
 		run.releaseHostLock = false
+		session, err := retention.RetainRun(run.context, run.manifest, reason)
+		if err != nil {
+			return runOutcome{}, err
+		}
+		record := newRunRetentionRecord(run.context, run.manifest, run.host.Config, "kept", reason)
+		record.BrokerCapabilities = retention.RetentionCapabilities()
+		record.RemoteSession = session
+		if err := writeRunRetentionRecord(run.context, record); err != nil {
+			return runOutcome{}, err
+		}
+	} else if retention, ok := run.runtime.Broker.(runRetentionBroker); ok && retention.RetentionCapabilities().CleanupRetainedWorkspace {
+		if err := retention.CleanupRun(run.context); err != nil {
+			return runOutcome{}, fmt.Errorf("clean up remote run workspace for %s: %w", run.manifest.RunID, err)
+		}
 	}
 	return runOutcome{
 		RunID:            run.manifest.RunID,

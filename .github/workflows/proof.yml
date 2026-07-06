@@ -265,7 +265,7 @@ jobs:
         run: |
           node scripts/proof/assert-public-artifact-confidentiality.mjs \
             --path artifacts/live-visual-evidence-proof \
-            --path artifacts/proof
+            --path artifacts/proof/proof-manifest.json
 
       - name: Upload Live Visual Evidence Proof
         id: upload-live-visual-evidence-proof

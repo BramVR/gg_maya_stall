@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -1771,6 +1772,128 @@ func TestDoctorScenarioValidatesInputsAndMayaVersion(t *testing.T) {
 	}
 }
 
+func TestDoctorAndRunReportSameScenarioInputFailures(t *testing.T) {
+	tests := []struct {
+		name   string
+		edit   func(string) string
+		detail string
+	}{
+		{
+			name: "missing Scenario Result",
+			edit: func(content string) string {
+				return strings.Replace(content, `scenarioResult: "outputs/smoke-result.json"`, `scenarioResult: ""`, 1)
+			},
+			detail: `Scenario "smoke" missing expectedOutputs.scenarioResult`,
+		},
+		{
+			name: "bad payload path",
+			edit: func(content string) string {
+				return strings.Replace(content, `maya/smoke.py`, `maya/missing.py`, 1)
+			},
+			detail: `stage mayaScripts payload maya/missing.py`,
+		},
+		{
+			name: "bad Validator path",
+			edit: func(content string) string {
+				return content + `    validators:
+      - type: outputExists
+        path: "../outside.json"
+`
+			},
+			detail: `repo path "../outside.json" must be repo-relative`,
+		},
+		{
+			name: "bad optional Validator path",
+			edit: func(content string) string {
+				return content + `    validators:
+      - type: visualEvidence
+        path: "../outside.json"
+`
+			},
+			detail: `repo path "../outside.json" must be repo-relative`,
+		},
+		{
+			name: "unknown Validator",
+			edit: func(content string) string {
+				return content + `    validators:
+      - type: pluginDomainAssertion
+`
+			},
+			detail: `unknown Validator type "pluginDomainAssertion"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := writeRunConfigFixture(t)
+			configPath := filepath.Join(dir, ".maya-stall.yaml")
+			contentBytes, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatalf("read config fixture: %v", err)
+			}
+			mustWriteFile(t, configPath, tt.edit(string(contentBytes)))
+			hostConfigPath := writeSingleHealthyHostConfig(t, dir)
+			var doctorOut, doctorErr, runOut, runErr bytes.Buffer
+
+			doctorCode := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha", "--scenario", "smoke"}, &doctorOut, &doctorErr, dir, "test-version")
+			if doctorCode != 1 {
+				t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", doctorCode, doctorOut.String(), doctorErr.String())
+			}
+			runCode := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha", "smoke"}, &runOut, &runErr, dir, "test-version")
+			if runCode != 1 {
+				t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", runCode, runOut.String(), runErr.String())
+			}
+			if !strings.Contains(doctorOut.String(), tt.detail) {
+				t.Fatalf("doctor output missing %q:\n%s", tt.detail, doctorOut.String())
+			}
+			if !strings.Contains(runErr.String(), tt.detail) {
+				t.Fatalf("run error missing %q:\n%s", tt.detail, runErr.String())
+			}
+		})
+	}
+}
+
+func TestScenarioContractNormalizesSSHOutputPlan(t *testing.T) {
+	contract, err := resolveScenarioContract(repoRunConfig{
+		Version: 1,
+		Scenarios: map[string]scenarioConfig{
+			"smoke": {
+				Payload: runPayload{
+					Scripts: []string{"maya/../maya/smoke.py"},
+				},
+				ExpectedOutputs: expectedOutputs{
+					ScenarioResult: "outputs/../results/smoke.json",
+					Files: []string{
+						"outputs/../reports/report.json",
+						"reports/report.json",
+					},
+				},
+				Validators: []validatorConfig{
+					{Type: "outputExists", Path: "outputs/../reports/report.json"},
+					{Type: "jsonEquals", Path: "outputs/../reports/summary.json", JSONPath: "$.status", Equals: "passed"},
+				},
+			},
+		},
+	}, "smoke")
+	if err != nil {
+		t.Fatalf("resolve Scenario contract: %v", err)
+	}
+
+	var got []scenarioOutputPath
+	got = append(got, contract.Outputs...)
+	want := []scenarioOutputPath{
+		{Path: "results/smoke.json", Optional: false},
+		{Path: "reports/report.json", Optional: true},
+		{Path: "reports/summary.json", Optional: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("output plan = %#v, want %#v", got, want)
+	}
+	if len(contract.Payload) != 1 || contract.Payload[0].Source != "maya/smoke.py" {
+		t.Fatalf("normalized payload = %#v", contract.Payload)
+	}
+}
+
 func TestDoctorFailureLayersIncludeRepairHints(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1922,7 +2045,7 @@ hostPools:
 			args:       []string{"--scenario", "smoke"},
 			wantLayer:  "scenario-inputs: fail",
 			wantDetail: "missing.py",
-			wantHint:   "Fix the Scenario payload paths and expectedOutputs.scenarioResult in repo config. See docs/setup/windows-maya-host.md#scenario-inputs.",
+			wantHint:   "Fix the Scenario payload paths, expectedOutputs, and Validators in repo config. See docs/setup/windows-maya-host.md#scenario-inputs.",
 		},
 	}
 	for _, tt := range tests {
@@ -4074,7 +4197,7 @@ scenarios:
 	}
 }
 
-func TestRunScenarioInvalidValidatorPathStillWritesEvidence(t *testing.T) {
+func TestRunScenarioInvalidValidatorPathFailsBeforeEvidence(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
 scenarios:
@@ -4092,10 +4215,11 @@ scenarios:
 	if code != 1 {
 		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
-	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
-	bundle := readEvidenceBundle(t, evidence)
-	if len(bundle.Validators) != 1 || bundle.Validators[0].Status != "failed" || !strings.Contains(bundle.Validators[0].Message, "repo-relative") {
-		t.Fatalf("validator metadata = %+v", bundle.Validators)
+	if !strings.Contains(stderr.String(), `repo path "../secret.json" must be repo-relative`) {
+		t.Fatalf("run error did not report invalid Validator path: %s", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "artifacts", "maya-stall")); !os.IsNotExist(err) {
+		t.Fatalf("invalid Validator config should fail before Evidence Bundle, stat err = %v", err)
 	}
 }
 

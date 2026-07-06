@@ -22,7 +22,8 @@ maya-stall doctor --host-config ci-hosts.yaml --target-profile ci --host maya-wi
 
 Doctor reports the layer that failed and a repair hint where possible:
 
-- local repo config and Scenario input shape;
+- local repo config and normalized Scenario input shape, including Run Payload
+  paths, Expected Outputs, and Validator config;
 - Target Profile and Host Pool references;
 - pinned Maya Host selection;
 - Host/Broker runtime contract (`fake-local` or `ssh-sessiond`);

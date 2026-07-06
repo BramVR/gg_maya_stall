@@ -20,7 +20,7 @@ maya-stall run --stop-after never smoke
 The run flow is:
 
 1. Load Repo Run Config.
-2. Select the named Scenario.
+2. Select and normalize the named Scenario.
 3. Resolve Target Profile, Host Pool, and Maya Host from host config if
    provided.
 4. Resolve the Host/Broker runtime contract.
@@ -49,6 +49,9 @@ downloads declared outputs, and captures screenshots through `viewport.capture`.
 Remote Scenario execution through `script.execute` is capped at 10 minutes.
 `manifest.json` and `evidence.json` record the resolved runtime profile, host
 adapter, broker adapter, broker config source, and live-proof eligibility.
+Scenario normalization owns Run Payload paths, Expected Outputs, evidence
+policy, and Validator config, so local run validation, Doctor, SSH output
+downloads, and Evidence Bundle output discovery use the same paths.
 
 Default output:
 

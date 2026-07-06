@@ -175,31 +175,13 @@ func (host realSSHHost) StagePayload(context runContext, payload []manifestPaylo
 	return nil
 }
 
-func (host realSSHHost) CollectArtifacts(context runContext, scenario scenarioConfig) error {
+func (host realSSHHost) CollectArtifacts(context runContext, scenario scenarioContract) error {
 	runID := filepath.Base(context.StateDir)
 	remoteWorkspace := remoteJoin(host.host.WorkRoot, "runs", runID, "workspace")
 	batch := newSFTPBatch()
 	seen := make(map[string]bool)
-	type downloadSpec struct {
-		path     string
-		optional bool
-	}
-	downloads := []downloadSpec{{path: scenario.ExpectedOutputs.ScenarioResult}}
-	for _, path := range scenario.ExpectedOutputs.Files {
-		downloads = append(downloads, downloadSpec{path: path, optional: true})
-	}
-	for _, validator := range scenario.Validators {
-		if validator.Path != "" {
-			downloads = append(downloads, downloadSpec{path: validator.Path, optional: true})
-		}
-	}
-	for _, download := range downloads {
-		item := download.path
-		clean, err := cleanRepoRelativePath(item)
-		if err != nil {
-			return err
-		}
-		clean = filepath.ToSlash(clean)
+	for _, download := range scenario.Outputs {
+		clean := download.Path
 		if clean == "" || seen[clean] {
 			continue
 		}
@@ -214,7 +196,7 @@ func (host realSSHHost) CollectArtifacts(context runContext, scenario scenarioCo
 		if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
 			return err
 		}
-		batch.get(remoteJoin(remoteWorkspace, clean), local, download.optional)
+		batch.get(remoteJoin(remoteWorkspace, clean), local, download.Optional)
 	}
 	if batch.Empty() {
 		return nil

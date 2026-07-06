@@ -146,7 +146,7 @@ func publishLiveVisualEvidenceProofArtifact(evidenceDir string, options liveVisu
 	if !options.MediaReviewed {
 		return "", fmt.Errorf("live proof artifact requires reviewed desktop media; set %s=true only for a controlled public-proof desktop", liveProofMediaReviewedEnv)
 	}
-	hostAlias, err := publicProofHostAlias(bundle.Host, options.PublicHostAlias)
+	hostAlias, err := publicProofHostAlias(options.PublicHostAlias)
 	if err != nil {
 		return "", err
 	}
@@ -317,13 +317,10 @@ func publicVisualEvidenceArtifact(artifact visualEvidenceArtifact, hostAlias str
 	return artifact
 }
 
-func publicProofHostAlias(source string, configured string) (string, error) {
+func publicProofHostAlias(configured string) (string, error) {
 	alias := strings.TrimSpace(configured)
 	if alias == "" {
-		alias = strings.TrimSpace(source)
-	}
-	if alias == "" {
-		return "", fmt.Errorf("live proof artifact needs a selected host alias")
+		return "", fmt.Errorf("live proof artifact needs a public selected host alias; set %s", liveProofPublicHostAliasEnv)
 	}
 	if !publicProofAliasPattern.MatchString(alias) || looksLikePrivateHostAlias(alias) {
 		return "", fmt.Errorf("live proof artifact host alias %q is not public-safe; set %s", alias, liveProofPublicHostAliasEnv)

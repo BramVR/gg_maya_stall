@@ -351,7 +351,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: proof-manifest-live
-          path: artifacts/proof/
+          path: artifacts/proof/proof-manifest.json
           if-no-files-found: error
 
   live-maya-proof-untrusted-fork:

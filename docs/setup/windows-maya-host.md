@@ -297,6 +297,14 @@ MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml MAYA_STALL_CONSUMING_REPO_SM
 
 All live smoke tests assert the Host Health report before accepting proof. Required live proof must show `ssh-sessiond`, `gg-mayasessiond`, interactive desktop readiness, and `viewport.capture` Visual Evidence readiness.
 
+To prove live desktop Visual Evidence, run:
+
+```sh
+MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml MAYA_STALL_SMOKE_TARGET_PROFILE=ci MAYA_STALL_SMOKE_HOST=maya-win-01 go test ./internal/cli -run TestOptInRealVisualEvidenceSmoke -count=1
+```
+
+`TestOptInRealVisualEvidenceSmoke` selects the configured host through Host Config, Target Profile, and optional Maya Host id. It runs Host Health first, asserts `maya.exe` is running in the interactive Windows `Console` session, captures a desktop PNG and a short MP4 from that interactive session, writes both into a local Evidence Bundle, and logs the Evidence Bundle, screenshot, and recording paths. The machine running the test must have `ffmpeg` on `PATH` to encode the MP4 from captured Windows desktop frames. A skipped test, missing host config, fake runtime, viewport-only screenshot, missing recording, or non-Console Maya process is not acceptable live proof.
+
 Optional:
 
 - `MAYA_STALL_SMOKE_TARGET_PROFILE`: Target Profile; default `default`.

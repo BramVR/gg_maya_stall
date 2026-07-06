@@ -248,7 +248,8 @@ jobs:
           MAYA_STALL_CONSUMING_REPO_SMOKE_DIR: ${{ steps.consumer-repo.outputs.path }}
         run: |
           set -euo pipefail
-          go test -json ./internal/cli -run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke' -count=1 | tee artifacts/proof/live-smoke.jsonl
+          go test -json ./internal/cli -run TestOptInRealVisualEvidenceSmoke -count=1 | tee artifacts/proof/live-smoke.jsonl
+          go test -json ./internal/cli -run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke' -count=1 | tee -a artifacts/proof/live-smoke.jsonl
 
       - name: Assert Live Maya Gate
         if: always()
@@ -266,7 +267,7 @@ jobs:
           const fs = require("node:fs");
           const [manifestPath, hostConfigState, liveStatus, smokePath] = process.argv.slice(2);
           const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-          const expected = new Set(["TestOptInRealSSHDoctorSmoke", "TestOptInRealSSHRunSmoke", "TestOptInRealSSHConsumingRepoSmoke"]);
+          const expected = new Set(["TestOptInRealSSHDoctorSmoke", "TestOptInRealSSHRunSmoke", "TestOptInRealSSHConsumingRepoSmoke", "TestOptInRealVisualEvidenceSmoke"]);
           const passed = new Set();
           const skipped = new Set();
           if (fs.existsSync(smokePath)) {

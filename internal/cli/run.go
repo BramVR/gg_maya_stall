@@ -35,7 +35,7 @@ type runHost interface {
 }
 
 type artifactCollector interface {
-	CollectArtifacts(runContext, scenarioConfig) error
+	CollectArtifacts(runContext, scenarioContract) error
 }
 
 type sessionBroker interface {
@@ -153,14 +153,7 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	if err != nil {
 		return runOutcome{}, err
 	}
-	scenario, ok := config.Scenarios[options.ScenarioName]
-	if !ok {
-		return runOutcome{}, newUsageError("unknown Scenario %q", options.ScenarioName)
-	}
-	if scenario.ExpectedOutputs.ScenarioResult == "" {
-		return runOutcome{}, fmt.Errorf("Scenario %q missing expectedOutputs.scenarioResult", options.ScenarioName)
-	}
-	scenarioResultPath, err := cleanRepoRelativePath(scenario.ExpectedOutputs.ScenarioResult)
+	scenario, err := resolveScenarioContract(config, options.ScenarioName)
 	if err != nil {
 		return runOutcome{}, err
 	}
@@ -192,7 +185,7 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	if err := rejectInvalidSessionBroker(runtime.Broker); err != nil {
 		return runOutcome{}, err
 	}
-	if err := rejectUnsupportedEvidenceConfig(runtime.Broker, scenario); err != nil {
+	if err := rejectUnsupportedEvidenceConfig(runtime.Broker, scenario.Config); err != nil {
 		return runOutcome{}, err
 	}
 	defer func() {
@@ -211,7 +204,7 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	stateDir := filepath.Join(repoDir, ".maya-stall", "state", "runs", runID)
 	evidenceDir := filepath.Join(repoDir, "artifacts", "maya-stall", runID)
 	workspace := filepath.Join(stateDir, "workspace")
-	workspaceScenarioResultPath := filepath.Join(workspace, scenarioResultPath)
+	workspaceScenarioResultPath := filepath.Join(workspace, scenario.ScenarioResultPath)
 	context := runContext{
 		RepoDir:            repoDir,
 		StateDir:           stateDir,
@@ -228,31 +221,27 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 		return runOutcome{}, err
 	}
 
-	payload, err := buildManifestPayload(scenario.Payload)
-	if err != nil {
-		return runOutcome{}, err
-	}
-	if err := runtime.Host.StagePayload(context, payload); err != nil {
+	if err := runtime.Host.StagePayload(context, scenario.Payload); err != nil {
 		return runOutcome{}, err
 	}
 
 	manifest := runManifest{
 		RunID:         runID,
-		Scenario:      options.ScenarioName,
+		Scenario:      scenario.Name,
 		TargetProfile: host.TargetProfile,
 		Host:          host.HostID,
 		Runtime:       resolved.Metadata,
 		ConfigPath:    repoRelativePath(repoDir, configPath),
-		Payload:       payload,
+		Payload:       scenario.Payload,
 	}
 	if err := writeJSONFile(filepath.Join(stateDir, "manifest.json"), manifest); err != nil {
 		return runOutcome{}, err
 	}
-	if err := appendEvent(context.EventsPath, "run.started", options.ScenarioName); err != nil {
+	if err := appendEvent(context.EventsPath, "run.started", scenario.Name); err != nil {
 		return runOutcome{}, err
 	}
 
-	result, err := runtime.Broker.RunScenario(context, scenario)
+	result, err := runtime.Broker.RunScenario(context, scenario.Config)
 	if err != nil {
 		return runOutcome{}, err
 	}
@@ -262,7 +251,7 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 		}
 	}
 	brokerResult := result
-	if err := validateScenarioResultPath(context, scenarioResultPath); err != nil {
+	if err := validateScenarioResultPath(context, scenario.ScenarioResultPath); err != nil {
 		return runOutcome{}, err
 	}
 	resultDocument, found, err := readScenarioResultDocument(context.ScenarioResultPath)
@@ -283,12 +272,12 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	if result.Status == "" {
 		result.Status = resultStatusPassed
 	}
-	visualEvidence, err := collectScenarioVisualEvidence(runtime.Broker, context, options.ScenarioName, scenario.Evidence)
+	visualEvidence, err := collectScenarioVisualEvidence(runtime.Broker, context, scenario.Name, scenario.Config.Evidence)
 	if err != nil {
 		return runOutcome{}, err
 	}
 	resultDocument.setResult(result)
-	if err := writeScenarioResult(context, scenarioResultPath, resultDocument); err != nil {
+	if err := writeScenarioResult(context, scenario.ScenarioResultPath, resultDocument); err != nil {
 		return runOutcome{}, err
 	}
 	validatorResults, err := validateRunOutputs(context, scenario, result)
@@ -299,7 +288,7 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 		result.Status = resultStatusFailed
 	}
 	resultDocument.setResult(result)
-	if err := writeScenarioResult(context, scenarioResultPath, resultDocument); err != nil {
+	if err := writeScenarioResult(context, scenario.ScenarioResultPath, resultDocument); err != nil {
 		return runOutcome{}, err
 	}
 	stopPolicy := "stopped"
@@ -327,7 +316,7 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 
 	return runOutcome{
 		RunID:            runID,
-		Scenario:         options.ScenarioName,
+		Scenario:         scenario.Name,
 		TargetProfile:    host.TargetProfile,
 		Host:             host.HostID,
 		StateDir:         stateDir,
@@ -601,9 +590,9 @@ func validateScenarioResultPath(context runContext, resultPath string) error {
 	return nil
 }
 
-func validateRunOutputs(context runContext, scenario scenarioConfig, result ScenarioResult) ([]validatorResult, error) {
+func validateRunOutputs(context runContext, scenario scenarioContract, result ScenarioResult) ([]validatorResult, error) {
 	var results []validatorResult
-	for _, validator := range scenario.Validators {
+	for _, validator := range scenario.Config.Validators {
 		switch validator.Type {
 		case "scenarioResultStatus":
 			want := validator.Status
@@ -922,7 +911,7 @@ func hasValidatorFailure(results []validatorResult) bool {
 	return false
 }
 
-func writeEvidenceBundle(context runContext, manifest runManifest, scenario scenarioConfig, result ScenarioResult, capturedVisualEvidence []visualEvidenceArtifact, validators []validatorResult) error {
+func writeEvidenceBundle(context runContext, manifest runManifest, scenario scenarioContract, result ScenarioResult, capturedVisualEvidence []visualEvidenceArtifact, validators []validatorResult) error {
 	outputs, err := copyEvidenceOutputs(context, scenario)
 	if err != nil {
 		return err
@@ -983,22 +972,14 @@ func mergeVisualEvidence(preferred []visualEvidenceArtifact, discovered []visual
 	return artifacts
 }
 
-func copyEvidenceOutputs(context runContext, scenario scenarioConfig) ([]outputArtifact, error) {
+func copyEvidenceOutputs(context runContext, scenario scenarioContract) ([]outputArtifact, error) {
 	seen := make(map[string]bool)
 	var outputs []outputArtifact
 	if err := copyEvidenceOutputDir(context, "outputs", seen, &outputs); err != nil {
 		return nil, err
 	}
-	for _, path := range append([]string{scenario.ExpectedOutputs.ScenarioResult}, scenario.ExpectedOutputs.Files...) {
-		if err := copyEvidenceOutputPath(context, path, seen, &outputs); err != nil {
-			return nil, err
-		}
-	}
-	for _, validator := range scenario.Validators {
-		if validator.Path == "" {
-			continue
-		}
-		if err := copyEvidenceOutputPath(context, validator.Path, seen, &outputs); err != nil {
+	for _, output := range scenario.Outputs {
+		if err := copyEvidenceOutputPath(context, output.Path, seen, &outputs); err != nil {
 			return nil, err
 		}
 	}

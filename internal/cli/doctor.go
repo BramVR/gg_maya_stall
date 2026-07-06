@@ -51,18 +51,21 @@ func runDoctor(repoDir string, options doctorOptions) hostHealthReport {
 	}
 	add(okCheck("local-config", repoRelativePath(repoDir, configPath)))
 
-	var scenario scenarioConfig
+	var scenario scenarioContract
 	if options.ScenarioName != "" {
-		selected, ok := config.Scenarios[options.ScenarioName]
-		if !ok {
-			add(failedCheck("scenario-inputs", fmt.Sprintf("unknown Scenario %q", options.ScenarioName), "Choose a configured Scenario or add it to the repo config. See docs/setup/windows-maya-host.md#scenario-inputs."))
+		selected, err := resolveScenarioContract(config, options.ScenarioName)
+		if err != nil {
+			var userErr *usageError
+			if errors.As(err, &userErr) {
+				add(failedCheck("scenario-inputs", err.Error(), "Choose a configured Scenario or add it to the repo config. See docs/setup/windows-maya-host.md#scenario-inputs."))
+			} else {
+				add(failedCheck("scenario-inputs", err.Error(), "Fix the Scenario payload paths, expectedOutputs, and Validators in repo config. See docs/setup/windows-maya-host.md#scenario-inputs."))
+			}
+		} else if err := validateScenarioInputs(repoDir, selected); err != nil {
+			add(failedCheck("scenario-inputs", err.Error(), "Fix the Scenario payload paths, expectedOutputs, and Validators in repo config. See docs/setup/windows-maya-host.md#scenario-inputs."))
 		} else {
 			scenario = selected
-			if err := validateScenarioInputs(repoDir, options.ScenarioName, scenario); err != nil {
-				add(failedCheck("scenario-inputs", err.Error(), "Fix the Scenario payload paths and expectedOutputs.scenarioResult in repo config. See docs/setup/windows-maya-host.md#scenario-inputs."))
-			} else {
-				add(okCheck("scenario-inputs", options.ScenarioName))
-			}
+			add(okCheck("scenario-inputs", options.ScenarioName))
 		}
 	}
 
@@ -115,25 +118,15 @@ func runDoctor(repoDir string, options doctorOptions) hostHealthReport {
 	}
 	add(okCheck("host", host.ID))
 	report.HostID = host.ID
-	checkHostLayers(repoDir, options, host, scenario, &report, add)
+	checkHostLayers(repoDir, options, host, scenario.Config, &report, add)
 
 	return report
 }
 
-func validateScenarioInputs(repoDir string, scenarioName string, scenario scenarioConfig) error {
-	if scenario.ExpectedOutputs.ScenarioResult == "" {
-		return fmt.Errorf("Scenario %q missing expectedOutputs.scenarioResult", scenarioName)
-	}
-	if _, err := cleanRepoRelativePath(scenario.ExpectedOutputs.ScenarioResult); err != nil {
-		return err
-	}
-	payload, err := buildManifestPayload(scenario.Payload)
-	if err != nil {
-		return err
-	}
-	for _, item := range payload {
+func validateScenarioInputs(repoDir string, scenario scenarioContract) error {
+	for _, item := range scenario.Payload {
 		if err := ensurePayloadPathHasNoSymlinkAncestor(repoDir, item.Source); err != nil {
-			return fmt.Errorf("%s payload %s: %w", item.Kind, item.Source, err)
+			return fmt.Errorf("stage %s payload %s: %w", item.Kind, item.Source, err)
 		}
 	}
 	return nil

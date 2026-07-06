@@ -12,6 +12,7 @@ import (
 const smokeHostConfigEnv = "MAYA_STALL_SMOKE_HOST_CONFIG"
 const smokeTargetProfileEnv = "MAYA_STALL_SMOKE_TARGET_PROFILE"
 const smokeHostEnv = "MAYA_STALL_SMOKE_HOST"
+const consumingRepoSmokeDirEnv = "MAYA_STALL_CONSUMING_REPO_SMOKE_DIR"
 
 func TestOptInRealSSHDoctorSmoke(t *testing.T) {
 	options, ok := realSSHSmokeOptionsFromEnv(t)
@@ -28,6 +29,14 @@ func TestOptInRealSSHDoctorSmoke(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("real SSH smoke doctor exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
+}
+
+func TestOptInRealSSHConsumingRepoSmoke(t *testing.T) {
+	options, ok := realSSHSmokeOptionsFromEnv(t)
+	if !ok {
+		return
+	}
+	runKLVPushConsumingRepoSmoke(t, options)
 }
 
 func TestOptInRealSSHRunSmoke(t *testing.T) {
@@ -52,7 +61,10 @@ func TestOptInRealSSHRunSmoke(t *testing.T) {
 	if evidenceDir == "" {
 		t.Fatalf("real SSH smoke run did not print Evidence Bundle path:\n%s", runStdout.String())
 	}
-	assertLiveSmokeEvidenceBundle(t, evidenceDir)
+	bundle := assertLiveSmokeEvidenceBundle(t, evidenceDir)
+	if bundle.Scenario != "smoke" {
+		t.Fatalf("Evidence Bundle scenario = %q, want smoke", bundle.Scenario)
+	}
 
 	var keptStdout, keptStderr bytes.Buffer
 	keptCode := Run(options.runArgs("retention-failure", "--keep-on-failure"), &keptStdout, &keptStderr, dir, "test-version")
@@ -89,6 +101,84 @@ func TestOptInRealSSHRunSmoke(t *testing.T) {
 	}
 	if !strings.Contains(stopStdout.String(), "stopped: "+runID) {
 		t.Fatalf("real SSH retention stop missing run id:\n%s", stopStdout.String())
+	}
+}
+
+func runKLVPushConsumingRepoSmoke(t *testing.T, options realSSHSmokeOptions) {
+	t.Helper()
+	consumingRepoDir := os.Getenv(consumingRepoSmokeDirEnv)
+	if consumingRepoDir == "" {
+		t.Fatalf("%s is not set; live proof requires a real consuming repo checkout", consumingRepoSmokeDirEnv)
+	}
+	dir := writeKLVPushConsumingRepoSmokeFixture(t, consumingRepoDir)
+
+	doctorOptions := options.doctorOptions()
+	doctorOptions.ScenarioName = "klv-push-smoke"
+	report := runDoctor(dir, doctorOptions)
+	assertLiveHostHealthProof(t, report)
+	t.Logf("Host Health: %s", formatHostHealthReport(report))
+
+	var runStdout, runStderr bytes.Buffer
+	runCode := Run(options.runArgs("klv-push-smoke"), &runStdout, &runStderr, dir, "test-version")
+	if runCode != 0 {
+		t.Fatalf("real consuming repo smoke run exit code = %d, want 0; stdout: %s stderr: %s", runCode, runStdout.String(), runStderr.String())
+	}
+	evidenceDir := smokeOutputValue(runStdout.String(), "evidence")
+	if evidenceDir == "" {
+		t.Fatalf("real consuming repo smoke did not print Evidence Bundle path:\n%s", runStdout.String())
+	}
+	bundle := assertLiveSmokeEvidenceBundle(t, evidenceDir)
+	if bundle.Scenario != "klv-push-smoke" {
+		t.Fatalf("Evidence Bundle scenario = %q, want klv-push-smoke", bundle.Scenario)
+	}
+	assertKLVPushScenarioResult(t, evidenceDir, bundle.ScenarioResult)
+
+	storeDir := filepath.Join(t.TempDir(), "evidence-store")
+	var publishStdout, publishStderr bytes.Buffer
+	publishCode := Run([]string{
+		"evidence", "publish",
+		"--destination", storeDir,
+		"--base-url", "https://evidence.example.invalid/maya-stall",
+		evidenceDir,
+	}, &publishStdout, &publishStderr, dir, "test-version")
+	if publishCode != 0 {
+		t.Fatalf("evidence publish exit code = %d, want 0; stdout: %s stderr: %s", publishCode, publishStdout.String(), publishStderr.String())
+	}
+	for _, name := range []string{"artifact-manifest.json", "review-comment.md"} {
+		if _, err := os.Stat(filepath.Join(storeDir, bundle.RunID, name)); err != nil {
+			t.Fatalf("published Evidence Store missing %s: %v", name, err)
+		}
+	}
+	if !strings.Contains(publishStdout.String(), "url: https://evidence.example.invalid/maya-stall/") {
+		t.Fatalf("evidence publish did not print review-ready URL:\n%s", publishStdout.String())
+	}
+}
+
+func TestKLVPushConsumingRepoSmokeFixtureUsesBuiltPluginArtifact(t *testing.T) {
+	source := t.TempDir()
+	mustWriteFile(t, filepath.Join(source, "pyproject.toml"), "[project]\nname = \"gg-klv-push\"\n")
+	mustWriteFile(t, filepath.Join(source, "packages", "klv_push", "README.md"), "# KLV Push\n")
+	mustWriteFile(t, filepath.Join(source, "packages", "klv_push", "pyproject.toml"), "[project]\nname = \"klv-push\"\n")
+	mustWriteFile(t, filepath.Join(source, "src", "klv_push", "__init__.py"), "\"\"\"test\"\"\"\n")
+	mustWriteFile(t, filepath.Join(source, "src", "klv_push", "klvPush.py"), "NODE_NAME = 'klvPush'\n")
+
+	dir := writeKLVPushConsumingRepoSmokeFixture(t, source)
+	config, _, err := loadRepoRunConfig(dir)
+	if err != nil {
+		t.Fatalf("load generated Repo Run Config: %v", err)
+	}
+	scenario := config.Scenarios["klv-push-smoke"]
+	if len(scenario.Payload.PluginArtifacts) != 1 || scenario.Payload.PluginArtifacts[0] != "packages/klv_push" {
+		t.Fatalf("pluginArtifacts = %#v, want packages/klv_push", scenario.Payload.PluginArtifacts)
+	}
+	if len(scenario.Payload.IncludePaths) != 1 || scenario.Payload.IncludePaths[0] != "packages/klv_push/scripts" {
+		t.Fatalf("includePaths = %#v, want built package scripts", scenario.Payload.IncludePaths)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "packages", "klv_push", "scripts", "klv_push", "klvPush.py")); err != nil {
+		t.Fatalf("built Plugin Artifact missing klvPush.py: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "maya", "klv_push_smoke.py")); err != nil {
+		t.Fatalf("Maya Script missing: %v", err)
 	}
 }
 
@@ -206,7 +296,7 @@ func smokeOutputValue(output string, key string) string {
 	return ""
 }
 
-func assertLiveSmokeEvidenceBundle(t *testing.T, evidenceDir string) {
+func assertLiveSmokeEvidenceBundle(t *testing.T, evidenceDir string) evidenceBundle {
 	t.Helper()
 	content, err := os.ReadFile(filepath.Join(evidenceDir, "evidence.json"))
 	if err != nil {
@@ -218,9 +308,6 @@ func assertLiveSmokeEvidenceBundle(t *testing.T, evidenceDir string) {
 	}
 	if bundle.Status != resultStatusPassed {
 		t.Fatalf("Evidence Bundle status = %q, want %q", bundle.Status, resultStatusPassed)
-	}
-	if bundle.Scenario != "smoke" {
-		t.Fatalf("Evidence Bundle scenario = %q, want smoke", bundle.Scenario)
 	}
 	if bundle.Runtime.Profile != "ssh-sessiond" || bundle.Runtime.HostAdapter != "ssh" || bundle.Runtime.BrokerAdapter != "gg-mayasessiond" || !bundle.Runtime.LiveProofEligible {
 		t.Fatalf("Evidence Bundle runtime = %+v, want live-proof-eligible ssh-sessiond", bundle.Runtime)
@@ -251,6 +338,159 @@ func assertLiveSmokeEvidenceBundle(t *testing.T, evidenceDir string) {
 		if !looksLikeImageBytes(artifact.MediaType, content) {
 			t.Fatalf("Visual Evidence artifact %s does not match media type %s", artifact.Path, artifact.MediaType)
 		}
+	}
+	return bundle
+}
+
+func writeKLVPushConsumingRepoSmokeFixture(t *testing.T, sourceRepoDir string) string {
+	t.Helper()
+	sourceRepoDir, err := filepath.Abs(sourceRepoDir)
+	if err != nil {
+		t.Fatalf("resolve consuming repo path: %v", err)
+	}
+	for _, required := range []string{
+		"pyproject.toml",
+		"packages/klv_push",
+		"src/klv_push/__init__.py",
+		"src/klv_push/klvPush.py",
+	} {
+		if _, err := os.Stat(filepath.Join(sourceRepoDir, filepath.FromSlash(required))); err != nil {
+			t.Fatalf("consuming repo missing %s: %v", required, err)
+		}
+	}
+
+	dir := t.TempDir()
+	if err := copyPath(filepath.Join(sourceRepoDir, "packages", "klv_push"), filepath.Join(dir, "packages", "klv_push")); err != nil {
+		t.Fatalf("copy klv_push package artifact shell: %v", err)
+	}
+	if err := copyPath(filepath.Join(sourceRepoDir, "src", "klv_push"), filepath.Join(dir, "packages", "klv_push", "scripts", "klv_push")); err != nil {
+		t.Fatalf("build klv_push Plugin Artifact: %v", err)
+	}
+	mustWriteFile(t, filepath.Join(dir, "pyproject.toml"), "[project]\nname = \"klv-push-consuming-smoke\"\n")
+	mustWriteFile(t, filepath.Join(dir, "maya", "klv_push_smoke.py"), klvPushConsumingRepoSmokeScript())
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  klv-push-smoke:
+    description: "KLV Push consuming repo smoke Scenario."
+    mayaVersion: "2025"
+    payload:
+      scripts:
+        - "maya/klv_push_smoke.py"
+      pluginArtifacts:
+        - "packages/klv_push"
+      includePaths:
+        - "packages/klv_push/scripts"
+    expectedOutputs:
+      files:
+        - "outputs/klv-push-smoke-result.json"
+      scenarioResult: "outputs/klv-push-smoke-result.json"
+    evidence:
+      screenshots:
+        enabled: true
+    validators:
+      - type: scenarioResultStatus
+        status: passed
+      - type: visualEvidence
+      - type: jsonEquals
+        path: "outputs/klv-push-smoke-result.json"
+        jsonPath: "$.pluginName"
+        equals: "klv_push"
+      - type: jsonEquals
+        path: "outputs/klv-push-smoke-result.json"
+        jsonPath: "$.import.ok"
+        equals: true
+      - type: jsonEquals
+        path: "outputs/klv-push-smoke-result.json"
+        jsonPath: "$.action.ok"
+        equals: true
+`)
+	return dir
+}
+
+func klvPushConsumingRepoSmokeScript() string {
+	return `import json
+import os
+import sys
+import traceback
+
+import maya.cmds as cmds
+
+result_path = os.environ["MAYA_STALL_SCENARIO_RESULT"]
+artifact_root = os.path.abspath(os.path.join(os.getcwd(), "..", "payload", "pluginArtifacts", "packages", "klv_push"))
+package_scripts = os.path.join(artifact_root, "scripts")
+
+def write_result(status, summary, **fields):
+    payload = {"status": status, "summary": summary}
+    payload.update(fields)
+    parent = os.path.dirname(result_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(result_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+try:
+    for module_name in list(sys.modules):
+        if module_name == "klv_push" or module_name.startswith("klv_push."):
+            sys.modules.pop(module_name, None)
+    sys.path.insert(0, package_scripts)
+    import klv_push.klvPush as klv_push_plugin
+
+    imported_path = os.path.normcase(os.path.abspath(getattr(klv_push_plugin, "__file__", "")))
+    package_root = os.path.normcase(os.path.abspath(package_scripts))
+    if not imported_path.startswith(package_root + os.sep):
+        raise RuntimeError("klv_push imported outside staged Plugin Artifact")
+
+    cmds.file(new=True, force=True)
+    marker = cmds.polyCube(name="mayaStallKlvPushImportMarker", width=1, height=1, depth=1)[0]
+    cmds.select(marker, replace=True)
+    cmds.refresh(force=True)
+    write_result(
+        "passed",
+        "klv_push plugin module imported from the staged artifact and a Maya marker object was created.",
+        pluginName="klv_push",
+        action={"ok": True, "createdNodes": [marker], "nodeType": getattr(klv_push_plugin, "NODE_NAME", "klvPush")},
+        mayaVersion=str(cmds.about(version=True)),
+        artifact={"name": "packages/klv_push", "builtScriptsPackage": True},
+        **{"import": {"ok": True, "module": getattr(klv_push_plugin, "__name__", "klv_push.klvPush"), "fromStagedArtifact": True}},
+    )
+except Exception as exc:
+    write_result(
+        "failed",
+        str(exc),
+        pluginName="klv_push",
+        action={"ok": False, "createdNodes": []},
+        mayaVersion=str(cmds.about(version=True)) if "cmds" in globals() else "",
+        traceback=traceback.format_exc(),
+        **{"import": {"ok": False}},
+    )
+    raise
+`
+}
+
+func assertKLVPushScenarioResult(t *testing.T, evidenceDir string, relativeResultPath string) {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join(evidenceDir, filepath.FromSlash(relativeResultPath)))
+	if err != nil {
+		t.Fatalf("read KLV Push Scenario Result: %v", err)
+	}
+	var result struct {
+		Status     string `json:"status"`
+		PluginName string `json:"pluginName"`
+		Import     struct {
+			OK bool `json:"ok"`
+		} `json:"import"`
+		Action struct {
+			OK           bool     `json:"ok"`
+			CreatedNodes []string `json:"createdNodes"`
+		} `json:"action"`
+		MayaVersion string `json:"mayaVersion"`
+	}
+	if err := json.Unmarshal(content, &result); err != nil {
+		t.Fatalf("parse KLV Push Scenario Result: %v", err)
+	}
+	if result.Status != resultStatusPassed || result.PluginName != "klv_push" || !result.Import.OK || !result.Action.OK || result.MayaVersion == "" || len(result.Action.CreatedNodes) == 0 {
+		t.Fatalf("KLV Push Scenario Result missing product proof: %+v", result)
 	}
 }
 

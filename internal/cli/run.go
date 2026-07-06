@@ -62,6 +62,7 @@ type recordingRequest struct {
 
 type runContext struct {
 	RepoDir            string
+	RunWorkspace       runWorkspace
 	StateDir           string
 	EvidenceDir        string
 	Workspace          string
@@ -201,20 +202,21 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 		host.release = func() error { return nil }
 	}
 
-	stateDir := filepath.Join(repoDir, ".maya-stall", "state", "runs", runID)
-	evidenceDir := filepath.Join(repoDir, "artifacts", "maya-stall", runID)
-	workspace := filepath.Join(stateDir, "workspace")
-	workspaceScenarioResultPath := filepath.Join(workspace, scenario.ScenarioResultPath)
+	workspace, err := newRunWorkspace(repoDir, runID, host.Config.WorkRoot, scenario.ScenarioResultPath)
+	if err != nil {
+		return runOutcome{}, err
+	}
 	context := runContext{
 		RepoDir:            repoDir,
-		StateDir:           stateDir,
-		EvidenceDir:        evidenceDir,
-		Workspace:          workspace,
-		EventsPath:         filepath.Join(stateDir, "events.jsonl"),
-		LogPath:            filepath.Join(stateDir, "logs", "session.log"),
-		ScenarioResultPath: workspaceScenarioResultPath,
+		RunWorkspace:       workspace,
+		StateDir:           workspace.StateDir(),
+		EvidenceDir:        workspace.EvidenceDir(),
+		Workspace:          workspace.LocalWorkspace(),
+		EventsPath:         workspace.EventsPath(),
+		LogPath:            workspace.LogPath(),
+		ScenarioResultPath: workspace.LocalScenarioResultPath(),
 		Environment: map[string]string{
-			scenarioResultEnvVar: workspaceScenarioResultPath,
+			scenarioResultEnvVar: workspace.LocalScenarioResultPath(),
 		},
 	}
 	if err := createCleanRunDirs(context); err != nil {
@@ -234,7 +236,7 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 		ConfigPath:    repoRelativePath(repoDir, configPath),
 		Payload:       scenario.Payload,
 	}
-	if err := writeJSONFile(filepath.Join(stateDir, "manifest.json"), manifest); err != nil {
+	if err := writeJSONFile(filepath.Join(context.StateDir, "manifest.json"), manifest); err != nil {
 		return runOutcome{}, err
 	}
 	if err := appendEvent(context.EventsPath, "run.started", scenario.Name); err != nil {
@@ -319,8 +321,8 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 		Scenario:         scenario.Name,
 		TargetProfile:    host.TargetProfile,
 		Host:             host.HostID,
-		StateDir:         stateDir,
-		EvidenceDir:      evidenceDir,
+		StateDir:         context.StateDir,
+		EvidenceDir:      context.EvidenceDir,
 		Result:           result,
 		Validators:       validatorResults,
 		StopPolicy:       stopPolicy,
@@ -448,7 +450,7 @@ func createCleanRunDirs(context runContext) error {
 	}
 	for _, path := range []string{
 		context.Workspace,
-		filepath.Join(context.StateDir, "payload"),
+		context.RunWorkspace.LocalPayloadRoot(),
 		filepath.Dir(context.LogPath),
 		context.EvidenceDir,
 	} {
@@ -1205,7 +1207,7 @@ func (fakeHost) StagePayload(context runContext, payload []manifestPayload) erro
 			return fmt.Errorf("stage %s payload %s: %w", item.Kind, item.Source, err)
 		}
 		source := filepath.Join(context.RepoDir, item.Source)
-		destination := filepath.Join(context.StateDir, item.Staged)
+		destination := context.RunWorkspace.LocalPayloadPath(item)
 		if err := copyPath(source, destination); err != nil {
 			return fmt.Errorf("stage %s payload %s: %w", item.Kind, item.Source, err)
 		}

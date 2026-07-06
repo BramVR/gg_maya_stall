@@ -65,11 +65,8 @@ func (broker ggMayaSessiondBroker) RunScenario(context runContext, scenario scen
 	if err := os.WriteFile(context.LogPath, []byte("gg_mayasessiond Session Broker ran Scenario\n"), 0o644); err != nil {
 		return ScenarioResult{}, err
 	}
-	runID := filepath.Base(context.StateDir)
-	remoteRunRoot := remoteJoin(broker.host.WorkRoot, "runs", runID)
-	remoteWorkspace := remoteJoin(remoteRunRoot, "workspace")
-	wrapperPath := remoteJoin(remoteWorkspace, ".maya-stall-scenario.py")
-	wrapper, err := broker.scenarioWrapper(context, scenario, remoteRunRoot, remoteWorkspace)
+	wrapperPath := context.RunWorkspace.RemoteScenarioWrapperPath()
+	wrapper, err := broker.scenarioWrapper(context, scenario)
 	if err != nil {
 		return ScenarioResult{}, err
 	}
@@ -149,16 +146,16 @@ func (broker ggMayaSessiondBroker) validate() error {
 	return nil
 }
 
-func (broker ggMayaSessiondBroker) scenarioWrapper(context runContext, scenario scenarioConfig, remoteRunRoot string, remoteWorkspace string) (string, error) {
-	resultPath, err := windowsRemoteRepoPath(remoteWorkspace, scenario.ExpectedOutputs.ScenarioResult)
+func (broker ggMayaSessiondBroker) scenarioWrapper(context runContext, scenario scenarioConfig) (string, error) {
+	resultPath := context.RunWorkspace.RemoteScenarioResultPath()
+	if err := rejectSFTPRepoPath(scenario.ExpectedOutputs.ScenarioResult); err != nil {
+		return "", err
+	}
+	scripts, err := remotePayloadScripts(context.RunWorkspace, scenario.Payload)
 	if err != nil {
 		return "", err
 	}
-	scripts, err := remotePayloadScripts(remoteRunRoot, scenario.Payload)
-	if err != nil {
-		return "", err
-	}
-	includePaths, err := remotePayloadIncludePaths(remoteRunRoot, scenario.Payload)
+	includePaths, err := remotePayloadIncludePaths(context.RunWorkspace, scenario.Payload)
 	if err != nil {
 		return "", err
 	}
@@ -168,7 +165,7 @@ func (broker ggMayaSessiondBroker) scenarioWrapper(context runContext, scenario 
 	builder.WriteString(pythonString(resultPath))
 	builder.WriteString("\n")
 	builder.WriteString("run_modules_root = ")
-	builder.WriteString(pythonString(remoteJoin(broker.host.WorkRoot, "runs")))
+	builder.WriteString(pythonString(context.RunWorkspace.RemoteRunModulesRoot()))
 	builder.WriteString("\n")
 	builder.WriteString("previous_cwd = os.getcwd()\n")
 	builder.WriteString("previous_sys_path = list(sys.path)\n")
@@ -213,7 +210,7 @@ func (broker ggMayaSessiondBroker) scenarioWrapper(context runContext, scenario 
 	builder.WriteString("] = result_path\n")
 	builder.WriteString("    os.makedirs(os.path.dirname(result_path), exist_ok=True)\n")
 	builder.WriteString("    os.chdir(")
-	builder.WriteString(pythonString(remoteWorkspace))
+	builder.WriteString(pythonString(context.RunWorkspace.RemoteWorkspace()))
 	builder.WriteString(")\n")
 	builder.WriteString("    _maya_stall_clear_run_modules()\n")
 	builder.WriteString("    for include_path in reversed(")
@@ -255,12 +252,12 @@ func (broker ggMayaSessiondBroker) scenarioWrapper(context runContext, scenario 
 	return builder.String(), nil
 }
 
-func remotePayloadScripts(remoteRunRoot string, payload runPayload) ([]string, error) {
+func remotePayloadScripts(workspace runWorkspace, payload runPayload) ([]string, error) {
 	paths := append([]string{}, payload.MayaScripts...)
 	paths = append(paths, payload.Scripts...)
 	remote := make([]string, 0, len(paths))
 	for _, source := range paths {
-		remotePath, err := windowsRemoteRepoPath(remoteJoin(remoteRunRoot, "payload", "mayaScripts"), source)
+		remotePath, err := workspace.remotePayloadKindPath("mayaScripts", source)
 		if err != nil {
 			return nil, err
 		}
@@ -269,27 +266,16 @@ func remotePayloadScripts(remoteRunRoot string, payload runPayload) ([]string, e
 	return remote, nil
 }
 
-func remotePayloadIncludePaths(remoteRunRoot string, payload runPayload) ([]string, error) {
+func remotePayloadIncludePaths(workspace runWorkspace, payload runPayload) ([]string, error) {
 	remote := make([]string, 0, len(payload.IncludePaths))
 	for _, source := range payload.IncludePaths {
-		remotePath, err := windowsRemoteRepoPath(remoteJoin(remoteRunRoot, "payload", "includePaths"), source)
+		remotePath, err := workspace.remotePayloadKindPath("includePaths", source)
 		if err != nil {
 			return nil, err
 		}
 		remote = append(remote, remotePath)
 	}
 	return remote, nil
-}
-
-func windowsRemoteRepoPath(root string, relative string) (string, error) {
-	if strings.Contains(relative, `\`) {
-		return "", fmt.Errorf("repo paths used by gg_mayasessiond must use forward slashes, not backslashes")
-	}
-	clean, err := cleanRepoRelativePath(relative)
-	if err != nil {
-		return "", err
-	}
-	return remoteJoin(root, clean), nil
 }
 
 func (broker ggMayaSessiondBroker) callCapture() (sessiondCaptureResult, error) {

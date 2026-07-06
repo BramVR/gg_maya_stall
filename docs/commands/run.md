@@ -53,6 +53,19 @@ Scenario normalization owns Run Payload paths, Expected Outputs, evidence
 policy, and Validator config, so local run validation, Doctor, SSH output
 downloads, and Evidence Bundle output discovery use the same paths.
 
+## Run Workspace Layout
+
+For each run, Maya Stall derives local and remote paths from one Run Workspace:
+
+- local state: `.maya-stall/state/runs/<run-id>/`
+- local staged payload mirror: `.maya-stall/state/runs/<run-id>/payload/`
+- local workspace: `.maya-stall/state/runs/<run-id>/workspace/`
+- local Evidence Bundle: `artifacts/maya-stall/<run-id>/`
+- remote run root: `workRoot/runs/<run-id>/`
+- remote staged payloads: `workRoot/runs/<run-id>/payload/`
+- remote workspace: `workRoot/runs/<run-id>/workspace/`
+- remote Scenario Result: `workRoot/runs/<run-id>/workspace/<expectedOutputs.scenarioResult>`
+
 Default output:
 
 ```text

@@ -75,15 +75,18 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 	}
 
 	runID := runtime.Now().UTC().Format("20060102T150405.000000000Z")
-	stateDir := filepath.Join(repoDir, ".maya-stall", "state", "runs", runID)
-	evidenceDir := filepath.Join(repoDir, "artifacts", "maya-stall", runID)
+	workspace, err := newRunWorkspace(repoDir, runID, host.Config.WorkRoot, "scenario-result.json")
+	if err != nil {
+		return runOutcome{}, visualEvidenceArtifact{}, err
+	}
 	context := runContext{
-		RepoDir:     repoDir,
-		StateDir:    stateDir,
-		EvidenceDir: evidenceDir,
-		Workspace:   filepath.Join(stateDir, "workspace"),
-		EventsPath:  filepath.Join(stateDir, "events.jsonl"),
-		LogPath:     filepath.Join(stateDir, "logs", "session.log"),
+		RepoDir:      repoDir,
+		RunWorkspace: workspace,
+		StateDir:     workspace.StateDir(),
+		EvidenceDir:  workspace.EvidenceDir(),
+		Workspace:    workspace.LocalWorkspace(),
+		EventsPath:   workspace.EventsPath(),
+		LogPath:      workspace.LogPath(),
 	}
 	if err := createCleanRunDirs(context); err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
@@ -94,7 +97,7 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 		if cleanupState {
 			_ = cleanupRunState(repoDir, runID)
 			if err != nil && cleanupEvidence {
-				_ = os.RemoveAll(evidenceDir)
+				_ = os.RemoveAll(context.EvidenceDir)
 			}
 		}
 	}()
@@ -109,7 +112,7 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 	if configPath, err := DiscoverConfig(repoDir); err == nil {
 		manifest.ConfigPath = repoRelativePath(repoDir, configPath)
 	}
-	if err := writeJSONFile(filepath.Join(stateDir, "manifest.json"), manifest); err != nil {
+	if err := writeJSONFile(filepath.Join(context.StateDir, "manifest.json"), manifest); err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}
 	if err := appendEvent(context.EventsPath, "visual-evidence.started", kind); err != nil {
@@ -140,7 +143,7 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}
 	result := ScenarioResult{Status: resultStatusPassed, Summary: brokerName + " Visual Evidence captured"}
-	if err := writeJSONFile(filepath.Join(evidenceDir, "scenario-result.json"), result); err != nil {
+	if err := writeJSONFile(filepath.Join(context.EvidenceDir, "scenario-result.json"), result); err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}
 	if err := appendEvent(context.EventsPath, "visual-evidence.completed", artifact.Path); err != nil {
@@ -159,8 +162,8 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 		Scenario:      manifest.Scenario,
 		TargetProfile: host.TargetProfile,
 		Host:          host.HostID,
-		StateDir:      stateDir,
-		EvidenceDir:   evidenceDir,
+		StateDir:      context.StateDir,
+		EvidenceDir:   context.EvidenceDir,
 		Result:        result,
 		StopPolicy:    "stopped",
 	}, artifact, nil

@@ -41,9 +41,11 @@ descriptive; code is the source-backed check when behavior claims disagree.
 
 ## Run Lifecycle
 
-- Run command, Fresh Run behavior, Stop Policy, kept-session follow-up commands,
-  payload staging, Scenario Result collection, Validator execution, and Evidence
-  Bundle layout: `internal/cli/run.go`
+- Fresh Run lifecycle interface and setup, execute, settle ordering:
+  `internal/cli/fresh_run.go`
+- Fresh Run data model, Stop Policy, payload staging, Scenario Result
+  collection, Validator execution, and Evidence Bundle layout:
+  `internal/cli/run.go`
 - Kept run state, `status`, `attach`, and `stop`: `internal/cli/run_state.go`
 - Crabbox-inspired defaults: `internal/cli/crabbox_defaults.go`
 

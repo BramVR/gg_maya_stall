@@ -28,7 +28,7 @@ func TestOptInRealVisualEvidenceSmoke(t *testing.T) {
 	doctorOptions := options.doctorOptions()
 	doctorOptions.ScenarioName = "smoke"
 	report := runDoctor(dir, doctorOptions)
-	assertLiveHostHealthProof(t, report)
+	assertLiveVisualEvidenceHostProof(t, report)
 	t.Logf("Host Health: %s", formatHostHealthReport(report))
 
 	evidenceDir := captureLiveDesktopVisualEvidenceProof(t, dir, options)
@@ -158,6 +158,34 @@ func TestLiveVisualEvidenceProofWorkflowRequiresSmokePass(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("proof workflow missing %q", want)
 		}
+	}
+}
+
+func TestLiveVisualEvidenceHostProofDoesNotDependOnViewportCapture(t *testing.T) {
+	report := hostHealthReport{
+		Runtime: runtimeMetadata{Profile: "ssh-sessiond", HostAdapter: "ssh", BrokerAdapter: "gg-mayasessiond", LiveProofEligible: true},
+		Layers: []hostHealthLayer{
+			okCheck("local-config", ".maya-stall.yaml"),
+			okCheck("scenario-inputs", "smoke"),
+			okCheck("target-profile", "default"),
+			okCheck("host-pool", "windows-maya"),
+			okCheck("host", "maya-win-01"),
+			okCheck("ssh", "reachable"),
+			okCheck("work-root", "writable"),
+			withState(okCheck("host-lock", "unlocked"), "unlocked"),
+			withSource(okCheck("session-broker", "gg_mayasessiond reachable; Maya UI is interactive"), "gg-mayasessiond"),
+			okCheck("maya-version", "2025 satisfies Scenario smoke"),
+			withSource(failedCheck("visual-evidence", "Error calling tool 'viewport.capture': Maya did not return an output path.", "Repair viewport.capture in gg_mayasessiond."), "session-broker"),
+		},
+	}
+	report.Layers[8].InteractiveDesktop = true
+	if err := validateLiveVisualEvidenceHostProof(report); err != nil {
+		t.Fatalf("validateLiveVisualEvidenceHostProof returned error: %v", err)
+	}
+
+	report.Layers[8].InteractiveDesktop = false
+	if err := validateLiveVisualEvidenceHostProof(report); err == nil || !strings.Contains(err.Error(), "interactive gg_mayasessiond") {
+		t.Fatalf("validateLiveVisualEvidenceHostProof error = %v, want interactive broker failure", err)
 	}
 }
 
@@ -574,6 +602,48 @@ func parseWindowsProcessSessions(raw []byte) ([]windowsProcessSession, error) {
 		return nil, fmt.Errorf("parse maya.exe process JSON: %w", err)
 	}
 	return []windowsProcessSession{process}, nil
+}
+
+func assertLiveVisualEvidenceHostProof(t *testing.T, report hostHealthReport) {
+	t.Helper()
+	if err := validateLiveVisualEvidenceHostProof(report); err != nil {
+		t.Fatalf("Host Health is not ready for live desktop Visual Evidence proof: %v: %s", err, formatHostHealthReport(report))
+	}
+	if visual, ok := hostHealthLayerByID(report, "visual-evidence"); ok && visual.Status != "ok" {
+		t.Logf("viewport Visual Evidence health is not used as live desktop proof: %+v", visual)
+	}
+}
+
+func validateLiveVisualEvidenceHostProof(report hostHealthReport) error {
+	if err := requireLiveRuntime(report.Runtime); err != nil {
+		return err
+	}
+	for _, id := range []string{"local-config", "scenario-inputs", "target-profile", "host-pool", "host", "ssh", "work-root", "host-lock", "maya-version"} {
+		layer, ok := hostHealthLayerByID(report, id)
+		if !ok {
+			return fmt.Errorf("Host Health missing %s layer", id)
+		}
+		if layer.Status != "ok" {
+			return fmt.Errorf("Host Health %s layer = %+v, want ok", id, layer)
+		}
+	}
+	broker, ok := hostHealthLayerByID(report, "session-broker")
+	if !ok {
+		return fmt.Errorf("Host Health missing session-broker layer")
+	}
+	if broker.Status != "ok" || broker.Source != "gg-mayasessiond" || !broker.InteractiveDesktop {
+		return fmt.Errorf("session-broker Host Health = %+v, want interactive gg_mayasessiond", broker)
+	}
+	return nil
+}
+
+func hostHealthLayerByID(report hostHealthReport, id string) (hostHealthLayer, bool) {
+	for _, layer := range report.Layers {
+		if layer.ID == id {
+			return layer, true
+		}
+	}
+	return hostHealthLayer{}, false
 }
 
 func assertLiveVisualEvidenceProofBundle(t *testing.T, evidenceDir string) evidenceBundle {

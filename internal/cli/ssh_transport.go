@@ -152,11 +152,9 @@ func (host realSSHHost) StagePayload(context runContext, payload []manifestPaylo
 	if err := validateRealSSHConfig(host.host); err != nil {
 		return err
 	}
-	runID := filepath.Base(context.StateDir)
 	batch := newSFTPBatch()
-	remoteRunRoot := remoteJoin(host.host.WorkRoot, "runs", runID)
-	batch.mkdirAll(remoteRunRoot)
-	batch.mkdirAll(remoteJoin(remoteRunRoot, "workspace"))
+	batch.mkdirAll(context.RunWorkspace.RemoteRunRoot())
+	batch.mkdirAll(context.RunWorkspace.RemoteWorkspace())
 	for _, item := range payload {
 		if err := rejectSFTPRepoPath(item.Source); err != nil {
 			return fmt.Errorf("stage %s payload: %w", item.Kind, err)
@@ -165,7 +163,7 @@ func (host realSSHHost) StagePayload(context runContext, payload []manifestPaylo
 			return fmt.Errorf("stage %s payload %s: %w", item.Kind, item.Source, err)
 		}
 		source := filepath.Join(context.RepoDir, item.Source)
-		destination := remoteJoin(remoteRunRoot, item.Staged)
+		destination := context.RunWorkspace.RemotePayloadPath(item)
 		batch.mkdirAll(remoteDir(destination))
 		batch.put(source, destination)
 	}
@@ -176,8 +174,6 @@ func (host realSSHHost) StagePayload(context runContext, payload []manifestPaylo
 }
 
 func (host realSSHHost) CollectArtifacts(context runContext, scenario scenarioContract) error {
-	runID := filepath.Base(context.StateDir)
-	remoteWorkspace := remoteJoin(host.host.WorkRoot, "runs", runID, "workspace")
 	batch := newSFTPBatch()
 	seen := make(map[string]bool)
 	for _, download := range scenario.Outputs {
@@ -196,7 +192,7 @@ func (host realSSHHost) CollectArtifacts(context runContext, scenario scenarioCo
 		if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
 			return err
 		}
-		batch.get(remoteJoin(remoteWorkspace, clean), local, download.Optional)
+		batch.get(context.RunWorkspace.RemoteOutputPath(clean), local, download.Optional)
 	}
 	if batch.Empty() {
 		return nil

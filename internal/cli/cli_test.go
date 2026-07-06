@@ -2677,7 +2677,7 @@ func TestGGMayaSessiondScenarioWrapperPreservesFailingScenarioResult(t *testing.
 	if err != nil {
 		t.Fatalf("load fixture config: %v", err)
 	}
-	wrapper, err := broker.scenarioWrapper(runContext{}, config.Scenarios["smoke"], "C:/maya-stall/runs/run-1", "C:/maya-stall/runs/run-1/workspace")
+	wrapper, err := broker.scenarioWrapper(runContext{RunWorkspace: mustRunWorkspace(t, dir, "run-1", "C:/maya-stall", config.Scenarios["smoke"].ExpectedOutputs.ScenarioResult)}, config.Scenarios["smoke"])
 	if err != nil {
 		t.Fatalf("build wrapper: %v", err)
 	}
@@ -2734,7 +2734,7 @@ func TestGGMayaSessiondScenarioWrapperFailsEarlyZeroSystemExit(t *testing.T) {
 			ScenarioResult: "outputs/result.json",
 		},
 	}
-	wrapper, err := broker.scenarioWrapper(runContext{}, scenario, remoteRunRoot, remoteWorkspace)
+	wrapper, err := broker.scenarioWrapper(runContext{RunWorkspace: mustRunWorkspace(t, root, "run-1", root, scenario.ExpectedOutputs.ScenarioResult)}, scenario)
 	if err != nil {
 		t.Fatalf("build wrapper: %v", err)
 	}
@@ -2786,7 +2786,7 @@ func TestGGMayaSessiondScenarioWrapperRejectsBackslashScenarioResultPath(t *test
 	broker := ggMayaSessiondBroker{}
 	scenario := scenarioConfig{ExpectedOutputs: expectedOutputs{ScenarioResult: `..\..\Users\maya-runner\result.json`}}
 
-	_, err := broker.scenarioWrapper(runContext{}, scenario, "C:/maya-stall/runs/run-1", "C:/maya-stall/runs/run-1/workspace")
+	_, err := broker.scenarioWrapper(runContext{RunWorkspace: mustRunWorkspace(t, t.TempDir(), "run-1", "C:/maya-stall", "outputs/result.json")}, scenario)
 	if err == nil {
 		t.Fatal("scenarioWrapper returned nil error for backslash Scenario Result path")
 	}
@@ -2807,7 +2807,7 @@ func TestGGMayaSessiondScenarioWrapperRejectsBackslashPayloadPaths(t *testing.T)
 			ExpectedOutputs: expectedOutputs{ScenarioResult: "outputs/result.json"},
 		},
 	} {
-		_, err := broker.scenarioWrapper(runContext{}, scenario, "C:/maya-stall/runs/run-1", "C:/maya-stall/runs/run-1/workspace")
+		_, err := broker.scenarioWrapper(runContext{RunWorkspace: mustRunWorkspace(t, t.TempDir(), "run-1", "C:/maya-stall", scenario.ExpectedOutputs.ScenarioResult)}, scenario)
 		if err == nil {
 			t.Fatal("scenarioWrapper returned nil error for backslash payload path")
 		}
@@ -4843,6 +4843,15 @@ exit 0
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func mustRunWorkspace(t *testing.T, repoDir string, runID string, remoteWorkRoot string, scenarioResult string) runWorkspace {
+	t.Helper()
+	workspace, err := newRunWorkspace(repoDir, runID, remoteWorkRoot, scenarioResult)
+	if err != nil {
+		t.Fatalf("create Run Workspace: %v", err)
+	}
+	return workspace
 }
 
 func onlyRunDir(t *testing.T, parent string) string {

@@ -9,7 +9,13 @@ maya-stall status --run <run-id>
 
 Use it after `--keep-on-failure` or `--stop-after never` to find sessions that
 still hold Host Locks. Kept run status includes the resolved runtime profile,
-host adapter, broker adapter, and live-proof eligibility recorded at run time.
+host adapter, broker adapter, live-proof eligibility, retention reason, local
+state path, remote workspace, and broker session id recorded at run time.
 
-Kept Sessions remain visible until `maya-stall stop <run-id>` removes their run
-state and releases the Host Lock.
+For broker-backed runs, status is truth-seeking: it reads the local Run Record,
+then asks the Session Broker whether the retained Maya UI Session still exists.
+If the broker session disappeared or changed, status reports `state: stale`
+instead of pretending local state is enough.
+
+Kept Sessions remain visible until `maya-stall stop <run-id>` performs
+broker-backed cleanup, removes local run state, and releases the Host Lock.

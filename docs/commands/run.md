@@ -82,8 +82,9 @@ Use `--host-lock-wait <duration>` to wait for a busy host or
 
 ## Stop Policy
 
-Fresh Runs stop and clean hidden run state by default after writing the Evidence
-Bundle. Use `--keep-on-failure` to retain a failed session for debugging.
+Fresh Runs stop and clean hidden run state and the remote run workspace by
+default after writing the Evidence Bundle. Use `--keep-on-failure` to retain a
+failed Session Broker-backed Maya UI Session for debugging.
 
 Explicit `--stop-after` values are:
 
@@ -92,5 +93,9 @@ Explicit `--stop-after` values are:
 - `always`: always stop.
 - `never`: keep the session until `maya-stall stop`.
 
-Kept sessions are visible through `status`, readable through `attach`, and
-cleaned with `stop`.
+Kept sessions write a hidden Run Record under `.maya-stall/state/runs/<run-id>/`
+with the local paths, remote workspace, broker adapter, broker capabilities, and
+remote session metadata needed by `status`, `attach`, and `stop`.
+
+Kept sessions are visible through truth-seeking `status`, readable through
+read-only `attach`, and cleaned with broker-backed `stop`.

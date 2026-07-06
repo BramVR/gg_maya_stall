@@ -172,6 +172,8 @@ Doctor layer:
 - Allow one active Fresh Run per Maya Host.
 - Inspect Kept Sessions before clearing Host Locks manually.
 - Use Stop Policy intentionally: cleanup after success, keep on failure for debugging, and stop Kept Sessions when done.
+- Keep Session Broker `status`, `report`, `stop`, and remote workspace cleanup working for retained runs. `maya-stall status --run <id>` checks broker truth, `attach <id>` prints local run evidence plus broker report data, and `stop <id>` only releases the Host Lock after broker stop and cleanup succeed.
+- If a broker session disappears outside Maya Stall, `status --run <id>` reports stale/orphaned state. Use that signal to decide whether manual host cleanup is needed before clearing locks.
 
 Doctor layer:
 

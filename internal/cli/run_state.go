@@ -15,10 +15,12 @@ type statusOptions struct {
 }
 
 type keptRun struct {
-	RunID    string
-	StateDir string
-	Manifest runManifest
-	Bundle   evidenceBundle
+	RunID        string
+	StateDir     string
+	Manifest     runManifest
+	Record       runRetentionRecord
+	RemoteStatus retainedRunStatus
+	Bundle       evidenceBundle
 }
 
 func parseStatusArgs(args []string) (statusOptions, error) {
@@ -70,6 +72,9 @@ func printStatus(repoDir string, options statusOptions, stdout io.Writer) error 
 		if err != nil {
 			return err
 		}
+		if err := refreshKeptRunStatus(&run); err != nil {
+			return err
+		}
 		printKeptRunStatus(stdout, run)
 		return nil
 	}
@@ -89,7 +94,11 @@ func printStatus(repoDir string, options statusOptions, stdout io.Writer) error 
 
 func printKeptRunStatus(stdout io.Writer, run keptRun) {
 	fmt.Fprintf(stdout, "run: %s\n", run.RunID)
-	fmt.Fprintln(stdout, "state: kept")
+	state := run.RemoteStatus.State
+	if state == "" {
+		state = "kept"
+	}
+	fmt.Fprintf(stdout, "state: %s\n", state)
 	fmt.Fprintf(stdout, "scenario: %s\n", run.Manifest.Scenario)
 	fmt.Fprintf(stdout, "targetProfile: %s\n", run.Manifest.TargetProfile)
 	fmt.Fprintf(stdout, "host: %s\n", run.Manifest.Host)
@@ -100,6 +109,21 @@ func printKeptRunStatus(stdout io.Writer, run keptRun) {
 		fmt.Fprintf(stdout, "liveProofEligible: %t\n", run.Manifest.Runtime.LiveProofEligible)
 	}
 	fmt.Fprintf(stdout, "status: %s\n", run.Bundle.Status)
+	if run.Record.RetentionReason != "" {
+		fmt.Fprintf(stdout, "retentionReason: %s\n", run.Record.RetentionReason)
+	}
+	if run.RemoteStatus.BrokerStatus != "" {
+		fmt.Fprintf(stdout, "remoteState: %s\n", run.RemoteStatus.BrokerStatus)
+	}
+	if run.RemoteStatus.SessionID != "" {
+		fmt.Fprintf(stdout, "brokerSession: %s\n", run.RemoteStatus.SessionID)
+	}
+	if run.RemoteStatus.RemoteWorkspace != "" {
+		fmt.Fprintf(stdout, "remoteWorkspace: %s\n", run.RemoteStatus.RemoteWorkspace)
+	}
+	if run.RemoteStatus.Detail != "" {
+		fmt.Fprintf(stdout, "detail: %s\n", run.RemoteStatus.Detail)
+	}
 	fmt.Fprintf(stdout, "stateDir: %s\n", run.StateDir)
 }
 
@@ -109,16 +133,22 @@ func attachRun(repoDir string, runID string, stdout io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stdout, "run: %s\n", run.RunID)
-	fmt.Fprintln(stdout, "events:")
-	if err := copyRunStateTextFile(run.StateDir, "events.jsonl", stdout); err != nil {
+	if err := attachLocalRunFiles(run, stdout); err != nil {
 		return err
 	}
-	fmt.Fprintln(stdout, "logs:")
-	return copyRunStateTextFile(run.StateDir, filepath.Join("logs", "session.log"), stdout)
+	broker, err := retentionBrokerForRecord(run.Record)
+	if err != nil {
+		return err
+	}
+	capabilities := broker.RetentionCapabilities()
+	if err := requireRetentionCapability(broker, run.Manifest.Runtime.BrokerAdapter, "attach/log observation", capabilities.AttachLogObservation); err != nil {
+		return err
+	}
+	return broker.AttachRetainedRun(run.Record, stdout)
 }
 
 func stopRun(repoDir string, runID string) error {
-	manifest, _, found, err := readStopRunManifest(repoDir, runID)
+	manifest, stateDir, found, err := readStopRunManifest(repoDir, runID)
 	if err != nil {
 		return err
 	}
@@ -141,6 +171,30 @@ func stopRun(repoDir string, runID string) error {
 	}
 	if found && keptRun != runID {
 		return fmt.Errorf("Host Lock for %s belongs to kept run %s, not %s", manifest.Host, keptRun, runID)
+	}
+	record, err := readRunRetentionRecord(repoDir, stateDir, manifest)
+	if err != nil {
+		return err
+	}
+	if record.LegacyMissingRecord && manifest.Runtime.BrokerAdapter != "fake" {
+		if err := cleanupRunState(repoDir, runID); err != nil {
+			return err
+		}
+		if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	broker, err := retentionBrokerForRecord(record)
+	if err != nil {
+		return err
+	}
+	capabilities := broker.RetentionCapabilities()
+	if err := requireRetentionCapability(broker, manifest.Runtime.BrokerAdapter, "stop retained session", capabilities.StopRetainedSession); err != nil {
+		return err
+	}
+	if err := broker.StopRetainedRun(record); err != nil {
+		return err
 	}
 	if err := cleanupRunState(repoDir, runID); err != nil {
 		return err
@@ -243,6 +297,9 @@ func listKeptRuns(repoDir string) ([]keptRun, error) {
 		if err != nil {
 			return nil, err
 		}
+		if err := refreshKeptRunStatus(&run); err != nil {
+			return nil, err
+		}
 		runs = append(runs, run)
 	}
 	return runs, nil
@@ -276,7 +333,55 @@ func readKeptRunState(repoDir string, runID string) (keptRun, error) {
 	if err := ensureRunHasKeptLock(repoDir, manifest, runID); err != nil {
 		return keptRun{}, err
 	}
-	return keptRun{RunID: runID, StateDir: stateDir, Manifest: manifest}, nil
+	record, err := readRunRetentionRecord(repoDir, stateDir, manifest)
+	if err != nil {
+		return keptRun{}, err
+	}
+	return keptRun{RunID: runID, StateDir: stateDir, Manifest: manifest, Record: record}, nil
+}
+
+func readRunRetentionRecord(repoDir string, stateDir string, manifest runManifest) (runRetentionRecord, error) {
+	if err := ensureWorkspacePathHasNoSymlinkAncestor(stateDir, "run-record.json"); err != nil {
+		return runRetentionRecord{}, err
+	}
+	content, err := os.ReadFile(filepath.Join(stateDir, "run-record.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return fallbackRunRetentionRecord(repoDir, stateDir, manifest), nil
+	}
+	if err != nil {
+		return runRetentionRecord{}, err
+	}
+	var record runRetentionRecord
+	if err := json.Unmarshal(content, &record); err != nil {
+		return runRetentionRecord{}, fmt.Errorf("parse kept run record: %w", err)
+	}
+	return record, nil
+}
+
+func refreshKeptRunStatus(run *keptRun) error {
+	if run.Record.LegacyMissingRecord && run.Manifest.Runtime.BrokerAdapter != "fake" {
+		run.RemoteStatus = retainedRunStatus{
+			State:           "stale",
+			BrokerStatus:    "unknown",
+			RemoteWorkspace: run.Record.RemoteWorkspace,
+			Detail:          "missing Run Record; broker-backed status is unavailable for this legacy kept run",
+		}
+		return nil
+	}
+	broker, err := retentionBrokerForRecord(run.Record)
+	if err != nil {
+		return err
+	}
+	capabilities := broker.RetentionCapabilities()
+	if err := requireRetentionCapability(broker, run.Manifest.Runtime.BrokerAdapter, "status retained session", capabilities.StatusRetainedSession); err != nil {
+		return err
+	}
+	status, err := broker.StatusRetainedRun(run.Record)
+	if err != nil {
+		return err
+	}
+	run.RemoteStatus = status
+	return nil
 }
 
 func readKeptRunManifest(repoDir string, runID string) (runManifest, string, error) {

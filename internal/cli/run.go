@@ -42,6 +42,15 @@ type sessionBroker interface {
 	RunScenario(runContext, scenarioConfig) (ScenarioResult, error)
 }
 
+type runRetentionBroker interface {
+	RetentionCapabilities() brokerCapabilities
+	RetainRun(runContext, runManifest, string) (retainedSessionRecord, error)
+	StatusRetainedRun(runRetentionRecord) (retainedRunStatus, error)
+	AttachRetainedRun(runRetentionRecord, io.Writer) error
+	StopRetainedRun(runRetentionRecord) error
+	CleanupRun(runContext) error
+}
+
 type screenshotCapturer interface {
 	CaptureScreenshot(runContext, screenshotRequest) (visualEvidenceArtifact, error)
 }
@@ -999,6 +1008,54 @@ func (broker fakeSessionBroker) RunScenario(context runContext, scenario scenari
 		return ScenarioResult{}, err
 	}
 	return broker.Result, nil
+}
+
+func (fakeSessionBroker) RetentionCapabilities() brokerCapabilities {
+	return brokerCapabilities{
+		RetainOnFailure:          true,
+		StatusRetainedSession:    true,
+		AttachLogObservation:     true,
+		StopRetainedSession:      true,
+		CleanupRetainedWorkspace: true,
+	}
+}
+
+func (fakeSessionBroker) RetainRun(context runContext, manifest runManifest, reason string) (retainedSessionRecord, error) {
+	return retainedSessionRecord{
+		BrokerAdapter: "fake",
+		SessionID:     "fake-" + manifest.RunID,
+		Status:        "running",
+		Metadata: map[string]any{
+			"reason":          reason,
+			"remoteWorkspace": context.RunWorkspace.RemoteWorkspace(),
+		},
+	}, nil
+}
+
+func (fakeSessionBroker) StatusRetainedRun(record runRetentionRecord) (retainedRunStatus, error) {
+	return retainedRunStatus{
+		State:           "kept",
+		Detail:          "fake Session Broker retained this run",
+		BrokerStatus:    "running",
+		SessionID:       record.RemoteSession.SessionID,
+		RemoteWorkspace: record.RemoteWorkspace,
+	}, nil
+}
+
+func (fakeSessionBroker) AttachRetainedRun(record runRetentionRecord, stdout io.Writer) error {
+	fmt.Fprintf(stdout, "broker:\n")
+	fmt.Fprintf(stdout, "adapter: fake\n")
+	fmt.Fprintf(stdout, "session: %s\n", record.RemoteSession.SessionID)
+	fmt.Fprintf(stdout, "remoteWorkspace: %s\n", record.RemoteWorkspace)
+	return nil
+}
+
+func (fakeSessionBroker) StopRetainedRun(runRetentionRecord) error {
+	return nil
+}
+
+func (fakeSessionBroker) CleanupRun(runContext) error {
+	return nil
 }
 
 func (fakeSessionBroker) CaptureScreenshot(context runContext, request screenshotRequest) (visualEvidenceArtifact, error) {

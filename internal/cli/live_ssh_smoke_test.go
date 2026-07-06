@@ -53,6 +53,43 @@ func TestOptInRealSSHRunSmoke(t *testing.T) {
 		t.Fatalf("real SSH smoke run did not print Evidence Bundle path:\n%s", runStdout.String())
 	}
 	assertLiveSmokeEvidenceBundle(t, evidenceDir)
+
+	var keptStdout, keptStderr bytes.Buffer
+	keptCode := Run(options.runArgs("retention-failure", "--keep-on-failure"), &keptStdout, &keptStderr, dir, "test-version")
+	if keptCode != 1 {
+		t.Fatalf("real SSH retention run exit code = %d, want 1; stdout: %s stderr: %s", keptCode, keptStdout.String(), keptStderr.String())
+	}
+	runID := smokeOutputValue(keptStdout.String(), "run")
+	if runID == "" || !strings.Contains(keptStdout.String(), "stopPolicy: kept") {
+		t.Fatalf("real SSH retention run did not keep failed run:\nstdout: %s\nstderr: %s", keptStdout.String(), keptStderr.String())
+	}
+
+	var statusStdout, statusStderr bytes.Buffer
+	statusCode := Run([]string{"status", "--run", runID}, &statusStdout, &statusStderr, dir, "test-version")
+	if statusCode != 0 {
+		t.Fatalf("real SSH retention status exit code = %d, want 0; stdout: %s stderr: %s", statusCode, statusStdout.String(), statusStderr.String())
+	}
+	if !strings.Contains(statusStdout.String(), "state: kept") || !strings.Contains(statusStdout.String(), "brokerSession:") {
+		t.Fatalf("real SSH retention status missing kept broker session:\n%s", statusStdout.String())
+	}
+
+	var attachStdout, attachStderr bytes.Buffer
+	attachCode := Run([]string{"attach", runID}, &attachStdout, &attachStderr, dir, "test-version")
+	if attachCode != 0 {
+		t.Fatalf("real SSH retention attach exit code = %d, want 0; stdout: %s stderr: %s", attachCode, attachStdout.String(), attachStderr.String())
+	}
+	if !strings.Contains(attachStdout.String(), "brokerReport:") || !strings.Contains(attachStdout.String(), "intentional retention smoke failure") {
+		t.Fatalf("real SSH retention attach missing broker/local evidence:\n%s", attachStdout.String())
+	}
+
+	var stopStdout, stopStderr bytes.Buffer
+	stopCode := Run([]string{"stop", runID}, &stopStdout, &stopStderr, dir, "test-version")
+	if stopCode != 0 {
+		t.Fatalf("real SSH retention stop exit code = %d, want 0; stdout: %s stderr: %s", stopCode, stopStdout.String(), stopStderr.String())
+	}
+	if !strings.Contains(stopStdout.String(), "stopped: "+runID) {
+		t.Fatalf("real SSH retention stop missing run id:\n%s", stopStdout.String())
+	}
 }
 
 type realSSHSmokeOptions struct {
@@ -90,11 +127,12 @@ func (options realSSHSmokeOptions) doctorOptions() doctorOptions {
 	return doctorOptions{HostConfig: options.HostConfig, TargetProfile: options.TargetProfile, HostPin: options.Host}
 }
 
-func (options realSSHSmokeOptions) runArgs(scenario string) []string {
+func (options realSSHSmokeOptions) runArgs(scenario string, extra ...string) []string {
 	args := []string{"run", "--host-config", options.HostConfig, "--target-profile", options.TargetProfile}
 	if options.Host != "" {
 		args = append(args, "--host", options.Host)
 	}
+	args = append(args, extra...)
 	return append(args, scenario)
 }
 
@@ -120,6 +158,7 @@ func writeLiveRunConfigFixture(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "maya", "smoke.py"), "print('maya-stall live smoke')\n")
+	mustWriteFile(t, filepath.Join(dir, "maya", "retention_failure.py"), "raise RuntimeError('intentional retention smoke failure')\n")
 	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
 scenarios:
   smoke:
@@ -138,6 +177,21 @@ scenarios:
       - type: scenarioResultStatus
         status: passed
       - type: visualEvidence
+  retention-failure:
+    description: "Live Maya Host retention failure Scenario."
+    mayaVersion: "2025"
+    payload:
+      scripts:
+        - "maya/retention_failure.py"
+    expectedOutputs:
+      files: []
+      scenarioResult: "outputs/retention-result.json"
+    evidence:
+      screenshots:
+        enabled: false
+    validators:
+      - type: scenarioResultStatus
+        status: passed
 `)
 	return dir
 }

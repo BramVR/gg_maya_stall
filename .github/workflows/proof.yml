@@ -130,12 +130,12 @@ jobs:
 
       - name: Proof Script Tests
         run: |
-          node --test scripts/proof/*.test.mjs
+          node --test scripts/proof/*.test.mjs scripts/windows/*.test.mjs
           node scripts/proof/mark-gate.mjs \
             --manifest "$PROOF_MANIFEST" \
             --gate artifacts \
             --status passed \
-            --command "node --test scripts/proof/*.test.mjs"
+            --command "node --test scripts/proof/*.test.mjs scripts/windows/*.test.mjs"
 
       - name: Assert Non-Live Gate
         if: steps.guard.outputs.live_maya_required != 'true'

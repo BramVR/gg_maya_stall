@@ -101,7 +101,7 @@ test("check-only fixture reports planned host shape without mutation when pwsh i
   fs.mkdirSync(mcpSource);
   fs.writeFileSync(mayaExe, "");
 
-  const raw = execFileSync("pwsh", [
+  const probe = spawnSync("pwsh", [
     "-NoProfile",
     "-File",
     scriptPath,
@@ -130,7 +130,8 @@ test("check-only fixture reports planned host shape without mutation when pwsh i
     "maya-runner",
   ], { cwd: root, encoding: "utf8" });
 
-  const result = JSON.parse(raw);
+  assert.equal(probe.status, 0, probe.stderr);
+  const result = JSON.parse(probe.stdout);
   assert.equal(result.ready, true);
   assert.equal(result.checkOnly, true);
   assert.equal(fs.existsSync(workRoot), false);
@@ -158,7 +159,7 @@ test("check-only fixture keeps dependent plan visible when a manual prerequisite
   fs.mkdirSync(sessiondRepo);
   fs.writeFileSync(mayaExe, "");
 
-  const raw = execFileSync("pwsh", [
+  const probe = spawnSync("pwsh", [
     "-NoProfile",
     "-File",
     scriptPath,
@@ -187,7 +188,8 @@ test("check-only fixture keeps dependent plan visible when a manual prerequisite
     "maya-runner",
   ], { cwd: root, encoding: "utf8" });
 
-  const result = JSON.parse(raw);
+  assert.equal(probe.status, 1, probe.stderr);
+  const result = JSON.parse(probe.stdout);
   assert.equal(result.ready, false);
   const byKind = new Map(result.plan.map((step) => [step.kind, step]));
   assert.equal(byKind.get("GG_MayaMCP")?.status, "missing");

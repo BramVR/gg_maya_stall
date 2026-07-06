@@ -8,6 +8,71 @@ Maya Stall uses Crabbox as a reference for static SSH, leases, desktop evidence,
 
 ## Checklist
 
+### Prepare Script
+
+Maya Stall includes a host-admin prepare script for already-owned,
+already-licensed Windows Maya Hosts:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/windows/prepare-maya-host.ps1 `
+  -CheckOnly `
+  -MayaExe "C:\Program Files\Autodesk\Maya2025\bin\maya.exe" `
+  -SessiondRepo "C:\PROJECTS\GG\GG_MayaSessiond" `
+  -McpSource "C:\PROJECTS\GG\GG_MayaMCP"
+```
+
+Run it on the Windows Maya Host after OpenSSH, the Windows account,
+interactive desktop/login, Autodesk Maya licensing, and the Session Broker
+source checkouts are already present. `-CheckOnly` reports planned changes and
+readiness without mutating the host. Without `-CheckOnly`, the script creates
+or verifies:
+
+- `C:\maya-stall`
+- `C:\maya-stall\runs`
+- `C:\maya-stall\artifacts`
+- `C:\maya-stall\sessiond-ui`
+- `C:\maya-stall\sessiond-venv311`
+- `C:\maya-stall\start-sessiond-ui.cmd`
+- interactive scheduled task `MayaStallSessiondUI`
+
+The generated launcher starts `gg_maya_sessiond.cli start` with the configured
+Maya executable, `GG_MayaMCP` source, Session Broker state directory, Python
+virtual environment, and `--mcp-script-dirs C:\maya-stall\runs` so staged
+Scenario wrappers can run. Existing generated launchers are updated
+idempotently. Existing unmarked launchers are not overwritten unless the host
+admin passes `-Force`. Apply mode starts `MayaStallSessiondUI` after creating
+or updating it so the printed doctor command can run immediately on a logged-in
+interactive desktop. Pass `-NoStartTask` if an operator wants to update the host
+shape without starting the Session Broker.
+
+The script also prints a host-config YAML snippet and the matching
+`maya-stall doctor --host-config ... --target-profile ... --host ... --scenario smoke`
+command. Treat that output as an operator starting point: keep private
+hostnames, SSH key paths, Windows users, license details, and Evidence Store
+credentials in user or CI host config, not in `.maya-stall.yaml`.
+
+Example apply:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/windows/prepare-maya-host.ps1 `
+  -MayaExe "C:\Program Files\Autodesk\Maya2025\bin\maya.exe" `
+  -SessiondRepo "C:\PROJECTS\GG\GG_MayaSessiond" `
+  -McpSource "C:\PROJECTS\GG\GG_MayaMCP" `
+  -HostId "maya-win-01" `
+  -TargetProfile "ci" `
+  -SshHost "maya-win-01" `
+  -SshUser "maya-runner" `
+  -SftpTimeout "30m"
+```
+
+Doctor layer:
+
+- `work-root`: rerun the prepare script or repair permissions if the work root
+  layout is missing or unwritable.
+- `session-broker`: rerun the prepare script or repair the interactive desktop,
+  generated launcher, scheduled task, `gg_mayasessiond`, `GG_MayaMCP`, Maya
+  executable, or Python virtual environment.
+
 ### Target Profile And Host Pool
 
 - Keep Target Profiles, Host Pools, Host Credentials, private hostnames, SSH keys, Windows users, license details, and Evidence Store locations outside Repo Run Config.
@@ -242,7 +307,10 @@ Optional:
 
 - Installing OpenSSH Server.
 - Installing or licensing Autodesk Maya.
-- Creating Windows users, auto-logon, scheduled tasks, or service wrappers.
+- Creating Windows users, auto-logon, or service wrappers.
+- Creating scheduled tasks other than the prepare script's interactive
+  `MayaStallSessiondUI` task.
+- Storing host credentials, private hostnames, SSH identities, or license data.
 - Installing `gg_mayasessiond`.
 - Creating network shares or Evidence Store hosting.
 - Managing SSH keys, GitHub tokens, GitLab tokens, or Windows credentials.

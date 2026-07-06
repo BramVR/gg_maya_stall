@@ -31,6 +31,9 @@ descriptive; code is the source-backed check when behavior claims disagree.
 - Host Pool selection and Host Locks: `internal/cli/host_pool.go`
 - Real SSH and SFTP transport, PowerShell wrapping, upload/download behavior,
   and fixed SSH/SFTP command timeouts: `internal/cli/ssh_transport.go`
+- Windows Maya Host prepare script and fake/check-only fixture tests:
+  `scripts/windows/prepare-maya-host.ps1`,
+  `scripts/windows/prepare-maya-host.test.mjs`
 - `gg_mayasessiond` Session Broker adapter, `script.execute` wrapper behavior,
   interactive session checks, and `viewport.capture` evidence:
   `internal/cli/sessiond_broker.go`

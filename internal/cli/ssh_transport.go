@@ -15,6 +15,7 @@ import (
 )
 
 const sshCommandTimeout = 30 * time.Second
+const defaultSFTPBatchTimeout = 30 * time.Minute
 
 type realSSHHost struct {
 	host mayaHostConfig
@@ -30,6 +31,9 @@ func runHostForConfig(host mayaHostConfig) runHost {
 func realSSHLayer(host mayaHostConfig) doctorCheck {
 	if err := validateRealSSHConnection(host); err != nil {
 		return failedCheck("ssh", err.Error(), "Fix SSH connection details in host config. See docs/setup/windows-maya-host.md#openssh-reachability.")
+	}
+	if _, err := sftpBatchTimeout(host); err != nil {
+		return failedCheck("ssh", err.Error(), "Fix SSH transfer settings in host config. See docs/setup/windows-maya-host.md#openssh-reachability.")
 	}
 	if err := runSSHCommand(host, encodedPowerShellCommand(`Write-Output 'maya-stall-ssh-ok'`)); err != nil {
 		return failedCheck("ssh", "unreachable", "Fix SSH reachability for this Maya Host. See docs/setup/windows-maya-host.md#openssh-reachability.")
@@ -66,6 +70,9 @@ func validateRealSSHConfig(host mayaHostConfig) error {
 	}
 	if err := rejectSFTPBatchUnsafePath(host.WorkRoot); err != nil {
 		return fmt.Errorf("workRoot %w", err)
+	}
+	if _, err := sftpBatchTimeout(host); err != nil {
+		return err
 	}
 	return nil
 }
@@ -264,17 +271,52 @@ func runSFTPBatch(host mayaHostConfig, batch string) error {
 		"-o", "ServerAliveCountMax=2",
 	)
 	args = append(args, sshTarget(host))
-	ctx, cancel := context.WithTimeout(context.Background(), sshCommandTimeout)
-	defer cancel()
-	command := exec.CommandContext(ctx, binary, args...)
+	timeout, err := sftpBatchTimeout(host)
+	if err != nil {
+		return err
+	}
+	var ctx context.Context
+	var cancel context.CancelFunc
+	var command *exec.Cmd
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		command = exec.CommandContext(ctx, binary, args...)
+	} else {
+		command = exec.Command(binary, args...)
+	}
 	command.Stdin = strings.NewReader(batch)
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("sftp command timed out after %s", sshCommandTimeout)
+		detail := firstUsefulStderrLine(stderr.String())
+		if timeout > 0 && ctx.Err() == context.DeadlineExceeded {
+			if detail != "" {
+				return fmt.Errorf("sftp command timed out after %s: %s", timeout, detail)
+			}
+			return fmt.Errorf("sftp command timed out after %s", timeout)
+		}
+		if detail != "" {
+			return fmt.Errorf("sftp command failed: %w: %s", err, detail)
 		}
 		return fmt.Errorf("sftp command failed: %w", err)
 	}
 	return nil
+}
+
+func sftpBatchTimeout(host mayaHostConfig) (time.Duration, error) {
+	value := strings.TrimSpace(host.SSH.SFTPTimeout)
+	if value == "" {
+		return defaultSFTPBatchTimeout, nil
+	}
+	timeout, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("ssh.sftpTimeout %q must be a Go duration such as 30m or 0 to disable", value)
+	}
+	if timeout < 0 {
+		return 0, fmt.Errorf("ssh.sftpTimeout must not be negative")
+	}
+	return timeout, nil
 }
 
 type sftpBatch struct {
@@ -302,7 +344,11 @@ func (batch *sftpBatch) mkdir(path string) {
 
 func (batch *sftpBatch) mkdirAll(path string) {
 	current := ""
-	for _, part := range strings.Split(strings.Trim(strings.ReplaceAll(path, `\`, "/"), "/"), "/") {
+	normalized := sftpRemotePath(path)
+	if strings.HasPrefix(normalized, "/") {
+		current = "/"
+	}
+	for _, part := range strings.Split(strings.Trim(normalized, "/"), "/") {
 		if part == "" {
 			continue
 		}
@@ -311,6 +357,8 @@ func (batch *sftpBatch) mkdirAll(path string) {
 			if strings.HasSuffix(current, ":") {
 				continue
 			}
+		} else if current == "/" {
+			current += part
 		} else {
 			current += "/" + part
 		}

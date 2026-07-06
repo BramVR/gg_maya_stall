@@ -2331,6 +2331,28 @@ func TestSFTPBatchUsesWindowsAbsoluteDrivePaths(t *testing.T) {
 	}
 }
 
+func TestSFTPBatchTimeoutConfig(t *testing.T) {
+	timeout, err := sftpBatchTimeout(mayaHostConfig{})
+	if err != nil {
+		t.Fatalf("default sftp timeout: %v", err)
+	}
+	if timeout != defaultSFTPBatchTimeout {
+		t.Fatalf("default sftp timeout = %s, want %s", timeout, defaultSFTPBatchTimeout)
+	}
+
+	timeout, err = sftpBatchTimeout(mayaHostConfig{SSH: sshConfig{SFTPTimeout: "0"}})
+	if err != nil {
+		t.Fatalf("disabled sftp timeout: %v", err)
+	}
+	if timeout != 0 {
+		t.Fatalf("disabled sftp timeout = %s, want 0", timeout)
+	}
+
+	if _, err := sftpBatchTimeout(mayaHostConfig{SSH: sshConfig{SFTPTimeout: "-1s"}}); err == nil {
+		t.Fatal("negative sftp timeout succeeded")
+	}
+}
+
 func TestRunScenarioGGMayaSessiondBrokerExecutesRemoteScenarioAndCapturesScreenshot(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	configPath := filepath.Join(dir, ".maya-stall.yaml")

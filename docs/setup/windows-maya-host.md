@@ -44,6 +44,7 @@ hostPools:
           user: maya-runner
           port: 22
           identityFile: ~/.ssh/maya-stall-ci
+          sftpTimeout: 30m
         workRoot: C:/maya-stall
         broker: ok
         mayaVersions: ["2025"]
@@ -54,6 +55,7 @@ Doctor layer:
 
 - `fake-ssh`: fake/local SSH reachability status would fail for deterministic default tests.
 - `ssh`: real SSH reachability failed for a `transport: ssh` Maya Host. Repair host networking, SSH service state, keys, or host config before retrying.
+- `ssh.sftpTimeout` defaults to `30m`; set `0` only when job-level timeouts and SSH keepalives are the desired transfer bound.
 
 ### Work Root
 

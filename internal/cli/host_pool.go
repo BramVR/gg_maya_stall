@@ -133,6 +133,7 @@ type sshConfig struct {
 	IdentityFile string `yaml:"identityFile"`
 	Binary       string `yaml:"binary"`
 	SFTPBinary   string `yaml:"sftpBinary"`
+	SFTPTimeout  string `yaml:"sftpTimeout"`
 }
 
 func (config *sshConfig) UnmarshalYAML(value *yaml.Node) error {

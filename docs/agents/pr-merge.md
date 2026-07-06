@@ -66,10 +66,41 @@ Optional environment or repository variables:
 
 - `MAYA_STALL_LIVE_TARGET_PROFILE`
 - `MAYA_STALL_LIVE_HOST`
+- `MAYA_STALL_LIVE_PROOF_RETENTION_DAYS`, default `3`, max `14`
+- `MAYA_STALL_LIVE_PROOF_PUBLIC_HOST_ALIAS`, default `maya-live-proof-host`
 
 Do not commit hostnames, SSH identities, credentials, generated live evidence,
 or local machine paths. Public proof should report command classes, pass/fail
 status, manifest status, and redacted live-config state only.
+
+## Live Visual Evidence Artifact
+
+When the live gate passes, the workflow uploads a GitHub Actions artifact named
+`live-visual-evidence-proof`. Reviewers can open the exact workflow run, choose
+`Artifacts`, download `live-visual-evidence-proof`, and inspect:
+
+- `proof-artifact-manifest.json`
+- `evidence-metadata.json`
+- `media-review.json`
+- `screenshots/desktop-screenshot.png`
+- `recordings/desktop-recording.mp4`
+
+The proof artifact is generated only after the local Evidence Bundle exists and
+only when the live workflow sets
+`MAYA_STALL_LIVE_PROOF_ARTIFACT_ENABLED=true`. The manifest lists relative
+paths, media types, byte sizes, SHA256 hashes, run id, Scenario, Target Profile,
+the public-safe selected host alias, and retention days. The public artifact
+confidentiality gate rejects proof text containing private host aliases, user
+paths, SSH material, token-like fields, license variables, or symlinks before
+upload. The gate also requires `media-review.json` to acknowledge that the
+desktop PNG/MP4 came from a controlled public-proof desktop before those binary
+files are uploaded.
+
+S3/R2 publishing is deferred. A future backend should use a separate
+`evidence store` config block with bucket endpoint, short lifecycle retention,
+scoped write credentials from CI/user secrets only, and signed or otherwise
+review-scoped reads. It must remain opt-in and must reuse the same sanitized
+proof-artifact manifest and confidentiality gate before upload.
 
 For live-required fork PRs, automation withholds live host credentials and fails
 closed. A maintainer must review and promote the change to a trusted

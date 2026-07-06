@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 const root = path.resolve(new URL("../..", import.meta.url).pathname);
 const selectScript = path.join(root, "scripts", "proof", "select-proof.mjs");
 const assertScript = path.join(root, "scripts", "proof", "assert-live-proof.mjs");
+const confidentialityScript = path.join(root, "scripts", "proof", "assert-public-artifact-confidentiality.mjs");
 
 test("selector requires live Maya proof for live product behavior paths", () => {
   const dir = tempDir();
@@ -166,6 +167,77 @@ test("assert-live-proof accepts non-live changes without host config", () => {
 
   const manifest = readJSON(manifestPath);
   assert.equal(manifest.gates.live_maya.status, "not_required");
+});
+
+test("public artifact confidentiality gate accepts sanitized proof text", () => {
+  const dir = tempDir();
+  fs.mkdirSync(path.join(dir, "screenshots"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "screenshots", "desktop-screenshot.png"), "png");
+  fs.writeFileSync(path.join(dir, "media-review.json"), JSON.stringify({
+    reviewed: true,
+    paths: ["screenshots/desktop-screenshot.png"],
+  }));
+  fs.writeFileSync(path.join(dir, "proof-artifact-manifest.json"), JSON.stringify({
+    selectedHostAlias: "maya-live-proof-host",
+    artifacts: [
+      { path: "screenshots/desktop-screenshot.png", mediaType: "image/png", bytes: 12, sha256: "a".repeat(64) },
+    ],
+  }));
+
+  execFileSync("node", [
+    confidentialityScript,
+    "--path",
+    dir,
+  ], { cwd: root });
+});
+
+test("public artifact confidentiality gate rejects private proof text", () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, "proof-artifact-manifest.json"), JSON.stringify({
+    host: "desktop-private",
+    token: "abc",
+  }));
+
+  assert.throws(() => {
+    execFileSync("node", [
+      confidentialityScript,
+      "--path",
+      dir,
+    ], { cwd: root, stdio: "pipe" });
+  }, /confidentiality gate failed/);
+});
+
+test("public artifact confidentiality gate rejects unreviewed media files", () => {
+  const dir = tempDir();
+  fs.mkdirSync(path.join(dir, "recordings"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "recordings", "desktop-recording.mp4"), "mp4");
+  fs.writeFileSync(path.join(dir, "proof-artifact-manifest.json"), JSON.stringify({
+    selectedHostAlias: "maya-live-proof-host",
+  }));
+
+  assert.throws(() => {
+    execFileSync("node", [
+      confidentialityScript,
+      "--path",
+      dir,
+    ], { cwd: root, stdio: "pipe" });
+  }, /confidentiality gate failed/);
+});
+
+test("public artifact confidentiality gate rejects quoted JSON secret keys", () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, "proof-artifact-manifest.json"), JSON.stringify({
+    selectedHostAlias: "maya-live-proof-host",
+    token: "abc",
+  }));
+
+  assert.throws(() => {
+    execFileSync("node", [
+      confidentialityScript,
+      "--path",
+      dir,
+    ], { cwd: root, stdio: "pipe" });
+  }, /confidentiality gate failed/);
 });
 
 function tempDir() {

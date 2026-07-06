@@ -28,13 +28,14 @@ func TestOptInRealVisualEvidenceSmoke(t *testing.T) {
 	evidenceDir := captureLiveDesktopVisualEvidenceProof(t, dir, options)
 	bundle := assertLiveVisualEvidenceProofBundle(t, evidenceDir)
 	screenshot, recording := requireLiveDesktopVisualArtifacts(t, evidenceDir, bundle)
-	t.Logf("Live Visual Evidence proof: evidence=%s screenshot=%s bytes=%d recording=%s bytes=%d",
-		evidenceDir,
-		filepath.Join(evidenceDir, filepath.FromSlash(screenshot.Path)),
+	t.Logf("Live Visual Evidence proof: run=%s screenshot=%s bytes=%d recording=%s bytes=%d",
+		bundle.RunID,
+		screenshot.Path,
 		artifactSize(t, evidenceDir, screenshot),
-		filepath.Join(evidenceDir, filepath.FromSlash(recording.Path)),
+		recording.Path,
 		artifactSize(t, evidenceDir, recording),
 	)
+	publishOptionalLiveVisualEvidenceProofArtifact(t, evidenceDir)
 }
 
 func TestLiveVisualEvidenceProofRejectsInvalidProofShapes(t *testing.T) {
@@ -147,6 +148,13 @@ func TestLiveVisualEvidenceProofWorkflowRequiresSmokePass(t *testing.T) {
 		"TestOptInRealVisualEvidenceSmoke",
 		"run TestOptInRealVisualEvidenceSmoke -count=1",
 		"run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke' -count=1",
+		"MAYA_STALL_LIVE_PROOF_ARTIFACT_ENABLED",
+		"MAYA_STALL_LIVE_PROOF_MEDIA_REVIEWED",
+		"live-visual-evidence-proof",
+		"assert-public-artifact-confidentiality.mjs",
+		"failed_missing_visual_evidence_proof_artifact",
+		"failed_visual_evidence_proof_confidentiality",
+		"failed_visual_evidence_proof_upload",
 		"failed_missing_host_config",
 	} {
 		if !strings.Contains(text, want) {
@@ -305,6 +313,23 @@ func captureLiveDesktopVisualEvidenceProof(t *testing.T, repoDir string, options
 	return context.EvidenceDir
 }
 
+func publishOptionalLiveVisualEvidenceProofArtifact(t *testing.T, evidenceDir string) {
+	t.Helper()
+	options, err := liveVisualEvidenceProofArtifactOptionsFromEnv(os.LookupEnv)
+	if err != nil {
+		t.Fatalf("parse live Visual Evidence proof artifact config: %v", err)
+	}
+	if !options.Enabled {
+		t.Logf("Live Visual Evidence proof artifact upload disabled; set %s=true to publish a sanitized CI artifact", liveProofArtifactEnabledEnv)
+		return
+	}
+	published, err := publishLiveVisualEvidenceProofArtifact(evidenceDir, options)
+	if err != nil {
+		t.Fatalf("publish live Visual Evidence proof artifact: %v", err)
+	}
+	t.Logf("Live Visual Evidence proof artifact: live-visual-evidence-proof path=%s retentionDays=%d", filepath.Base(published), options.RetentionDays)
+}
+
 func mayaTasklistSessions(host mayaHostConfig) ([]windowsProcessSession, error) {
 	script := `$ErrorActionPreference = 'Stop'
 $rows = @(tasklist.exe /v /fi "imagename eq maya.exe" /fo csv | ConvertFrom-Csv | Where-Object { $_.'Image Name' -ieq 'maya.exe' } | ForEach-Object {
@@ -431,13 +456,6 @@ func validateLiveVisualEvidenceProofBundle(evidenceDir string, processes []windo
 	return bundle, nil
 }
 
-func requireLiveRuntime(runtime runtimeMetadata) error {
-	if runtime.Profile != "ssh-sessiond" || runtime.HostAdapter != "ssh" || runtime.BrokerAdapter != "gg-mayasessiond" || !runtime.LiveProofEligible {
-		return fmt.Errorf("Visual Evidence proof runtime = %+v, want live-proof-eligible ssh-sessiond", runtime)
-	}
-	return nil
-}
-
 func requireConsoleMayaProcess(processes []windowsProcessSession) error {
 	if len(processes) == 0 {
 		return fmt.Errorf("maya.exe is not running in the interactive Console session")
@@ -462,23 +480,6 @@ func requireLiveDesktopVisualArtifacts(t *testing.T, evidenceDir string, bundle 
 		}
 	}
 	return screenshot, recording
-}
-
-func liveDesktopVisualArtifacts(bundle evidenceBundle) (visualEvidenceArtifact, visualEvidenceArtifact, error) {
-	var screenshot visualEvidenceArtifact
-	var recording visualEvidenceArtifact
-	for _, artifact := range bundle.VisualEvidence {
-		switch {
-		case artifact.Kind == "screenshot" && artifact.MediaType == "image/png" && artifact.Path == "screenshots/desktop-screenshot.png":
-			screenshot = artifact
-		case artifact.Kind == "recording" && artifact.MediaType == "video/mp4" && artifact.Path == "recordings/desktop-recording.mp4":
-			recording = artifact
-		}
-	}
-	if screenshot.Path == "" || recording.Path == "" {
-		return visualEvidenceArtifact{}, visualEvidenceArtifact{}, fmt.Errorf("live Visual Evidence proof requires desktop screenshot and desktop recording artifacts, got %+v", bundle.VisualEvidence)
-	}
-	return screenshot, recording, nil
 }
 
 func looksLikeMP4Bytes(content []byte) bool {

@@ -181,6 +181,9 @@ jobs:
 
       - name: Setup Python
         uses: actions/setup-python@v5
+        env:
+          AGENT_TOOLSDIRECTORY: ${{ runner.temp }}/_tool
+          RUNNER_TOOL_CACHE: ${{ runner.temp }}/_tool
         with:
           python-version: "3.12"
 

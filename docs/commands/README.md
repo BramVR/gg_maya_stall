@@ -12,6 +12,7 @@ same order as the CLI help.
 - [doctor](doctor.md)
 - [run](run.md)
 - [screenshot](screenshot.md)
+- [record](record.md)
 - [evidence](evidence.md)
 - [review-comment](review-comment.md)
 - [status](status.md)

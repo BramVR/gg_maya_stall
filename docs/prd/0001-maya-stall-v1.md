@@ -68,7 +68,7 @@ Maya Stall uses Crabbox as a reference and may selectively vendor MIT-licensed C
 
 - Define a Session Broker interface and implement `gg_mayasessiond` as the only v1 broker.
 
-- Capture Visual Evidence through the Session Broker. The broker may use Crabbox-style Windows helpers such as interactive scheduled tasks internally. Recording is deferred for v1 until the Session Broker exposes real recording capture.
+- Capture Visual Evidence through the Session Broker. The broker may use Crabbox-style Windows helpers such as interactive scheduled tasks internally. Recordings use desktop frame capture with local MP4 encoding.
 
 - Use typed Run Payloads, not generic folder-plus-command execution.
 

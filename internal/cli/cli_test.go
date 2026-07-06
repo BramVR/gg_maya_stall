@@ -220,26 +220,45 @@ func TestScreenshotCapturesVisualEvidenceArtifact(t *testing.T) {
 	if got.Kind != "screenshot" || got.Path != filepath.ToSlash(filepath.Join("screenshots", "screenshot.png")) {
 		t.Fatalf("visual evidence metadata = %+v", got)
 	}
+	if got.TargetProfile != "default" || got.Host != defaultFakeHostID {
+		t.Fatalf("visual evidence target metadata = %+v", got)
+	}
 }
 
-func TestRecordReportsRecordingDeferredForV1(t *testing.T) {
+func TestRecordCapturesVisualEvidenceArtifactWithCrabboxDefaults(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	var stdout, stderr bytes.Buffer
 
 	code := Run([]string{"record"}, &stdout, &stderr, dir, "test-version")
-	if code != 1 {
-		t.Fatalf("record exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	if code != 0 {
+		t.Fatalf("record exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "recording Visual Evidence is deferred for v1") {
-		t.Fatalf("record error missing deferred recording detail: %s", stderr.String())
+	if !strings.Contains(stdout.String(), "artifact: recordings/recording.mp4") {
+		t.Fatalf("record output missing artifact path:\n%s", stdout.String())
 	}
-	if entries, err := os.ReadDir(filepath.Join(dir, "artifacts", "maya-stall")); err == nil && len(entries) > 0 {
-		t.Fatalf("deferred record left Evidence Bundle dirs: %v", entries)
+
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	if _, err := os.Stat(filepath.Join(evidence, "recordings", "recording.mp4")); err != nil {
+		t.Fatalf("expected recording artifact: %v", err)
+	}
+	bundle := readEvidenceBundle(t, evidence)
+	if len(bundle.VisualEvidence) != 1 {
+		t.Fatalf("visual evidence count = %d, want 1", len(bundle.VisualEvidence))
+	}
+	got := bundle.VisualEvidence[0]
+	if got.Kind != "recording" || got.Path != filepath.ToSlash(filepath.Join("recordings", "recording.mp4")) {
+		t.Fatalf("visual evidence metadata = %+v", got)
+	}
+	if got.MediaType != "video/mp4" || got.DurationSeconds != defaultRecordingDuration.Seconds() || got.FPS != defaultRecordingFPS {
+		t.Fatalf("recording timing metadata = %+v", got)
+	}
+	if got.TargetProfile != "default" || got.Host != defaultFakeHostID {
+		t.Fatalf("visual evidence target metadata = %+v", got)
 	}
 }
 
 func TestStandaloneVisualEvidenceCommandsReturnUsageCodeForUnknownTargetProfile(t *testing.T) {
-	for _, command := range []string{"screenshot"} {
+	for _, command := range []string{"screenshot", "record"} {
 		t.Run(command, func(t *testing.T) {
 			dir := writeRunConfigFixture(t)
 			var stdout, stderr bytes.Buffer
@@ -273,6 +292,8 @@ scenarios:
     evidence:
       screenshots:
         enabled: true
+      recording:
+        enabled: true
     validators:
       - type: visualEvidence
         required: true
@@ -295,6 +316,7 @@ scenarios:
 		filepath.Join(evidence, "logs", "session.log"),
 		filepath.Join(evidence, "scenario-result.json"),
 		filepath.Join(evidence, "screenshots", "smoke.png"),
+		filepath.Join(evidence, "recordings", "smoke.mp4"),
 	} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected evidence collect file %s: %v", path, err)
@@ -304,8 +326,21 @@ scenarios:
 	if bundle.Status != resultStatusPassed {
 		t.Fatalf("evidence status = %q, want passed", bundle.Status)
 	}
-	if len(bundle.VisualEvidence) != 1 || bundle.VisualEvidence[0].Kind != "screenshot" {
+	if len(bundle.VisualEvidence) != 2 {
 		t.Fatalf("visual evidence metadata = %+v", bundle.VisualEvidence)
+	}
+	foundScreenshot := false
+	foundRecording := false
+	for _, artifact := range bundle.VisualEvidence {
+		switch artifact.Kind {
+		case "screenshot":
+			foundScreenshot = artifact.Path == "screenshots/smoke.png" && artifact.TargetProfile == "default" && artifact.Host == defaultFakeHostID
+		case "recording":
+			foundRecording = artifact.Path == "recordings/smoke.mp4" && artifact.MediaType == "video/mp4" && artifact.DurationSeconds == defaultRecordingDuration.Seconds() && artifact.FPS == defaultRecordingFPS
+		}
+	}
+	if !foundScreenshot || !foundRecording {
+		t.Fatalf("visual evidence metadata missing screenshot/recording: %+v", bundle.VisualEvidence)
 	}
 	if len(bundle.Validators) != 1 || bundle.Validators[0].Type != "visualEvidence" || bundle.Validators[0].Status != resultStatusPassed {
 		t.Fatalf("validator metadata = %+v", bundle.Validators)
@@ -348,33 +383,7 @@ scenarios:
 	}
 }
 
-func TestEvidenceCollectRejectsRecordingEvidenceForV1(t *testing.T) {
-	dir := t.TempDir()
-	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
-scenarios:
-  smoke:
-    payload: {}
-    expectedOutputs:
-      scenarioResult: "outputs/result.json"
-    evidence:
-      recording:
-        enabled: true
-`)
-	var stdout, stderr bytes.Buffer
-
-	code := Run([]string{"evidence", "collect", "smoke"}, &stdout, &stderr, dir, "test-version")
-	if code != 1 {
-		t.Fatalf("evidence collect exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "recording Visual Evidence is deferred for v1") {
-		t.Fatalf("recording evidence error missing deferred detail: %s", stderr.String())
-	}
-	if entries, err := os.ReadDir(filepath.Join(dir, "artifacts", "maya-stall")); err == nil && len(entries) > 0 {
-		t.Fatalf("deferred recording evidence left Evidence Bundle dirs: %v", entries)
-	}
-}
-
-func TestDoctorRejectsRecordingEvidenceForV1OnDefaultHost(t *testing.T) {
+func TestDoctorAcceptsRecordingEvidenceOnDefaultHost(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
 scenarios:
@@ -389,11 +398,11 @@ scenarios:
 	var stdout, stderr bytes.Buffer
 
 	code := Run([]string{"doctor", "--scenario", "smoke"}, &stdout, &stderr, dir, "test-version")
-	if code != 1 {
-		t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	if code != 0 {
+		t.Fatalf("doctor exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "visual-evidence: fail - recording Visual Evidence is deferred for v1") {
-		t.Fatalf("doctor did not reject default-host recording scenario:\n%s", stdout.String())
+	if !strings.Contains(stdout.String(), "visual-evidence: ok") {
+		t.Fatalf("doctor did not accept default-host recording scenario:\n%s", stdout.String())
 	}
 }
 
@@ -1545,7 +1554,7 @@ hostPools:
 	}
 }
 
-func TestDoctorGGMayaSessiondRejectsRecordingScenario(t *testing.T) {
+func TestDoctorGGMayaSessiondAcceptsRecordingScenario(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	configPath := filepath.Join(dir, ".maya-stall.yaml")
 	contentBytes, err := os.ReadFile(configPath)
@@ -1563,7 +1572,8 @@ func TestDoctorGGMayaSessiondRejectsRecordingScenario(t *testing.T) {
 		`{"derived_status":"running","state":{"status":"running","call_server_ready":true,"maya_alive":true,"mcp_alive":true}}`,
 		`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
 		`{"ok":true,"tool":"script.execute"}`,
-		``,
+		`removed`,
+		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}],"output":{"mime_type":"image/jpeg"}}`,
 	})
 	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -1590,11 +1600,11 @@ hostPools:
 	var stdout, stderr bytes.Buffer
 
 	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha", "--scenario", "smoke"}, &stdout, &stderr, dir, "test-version")
-	if code != 1 {
-		t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	if code != 0 {
+		t.Fatalf("doctor exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "visual-evidence: fail - recording Visual Evidence is deferred for v1") {
-		t.Fatalf("doctor did not reject recording scenario:\n%s", stdout.String())
+	if !strings.Contains(stdout.String(), "visual-evidence: ok") {
+		t.Fatalf("doctor did not accept recording scenario:\n%s", stdout.String())
 	}
 }
 
@@ -2369,7 +2379,8 @@ func TestRunScenarioGGMayaSessiondBrokerExecutesRemoteScenarioAndCapturesScreens
 	sshLog := filepath.Join(dir, "ssh.log")
 	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
 		`{"ok":true,"tool":"script.execute"}`,
-		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}],"output":{"mime_type":"image/jpeg"}}`,
+		`png proof`,
+		``,
 		sessiondStatusFixture("session-alpha"),
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -2414,17 +2425,17 @@ hostPools:
 		}
 	}
 	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
-	screenshotPath := filepath.Join(evidence, "screenshots", "smoke.jpg")
+	screenshotPath := filepath.Join(evidence, "screenshots", "smoke.png")
 	screenshotBytes, err := os.ReadFile(screenshotPath)
 	if err != nil {
 		t.Fatalf("read sessiond screenshot: %v", err)
 	}
-	if string(screenshotBytes) != "jpeg proof" {
-		t.Fatalf("sessiond screenshot bytes = %q, want jpeg proof", string(screenshotBytes))
+	if !strings.Contains(string(screenshotBytes), "png proof") {
+		t.Fatalf("sessiond screenshot bytes = %q, want png proof", string(screenshotBytes))
 	}
 	bundle := readEvidenceBundle(t, evidence)
-	if len(bundle.VisualEvidence) != 1 || bundle.VisualEvidence[0].MediaType != "image/jpeg" {
-		t.Fatalf("sessiond screenshot metadata = %+v, want image/jpeg", bundle.VisualEvidence)
+	if len(bundle.VisualEvidence) != 1 || bundle.VisualEvidence[0].MediaType != "image/png" {
+		t.Fatalf("sessiond screenshot metadata = %+v, want image/png", bundle.VisualEvidence)
 	}
 	sftpBytes, err := os.ReadFile(sftpLog)
 	if err != nil {
@@ -3290,50 +3301,6 @@ hostPools:
 	}
 	if strings.Contains(string(resultBytes), "fake") || !strings.Contains(string(resultBytes), "gg_mayasessiond") {
 		t.Fatalf("standalone result mislabeled broker:\n%s", string(resultBytes))
-	}
-}
-
-func TestRunScenarioGGMayaSessiondRejectsRecordingBeforeRemoteRun(t *testing.T) {
-	dir := writeRunConfigFixture(t)
-	configPath := filepath.Join(dir, ".maya-stall.yaml")
-	contentBytes, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("read config fixture: %v", err)
-	}
-	content := strings.Replace(string(contentBytes), "screenshots:\n        enabled: false", "screenshots:\n        enabled: false\n      recording:\n        enabled: true", 1)
-	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
-		t.Fatalf("write config fixture: %v", err)
-	}
-	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
-	mustWriteFile(t, hostConfigPath, `version: 1
-targetProfiles:
-  ci:
-    hostPool: windows-maya
-hostPools:
-  windows-maya:
-    hosts:
-      - id: alpha
-        transport: ssh
-        ssh:
-          host: maya-win-01
-        workRoot: C:/maya-stall
-        broker:
-          type: gg-mayasessiond
-          stateDir: C:/maya-stall/sessiond-ui
-          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
-          repo: C:/maya-stall/tools/GG_MayaSessiond
-`)
-	var stdout, stderr bytes.Buffer
-
-	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
-	if code != 1 {
-		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "recording Visual Evidence is deferred for v1") {
-		t.Fatalf("run error did not fail fast on recording: %s", stderr.String())
-	}
-	if _, err := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")); !os.IsNotExist(err) {
-		t.Fatalf("host lock was not released after recording fail-fast, stat err = %v", err)
 	}
 }
 

@@ -143,6 +143,8 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 		return runOutcome{}, visualEvidenceArtifact{}, fmt.Errorf("Visual Evidence plan produced %d artifacts, want 1", len(artifacts))
 	}
 	artifact = artifacts[0]
+	artifact.TargetProfile = host.TargetProfile
+	artifact.Host = host.HostID
 	result := ScenarioResult{Status: resultStatusPassed, Summary: brokerName + " Visual Evidence captured"}
 	if err := writeJSONFile(filepath.Join(context.EvidenceDir, evidenceScenarioResultFileName), result); err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
@@ -183,7 +185,7 @@ func planStandaloneVisualEvidence(kind string) ([]visualEvidenceCapturePlan, err
 	case "screenshot":
 		return []visualEvidenceCapturePlan{{Kind: "screenshot", Name: evidenceDefaultScreenshotName}}, nil
 	case "recording":
-		return nil, recordingDeferredError()
+		return []visualEvidenceCapturePlan{{Kind: "recording", Name: evidenceDefaultRecordingName, Duration: defaultRecordingDuration, FPS: defaultRecordingFPS}}, nil
 	default:
 		return nil, fmt.Errorf("unknown Visual Evidence kind %q", kind)
 	}
@@ -195,7 +197,7 @@ func planScenarioVisualEvidence(scenarioName string, config evidenceConfig) ([]v
 		plan = append(plan, visualEvidenceCapturePlan{Kind: "screenshot", Name: visualEvidenceFileName(scenarioName, ".png")})
 	}
 	if config.Recording.Enabled {
-		return nil, recordingDeferredError()
+		plan = append(plan, visualEvidenceCapturePlan{Kind: "recording", Name: visualEvidenceFileName(scenarioName, ".mp4"), Duration: defaultRecordingDuration, FPS: defaultRecordingFPS})
 	}
 	return plan, nil
 }
@@ -223,6 +225,8 @@ func capturePlannedVisualEvidence(broker sessionBroker, context runContext, plan
 			if err != nil {
 				return nil, err
 			}
+			artifact.DurationSeconds = capture.Duration.Seconds()
+			artifact.FPS = capture.FPS
 			artifacts = append(artifacts, artifact)
 		default:
 			return nil, fmt.Errorf("unknown Visual Evidence kind %q", capture.Kind)
@@ -261,6 +265,13 @@ func registerVisualEvidenceBytes(context runContext, kind string, name string, m
 	return visualEvidenceArtifact{Kind: kind, Path: filepath.ToSlash(relative), MediaType: mediaType}, nil
 }
 
+func annotateVisualEvidenceTarget(artifacts []visualEvidenceArtifact, targetProfile string, host string) {
+	for index := range artifacts {
+		artifacts[index].TargetProfile = targetProfile
+		artifacts[index].Host = host
+	}
+}
+
 func visualEvidenceFileName(name string, extension string) string {
 	var builder strings.Builder
 	for _, r := range name {
@@ -282,4 +293,18 @@ func visualEvidenceFileName(name string, extension string) string {
 		clean = "scenario"
 	}
 	return clean + extension
+}
+
+func forceVisualEvidenceExtension(name string, extension string) string {
+	base := strings.TrimSuffix(filepath.Base(filepath.ToSlash(name)), filepath.Ext(name))
+	base = strings.Trim(base, ".-")
+	if base == "" || base == ".." {
+		switch extension {
+		case ".mp4":
+			return evidenceDefaultRecordingName
+		default:
+			return evidenceDefaultScreenshotName
+		}
+	}
+	return base + extension
 }

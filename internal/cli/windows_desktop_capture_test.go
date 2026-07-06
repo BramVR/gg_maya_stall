@@ -1,0 +1,129 @@
+package cli
+
+import (
+	"archive/zip"
+	"bytes"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestWindowsDesktopCaptureUsesInteractiveScheduledTasksAndCleansUp(t *testing.T) {
+	transport := &fakeWindowsDesktopTransport{
+		outputs: [][]byte{
+			pngHeaderBytes(),
+			nil,
+			zipFrameArchive(t),
+		},
+	}
+	ffmpeg := writeFakeFFmpeg(t, t.TempDir())
+
+	screenshot, err := captureWindowsDesktopScreenshot(transport, "C:/maya-stall/artifacts/proof")
+	if err != nil {
+		t.Fatalf("captureWindowsDesktopScreenshot returned error: %v", err)
+	}
+	if !bytes.Equal(screenshot, pngHeaderBytes()) {
+		t.Fatalf("screenshot bytes = %v, want PNG header", screenshot)
+	}
+
+	recording, err := captureWindowsDesktopRecording(transport, "C:/maya-stall/artifacts/proof", 2*time.Second, 2, ffmpeg)
+	if err != nil {
+		t.Fatalf("captureWindowsDesktopRecording returned error: %v", err)
+	}
+	if !looksLikeMP4Bytes(recording) {
+		t.Fatalf("recording bytes do not look like MP4: %v", recording)
+	}
+
+	combined := strings.Join(append(transport.scripts, transport.writes...), "\n")
+	for _, want := range []string{
+		"System.Windows.Forms",
+		"System.Drawing",
+		"schtasks.exe",
+		"/IT",
+		"Compress-Archive",
+		"Remove-Item -Recurse -Force",
+		"interactive desktop session is logged in",
+		"Windows PowerShell desktop assemblies",
+	} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("desktop capture commands missing %q:\n%s", want, combined)
+		}
+	}
+	if strings.Contains(combined, "viewport.capture") {
+		t.Fatalf("desktop capture must not use viewport.capture:\n%s", combined)
+	}
+}
+
+func TestWindowsDesktopRecordingFailsClearlyWithoutLocalFFmpeg(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	transport := &fakeWindowsDesktopTransport{}
+	_, err := captureWindowsDesktopRecording(transport, "C:/maya-stall/artifacts/proof", time.Second, 1, "")
+	if err == nil || !strings.Contains(err.Error(), "local ffmpeg is required") {
+		t.Fatalf("recording error = %v, want local ffmpeg requirement", err)
+	}
+}
+
+func TestWindowsDesktopCapturePreservesPowerShellPrerequisiteErrors(t *testing.T) {
+	transport := &fakeWindowsDesktopTransport{err: errors.New("schtasks.exe is required for interactive desktop capture")}
+	_, err := captureWindowsDesktopScreenshot(transport, "C:/maya-stall/artifacts/proof")
+	if err == nil || !strings.Contains(err.Error(), "schtasks.exe is required") {
+		t.Fatalf("screenshot error = %v, want schtasks prerequisite detail", err)
+	}
+}
+
+type fakeWindowsDesktopTransport struct {
+	scripts []string
+	writes  []string
+	outputs [][]byte
+	err     error
+}
+
+func (transport *fakeWindowsDesktopTransport) RunPowerShell(script string, timeout time.Duration) ([]byte, error) {
+	transport.scripts = append(transport.scripts, script)
+	if transport.err != nil {
+		return nil, transport.err
+	}
+	if len(transport.outputs) == 0 {
+		return nil, nil
+	}
+	output := transport.outputs[0]
+	transport.outputs = transport.outputs[1:]
+	return output, nil
+}
+
+func (transport *fakeWindowsDesktopTransport) WritePowerShellScript(remotePath string, content string, timeout time.Duration) error {
+	transport.writes = append(transport.writes, remotePath+"\n"+content)
+	return transport.err
+}
+
+func zipFrameArchive(t *testing.T) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	writer := zip.NewWriter(&buffer)
+	for _, name := range []string{"frame-000000.jpg", "frame-000001.jpg"} {
+		file, err := writer.Create(name)
+		if err != nil {
+			t.Fatalf("create zip frame: %v", err)
+		}
+		if _, err := file.Write(jpegHeaderBytes()); err != nil {
+			t.Fatalf("write zip frame: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close zip: %v", err)
+	}
+	return buffer.Bytes()
+}
+
+func writeFakeFFmpeg(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, "ffmpeg")
+	content := "#!/bin/sh\nfor out do :; done\nprintf '\\000\\000\\000\\030ftypmp42' > \"$out\"\n"
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write fake ffmpeg: %v", err)
+	}
+	return path
+}

@@ -114,23 +114,43 @@ func (broker ggMayaSessiondBroker) CaptureScreenshot(context runContext, request
 		return visualEvidenceArtifact{}, err
 	}
 	name := filepath.Base(filepath.ToSlash(request.Name))
-	result, err := broker.callCapture()
+	if name == "" || name == "." || name == ".." {
+		name = evidenceDefaultScreenshotName
+	}
+	remoteRoot := broker.remoteVisualEvidenceRoot(context, "screenshot")
+	defer func() {
+		_ = broker.removeRemotePath(remoteRoot)
+	}()
+	data, err := captureWindowsDesktopScreenshot(sshWindowsDesktopTransport(broker.host), remoteRoot)
 	if err != nil {
 		return visualEvidenceArtifact{}, err
 	}
-	if !result.OK {
-		return visualEvidenceArtifact{}, fmt.Errorf("gg_mayasessiond viewport.capture failed: %s", result.Error)
-	}
-	data, mediaType, err := captureImageData(result)
-	if err != nil {
-		return visualEvidenceArtifact{}, err
-	}
-	name = visualEvidenceNameForMediaType(name, mediaType)
-	return registerVisualEvidenceBytes(context, "screenshot", name, mediaType, data)
+	return registerVisualEvidenceBytes(context, "screenshot", forceVisualEvidenceExtension(name, ".png"), "image/png", data)
 }
 
-func (broker ggMayaSessiondBroker) CaptureRecording(runContext, recordingRequest) (visualEvidenceArtifact, error) {
-	return visualEvidenceArtifact{}, recordingDeferredError()
+func (broker ggMayaSessiondBroker) CaptureRecording(context runContext, request recordingRequest) (visualEvidenceArtifact, error) {
+	if err := broker.validate(); err != nil {
+		return visualEvidenceArtifact{}, err
+	}
+	name := filepath.Base(filepath.ToSlash(request.Name))
+	if name == "" || name == "." || name == ".." {
+		name = evidenceDefaultRecordingName
+	}
+	remoteRoot := broker.remoteVisualEvidenceRoot(context, "recording")
+	defer func() {
+		_ = broker.removeRemotePath(remoteRoot)
+	}()
+	data, err := captureWindowsDesktopRecording(sshWindowsDesktopTransport(broker.host), remoteRoot, request.Duration, request.FPS, "")
+	if err != nil {
+		return visualEvidenceArtifact{}, err
+	}
+	artifact, err := registerVisualEvidenceBytes(context, "recording", forceVisualEvidenceExtension(name, ".mp4"), "video/mp4", data)
+	if err != nil {
+		return visualEvidenceArtifact{}, err
+	}
+	artifact.DurationSeconds = request.Duration.Seconds()
+	artifact.FPS = request.FPS
+	return artifact, nil
 }
 
 func (broker ggMayaSessiondBroker) RetentionCapabilities() brokerCapabilities {
@@ -286,6 +306,10 @@ func retainedRemoteRunRoot(record runRetentionRecord) (string, error) {
 		return "", fmt.Errorf("retained run %s remote cleanup path %q does not match expected %q", record.RunID, recorded, expected)
 	}
 	return expected, nil
+}
+
+func (broker ggMayaSessiondBroker) remoteVisualEvidenceRoot(context runContext, kind string) string {
+	return remoteJoin(context.RunWorkspace.RemoteRunRoot(), "visual-evidence", kind)
 }
 
 func (broker ggMayaSessiondBroker) validate() error {

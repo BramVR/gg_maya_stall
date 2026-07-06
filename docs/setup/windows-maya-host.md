@@ -90,6 +90,9 @@ Doctor layer:
 
 - Enable OpenSSH Server on the Windows Maya Host.
 - Configure a non-interactive SSH identity for the user or CI runner that owns the Maya Stall run.
+- Ensure the controller machine has `ssh` and `scp`/`sftp` client tools
+  available. Maya Stall uses SSH for commands and SFTP for payload/output
+  transfer.
 - Confirm SSH reaches the expected Windows account and does not expose passwords or private keys in repo config.
 - Keep host aliases and private network addresses in operator config such as SSH config, CI secrets, or host config.
 - Enable real SSH transport only in user or CI host config, not in `.maya-stall.yaml`:
@@ -189,7 +192,7 @@ broker:
   mcpSource: C:/maya-stall-src/GG_MayaMCP
 ```
 
-Maya Stall invokes `gg_maya_sessiond.cli` on the Windows host through the same SSH transport. Runs stage declared payloads under `workRoot/runs/<run-id>/`, execute a staged wrapper with `script.execute`, download declared outputs from the remote workspace, and capture screenshots with `viewport.capture`. Remote Scenario execution through `script.execute` is capped at 10 minutes. The Session Broker launcher must allow the staged wrapper directory; otherwise doctor fails the `session-broker` layer with a `script.execute` repair hint.
+Maya Stall invokes `gg_maya_sessiond.cli` on the Windows host through the same SSH transport. Runs stage declared payloads under `workRoot/runs/<run-id>/`, execute a staged wrapper with `script.execute`, download declared outputs from the remote workspace, and capture configured Visual Evidence from the interactive Windows desktop. Remote Scenario execution through `script.execute` is capped at 10 minutes. The Session Broker launcher must allow the staged wrapper directory; otherwise doctor fails the `session-broker` layer with a `script.execute` repair hint.
 
 Each `manifest.json` and `evidence.json` records the resolved runtime profile, host adapter, broker adapter, redacted broker config source, and whether the run is eligible for live product proof.
 
@@ -203,15 +206,28 @@ Doctor layer:
 
 ### Visual Evidence
 
-- Confirm the Session Broker can capture screenshots from the same desktop session as the Maya UI Session.
-- Store screenshots, logs, Scenario Results, and declared outputs in each Evidence Bundle.
+- Confirm the Session Broker can capture screenshots and recordings from the
+  same desktop session as the Maya UI Session.
+- Install local `ffmpeg` on the controller machine that runs `maya-stall`.
+  Recording capture downloads Windows desktop frames and encodes the MP4
+  locally.
+- Keep Windows PowerShell available on the Maya Host with
+  `System.Windows.Forms` and `System.Drawing` desktop assemblies.
+- Keep `schtasks.exe` available and usable with `/IT` so capture work can run
+  in the logged-in interactive desktop session instead of the raw SSH session.
+- Keep `Compress-Archive` available on the Windows host so recording frames can
+  be zipped for transfer.
+- Store screenshots, recordings, logs, Scenario Results, and declared outputs
+  in each Evidence Bundle.
 - Treat viewport capture alone as insufficient if the Maya process is not in the interactive desktop.
 - Keep Visual Evidence enabled for CI proof unless a Scenario explicitly does not require it.
-- Recording evidence is deferred for v1 until the Session Broker exposes real recording capture.
+- Screenshot capture writes PNG artifacts. Recording capture writes MP4
+  artifacts with Crabbox-like defaults of 10 seconds at 15 fps.
 
 Doctor layer:
 
-- `visual-evidence`: screenshot capture is unavailable through the Session Broker, or recording evidence is configured even though it is deferred for v1.
+- `visual-evidence`: screenshot or recording capture is unavailable through the
+  Session Broker or host prerequisites.
 
 ### Evidence Store
 
@@ -285,7 +301,7 @@ To run the full live smoke, use:
 MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run)Smoke' -count=1
 ```
 
-`TestOptInRealSSHRunSmoke` first runs `doctor --scenario smoke`, then runs one generated `smoke` Scenario through the configured `gg_mayasessiond` Session Broker, requires screenshot Visual Evidence, and checks that the local Evidence Bundle contains `evidence.json`, events, logs, Scenario Result, and the captured screenshot. Recording is not part of the v1 live smoke while recording evidence is deferred.
+`TestOptInRealSSHRunSmoke` first runs `doctor --scenario smoke`, then runs one generated `smoke` Scenario through the configured `gg_mayasessiond` Session Broker, requires screenshot Visual Evidence, and checks that the local Evidence Bundle contains `evidence.json`, events, logs, Scenario Result, and the captured screenshot.
 
 To include the canonical Consuming Repo smoke, add a checked-out consuming repo path and run:
 
@@ -295,7 +311,7 @@ MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml MAYA_STALL_CONSUMING_REPO_SM
 
 `TestOptInRealSSHConsumingRepoSmoke` builds a temporary Plugin Artifact from the consuming repo checkout, stages it through Maya Stall, imports its plugin module in Maya Python, creates one minimal Maya object interaction, writes plugin-specific Scenario Result JSON, captures screenshot Visual Evidence, and publishes the Evidence Bundle to a temporary filesystem Evidence Store.
 
-All live smoke tests assert the Host Health report before accepting proof. Required live proof must show `ssh-sessiond`, `gg-mayasessiond`, interactive desktop readiness, and `viewport.capture` Visual Evidence readiness.
+All live smoke tests assert the Host Health report before accepting proof. Required live proof must show `ssh-sessiond`, `gg-mayasessiond`, interactive desktop readiness, and Visual Evidence readiness.
 
 To prove live desktop Visual Evidence, run:
 

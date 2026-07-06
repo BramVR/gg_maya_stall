@@ -139,9 +139,13 @@ type evidenceBundle struct {
 }
 
 type visualEvidenceArtifact struct {
-	Kind      string `json:"kind"`
-	Path      string `json:"path"`
-	MediaType string `json:"mediaType"`
+	Kind            string  `json:"kind"`
+	Path            string  `json:"path"`
+	MediaType       string  `json:"mediaType"`
+	DurationSeconds float64 `json:"durationSeconds,omitempty"`
+	FPS             int     `json:"fps,omitempty"`
+	TargetProfile   string  `json:"targetProfile,omitempty"`
+	Host            string  `json:"host,omitempty"`
 }
 
 type outputArtifact struct {
@@ -160,14 +164,11 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 }
 
 func rejectUnsupportedEvidenceConfig(broker sessionBroker, scenario scenarioConfig) error {
-	if scenario.Evidence.Recording.Enabled {
-		return recordingDeferredError()
-	}
 	return nil
 }
 
 func recordingDeferredError() error {
-	return fmt.Errorf("recording Visual Evidence is deferred for v1 until the Session Broker exposes real recording capture; use screenshot Visual Evidence")
+	return fmt.Errorf("session broker does not support recording capture")
 }
 
 func rejectMismatchedRuntimeOverride(resolved resolvedRuntime, runtime runRuntime) error {

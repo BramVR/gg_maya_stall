@@ -239,8 +239,6 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 	add(mayaVersionLayer(options, host, scenario))
 	if host.VisualEvidence != nil && !*host.VisualEvidence {
 		add(withSource(failedCheck("visual-evidence", "unavailable", "Enable screenshot capture through the Session Broker. See docs/setup/windows-maya-host.md#visual-evidence."), "config"))
-	} else if scenario.Evidence.Recording.Enabled {
-		add(withSource(failedCheck("visual-evidence", "recording Visual Evidence is deferred for v1", "Disable recording evidence and use screenshot/viewport capture. See docs/setup/windows-maya-host.md#visual-evidence."), "config"))
 	} else if brokerInvalidReason != "" {
 		add(withBlockedBy(failedCheck("visual-evidence", "unavailable: "+brokerInvalidReason, "Use a valid Session Broker before checking screenshot capture. See docs/setup/windows-maya-host.md#visual-evidence."), "session-broker"))
 	} else if runtimeErr == nil && host.Broker.isGGMayaSessiond() {

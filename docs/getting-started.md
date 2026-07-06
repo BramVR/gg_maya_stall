@@ -232,3 +232,10 @@ opt-in:
 ```sh
 MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run)Smoke' -count=1
 ```
+
+To run the protected consuming-repo proof path too, set
+`MAYA_STALL_CONSUMING_REPO_SMOKE_DIR` to the checked-out consuming repo and use:
+
+```sh
+MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml MAYA_STALL_CONSUMING_REPO_SMOKE_DIR=/path/to/consuming-repo go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke' -count=1
+```

@@ -220,12 +220,21 @@ MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml go test ./internal/cli -run 
 
 `TestOptInRealSSHRunSmoke` first runs `doctor --scenario smoke`, then runs one generated `smoke` Scenario through the configured `gg_mayasessiond` Session Broker, requires screenshot Visual Evidence, and checks that the local Evidence Bundle contains `evidence.json`, events, logs, Scenario Result, and the captured screenshot. Recording is not part of the v1 live smoke while recording evidence is deferred.
 
-Both live smoke tests assert the Host Health report before accepting proof. Required live proof must show `ssh-sessiond`, `gg-mayasessiond`, interactive desktop readiness, and `viewport.capture` Visual Evidence readiness.
+To include the canonical Consuming Repo smoke, add a checked-out consuming repo path and run:
+
+```sh
+MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml MAYA_STALL_CONSUMING_REPO_SMOKE_DIR=/path/to/consuming-repo go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke' -count=1
+```
+
+`TestOptInRealSSHConsumingRepoSmoke` builds a temporary Plugin Artifact from the consuming repo checkout, stages it through Maya Stall, imports its plugin module in Maya Python, creates one minimal Maya object interaction, writes plugin-specific Scenario Result JSON, captures screenshot Visual Evidence, and publishes the Evidence Bundle to a temporary filesystem Evidence Store.
+
+All live smoke tests assert the Host Health report before accepting proof. Required live proof must show `ssh-sessiond`, `gg-mayasessiond`, interactive desktop readiness, and `viewport.capture` Visual Evidence readiness.
 
 Optional:
 
 - `MAYA_STALL_SMOKE_TARGET_PROFILE`: Target Profile; default `default`.
 - `MAYA_STALL_SMOKE_HOST`: pinned Maya Host id.
+- `MAYA_STALL_CONSUMING_REPO_SMOKE_DIR`: local checkout path for the canonical Consuming Repo smoke.
 
 ## Not The CLI's Job
 

@@ -275,7 +275,7 @@ func publishLiveVisualEvidenceProofArtifact(evidenceDir string, options liveVisu
 
 func requireLiveRuntime(runtime runtimeMetadata) error {
 	if runtime.Profile != "ssh-sessiond" || runtime.HostAdapter != "ssh" || runtime.BrokerAdapter != "gg-mayasessiond" || !runtime.LiveProofEligible {
-		return fmt.Errorf("Visual Evidence proof runtime = %+v, want live-proof-eligible ssh-sessiond", runtime)
+		return fmt.Errorf("visual evidence proof runtime = %+v, want live-proof-eligible ssh-sessiond", runtime)
 	}
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -86,6 +87,11 @@ func validateRealSSHConnection(host mayaHostConfig) error {
 }
 
 func runSSHCommand(host mayaHostConfig, remoteCommand []string) error {
+	_, err := runSSHCommandOutput(host, remoteCommand)
+	return err
+}
+
+func runSSHCommandOutput(host mayaHostConfig, remoteCommand []string) ([]byte, error) {
 	binary := host.SSH.Binary
 	if binary == "" {
 		binary = "ssh"
@@ -93,15 +99,21 @@ func runSSHCommand(host mayaHostConfig, remoteCommand []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), sshCommandTimeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, binary, append(sshArgs(host), remoteCommand...)...)
+	var stdout bytes.Buffer
 	var stderr bytes.Buffer
+	command.Stdout = &stdout
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return withStderrTail(fmt.Errorf("ssh command timed out after %s", sshCommandTimeout), stderr.String())
+		output := stderr.String()
+		if stdout.Len() != 0 {
+			output = stdout.String() + "\n" + output
 		}
-		return withStderrTail(fmt.Errorf("ssh command failed: %w", err), stderr.String())
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, withStderrTail(fmt.Errorf("ssh command timed out after %s", sshCommandTimeout), output)
+		}
+		return nil, withStderrTail(fmt.Errorf("ssh command failed: %w", err), output)
 	}
-	return nil
+	return stdout.Bytes(), nil
 }
 
 func sshArgs(host mayaHostConfig) []string {
@@ -231,6 +243,225 @@ func (host realSSHHost) CollectArtifacts(context runContext, scenario scenarioCo
 		return fmt.Errorf("download declared outputs: %w", err)
 	}
 	return nil
+}
+
+func (host realSSHHost) hasSessionD() bool {
+	return strings.TrimSpace(host.host.SessionD.StateDir) != ""
+}
+
+func (host realSSHHost) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
+	if !host.hasSessionD() {
+		return ScenarioResult{}, fmt.Errorf("sessiond.stateDir is required for real SSH Session Broker")
+	}
+	mayaScripts := append([]string{}, scenario.Payload.MayaScripts...)
+	mayaScripts = append(mayaScripts, scenario.Payload.Scripts...)
+	if len(mayaScripts) == 0 {
+		return ScenarioResult{}, fmt.Errorf("real SSH Session Broker requires at least one payload.mayaScripts entry")
+	}
+	if err := appendEvent(context.EventsPath, "broker.session.started", scenario.MayaVersion); err != nil {
+		return ScenarioResult{}, err
+	}
+	var log strings.Builder
+	for _, script := range mayaScripts {
+		clean, err := cleanRepoRelativePath(script)
+		if err != nil {
+			return ScenarioResult{}, err
+		}
+		clean = filepath.ToSlash(clean)
+		if err := rejectSFTPRepoPath(clean); err != nil {
+			return ScenarioResult{}, err
+		}
+		remoteScript := remoteHostJoin(host.host.WorkRoot, "runs", filepath.Base(context.StateDir), "payload", "mayaScripts", clean)
+		output, err := host.runSessionDScript(remoteScript, remoteHostJoin(host.host.WorkRoot, "runs", filepath.Base(context.StateDir), "workspace"), remoteHostJoin(host.host.WorkRoot, "runs", filepath.Base(context.StateDir), "workspace", filepath.ToSlash(scenario.ExpectedOutputs.ScenarioResult)))
+		if err != nil {
+			return ScenarioResult{}, err
+		}
+		if output != "" {
+			log.WriteString(output)
+			if !strings.HasSuffix(output, "\n") {
+				log.WriteString("\n")
+			}
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(context.LogPath), 0o755); err != nil {
+		return ScenarioResult{}, err
+	}
+	if log.Len() == 0 {
+		log.WriteString("gg_mayasessiond executed Scenario scripts\n")
+	}
+	if err := os.WriteFile(context.LogPath, []byte(log.String()), 0o644); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := appendEvent(context.EventsPath, "broker.session.finished", resultStatusPassed); err != nil {
+		return ScenarioResult{}, err
+	}
+	return ScenarioResult{Status: resultStatusPassed, Summary: "gg_mayasessiond Scenario completed"}, nil
+}
+
+func (host realSSHHost) runSessionDScript(scriptPath string, workspace string, scenarioResultPath string) (string, error) {
+	timeout, err := sessionDTimeout(host.host.SessionD)
+	if err != nil {
+		return "", err
+	}
+	argsJSON, err := json.Marshal(map[string]any{
+		"workspace":       workspace,
+		"scenario_result": scenarioResultPath,
+		"environment":     map[string]string{scenarioResultEnvVar: scenarioResultPath},
+	})
+	if err != nil {
+		return "", err
+	}
+	scriptPathJSON, err := json.Marshal(scriptPath)
+	if err != nil {
+		return "", err
+	}
+	wrapperPath := remoteHostJoin(workspace, ".maya-stall-sessiond-wrapper.py")
+	wrapper := fmt.Sprintf(`import json
+import os
+import runpy
+
+__args__ = json.loads(%q)
+os.environ.update(__args__.get("environment", {}))
+runpy.run_path(%s, init_globals={"__args__": __args__}, run_name="__maya_stall__")
+`, string(argsJSON), string(scriptPathJSON))
+	if err := host.writeRemoteTextFile(wrapperPath, wrapper); err != nil {
+		return "", err
+	}
+	response, err := host.callSessionDTool("script.execute", []string{
+		"file_path=" + wrapperPath,
+		"timeout=" + strconv.Itoa(int(timeout.Seconds())),
+	})
+	if err != nil {
+		return "", err
+	}
+	if !response.Structured.Success {
+		return response.Structured.Output, fmt.Errorf("sessiond script %s failed: %v", scriptPath, response.Structured.Errors)
+	}
+	return response.Structured.Output, nil
+}
+
+func (host realSSHHost) CaptureScreenshot(context runContext, request screenshotRequest) (visualEvidenceArtifact, error) {
+	if !host.hasSessionD() {
+		return visualEvidenceArtifact{}, fmt.Errorf("sessiond.stateDir is required for real SSH screenshot capture")
+	}
+	name := request.Name
+	if name == "" {
+		name = "screenshot.png"
+	}
+	name = filepath.Base(filepath.ToSlash(name))
+	if name == "." || name == ".." || name == "" {
+		name = "screenshot.png"
+	}
+	if filepath.Ext(name) == "" {
+		name += ".png"
+	}
+	response, err := host.callSessionDTool("viewport.capture", []string{"format=png", "width=1024", "height=576"})
+	if err != nil {
+		return visualEvidenceArtifact{}, err
+	}
+	imageData := ""
+	for _, item := range response.Content {
+		if item.Type == "image" && item.Data != "" {
+			imageData = item.Data
+			break
+		}
+	}
+	if imageData == "" {
+		return visualEvidenceArtifact{}, fmt.Errorf("sessiond viewport.capture did not return image content")
+	}
+	content, err := base64.StdEncoding.DecodeString(imageData)
+	if err != nil {
+		return visualEvidenceArtifact{}, fmt.Errorf("decode viewport capture: %w", err)
+	}
+	relative := filepath.Join("screenshots", name)
+	path := filepath.Join(context.EvidenceDir, relative)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return visualEvidenceArtifact{}, err
+	}
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		return visualEvidenceArtifact{}, err
+	}
+	if err := appendEvent(context.EventsPath, "broker.screenshot.captured", filepath.ToSlash(relative)); err != nil {
+		return visualEvidenceArtifact{}, err
+	}
+	mediaType := response.Structured.MimeType
+	if mediaType == "" {
+		mediaType = "image/png"
+	}
+	return visualEvidenceArtifact{Kind: "screenshot", Path: filepath.ToSlash(relative), MediaType: mediaType}, nil
+}
+
+func (host realSSHHost) writeRemoteTextFile(path string, content string) error {
+	encoded := base64.StdEncoding.EncodeToString([]byte(content))
+	script := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
+$path = %s
+$content = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(%s))
+New-Item -ItemType Directory -Force -Path (Split-Path -LiteralPath $path) | Out-Null
+$encoding = New-Object System.Text.UTF8Encoding($false)
+[IO.File]::WriteAllText($path, $content, $encoding)`, powerShellSingleQuoted(path), powerShellSingleQuoted(encoded))
+	return runSSHCommand(host.host, encodedPowerShellCommand(script))
+}
+
+func (host realSSHHost) callSessionDTool(tool string, pairs []string) (sessionDCallResponse, error) {
+	projectDir := strings.TrimSpace(host.host.SessionD.ProjectDir)
+	if projectDir == "" {
+		projectDir = "C:/PROJECTS/GG/GG_MayaSessiond"
+	}
+	python := strings.TrimSpace(host.host.SessionD.Python)
+	if python == "" {
+		python = "python"
+	}
+	stateDir := strings.TrimSpace(host.host.SessionD.StateDir)
+	quotedPairs := make([]string, 0, len(pairs))
+	for _, pair := range pairs {
+		quotedPairs = append(quotedPairs, powerShellSingleQuoted(pair))
+	}
+	script := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
+Set-Location -LiteralPath %s
+& %s -m gg_maya_sessiond.cli call --state-dir %s %s %s --json`, powerShellSingleQuoted(projectDir), powerShellSingleQuoted(python), powerShellSingleQuoted(stateDir), powerShellSingleQuoted(tool), strings.Join(quotedPairs, " "))
+	stdout, err := runSSHCommandOutput(host.host, encodedPowerShellCommand(script))
+	if err != nil {
+		return sessionDCallResponse{}, err
+	}
+	var response sessionDCallResponse
+	if err := decodeJSONUseNumber(stdout, &response); err != nil {
+		return sessionDCallResponse{}, fmt.Errorf("parse sessiond response: %w", err)
+	}
+	if !response.OK {
+		return sessionDCallResponse{}, fmt.Errorf("sessiond %s failed: %s", tool, response.Error)
+	}
+	return response, nil
+}
+
+type sessionDCallResponse struct {
+	OK         bool   `json:"ok"`
+	Error      string `json:"error"`
+	Structured struct {
+		Success  bool           `json:"success"`
+		Output   string         `json:"output"`
+		Errors   map[string]any `json:"errors"`
+		MimeType string         `json:"mime_type"`
+	} `json:"structured"`
+	Content []struct {
+		Type     string `json:"type"`
+		Data     string `json:"data"`
+		MimeType string `json:"mimeType"`
+	} `json:"content"`
+}
+
+func sessionDTimeout(config sessionDConfig) (time.Duration, error) {
+	value := strings.TrimSpace(config.Timeout)
+	if value == "" {
+		return 5 * time.Minute, nil
+	}
+	timeout, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("sessiond.timeout %q must be a Go duration such as 5m", value)
+	}
+	if timeout <= 0 {
+		return 0, fmt.Errorf("sessiond.timeout must be positive")
+	}
+	return timeout, nil
 }
 
 func validatePayloadPathForTransport(repoDir string, relativePath string) error {
@@ -387,7 +618,7 @@ func (batch *sftpBatch) mkdir(path string) {
 
 func (batch *sftpBatch) mkdirAll(path string) {
 	current := ""
-	normalized := strings.ReplaceAll(path, `\`, "/")
+	normalized := sftpRemotePath(path)
 	if strings.HasPrefix(normalized, "/") {
 		current = "/"
 	}
@@ -426,6 +657,19 @@ func sftpQuote(value string) string {
 }
 
 func remoteJoin(root string, parts ...string) string {
+	clean := sftpRemotePath(root)
+	clean = strings.TrimRight(clean, "/")
+	for _, part := range parts {
+		part = strings.Trim(strings.ReplaceAll(filepath.ToSlash(part), `\`, "/"), "/")
+		if part == "" {
+			continue
+		}
+		clean += "/" + part
+	}
+	return clean
+}
+
+func remoteHostJoin(root string, parts ...string) string {
 	clean := strings.ReplaceAll(root, `\`, "/")
 	clean = strings.TrimRight(clean, "/")
 	for _, part := range parts {
@@ -436,6 +680,18 @@ func remoteJoin(root string, parts ...string) string {
 		clean += "/" + part
 	}
 	return clean
+}
+
+func sftpRemotePath(path string) string {
+	normalized := strings.ReplaceAll(path, `\`, "/")
+	if len(normalized) >= 2 && normalized[1] == ':' && isASCIILetter(normalized[0]) {
+		return "/" + normalized
+	}
+	return normalized
+}
+
+func isASCIILetter(value byte) bool {
+	return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z')
 }
 
 func remoteDir(path string) string {

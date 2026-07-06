@@ -1479,11 +1479,11 @@ hostPools:
 	}
 	log := string(logBytes)
 	for _, want := range []string{
-		`-mkdir "C:/maya-stall"`,
-		`-mkdir "C:/maya-stall/runs"`,
+		`-mkdir "/C:/maya-stall"`,
+		`-mkdir "/C:/maya-stall/runs"`,
 		`put -r `,
 		`maya/smoke.py`,
-		`C:/maya-stall/runs/`,
+		`/C:/maya-stall/runs/`,
 		`payload/mayaScripts/maya/smoke.py`,
 		`-get -r `,
 		`workspace/outputs/report.json`,
@@ -1495,6 +1495,58 @@ hostPools:
 	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
 	if _, err := os.Stat(filepath.Join(evidence, "outputs", "report.json")); err != nil {
 		t.Fatalf("expected downloaded output in Evidence Bundle: %v", err)
+	}
+}
+
+func TestRunScenarioRealSSHSessionDBrokerExecutesStagedMayaScript(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sshLog := filepath.Join(dir, "ssh.log")
+	sshPath := writeFakeCommandWithStdout(t, dir, "fake-ssh-sessiond", sshLog, `{"ok":true,"structured":{"success":true,"output":"script output\n","errors":null}}`+"\n", 0)
+	sftpLog := filepath.Join(dir, "sftp.log")
+	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        sessiond:
+          projectDir: C:/PROJECTS/GG/GG_MayaSessiond
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          stateDir: C:/maya-stall/sessiond-ui
+          timeout: 5m
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runState := onlyRunDir(t, filepath.Join(dir, ".maya-stall", "state", "runs"))
+	logBytes, err := os.ReadFile(filepath.Join(runState, "logs", "session.log"))
+	if err != nil {
+		t.Fatalf("read session log: %v", err)
+	}
+	if !strings.Contains(string(logBytes), "script output") {
+		t.Fatalf("session log missing sessiond output:\n%s", string(logBytes))
+	}
+	sshBytes, err := os.ReadFile(sshLog)
+	if err != nil {
+		t.Fatalf("read ssh log: %v", err)
+	}
+	for _, want := range []string{"powershell", "-EncodedCommand"} {
+		if !strings.Contains(string(sshBytes), want) {
+			t.Fatalf("ssh log missing %q:\n%s", want, string(sshBytes))
+		}
 	}
 }
 
@@ -1760,6 +1812,27 @@ func TestSFTPBatchMkdirAllPreservesAbsolutePOSIXRoot(t *testing.T) {
 	}
 	if strings.Contains(batch.String(), `-mkdir "opt"`) {
 		t.Fatalf("sftp mkdirAll emitted relative POSIX path:\n%s", batch.String())
+	}
+}
+
+func TestSFTPRemotePathNormalizesWindowsDriveRoot(t *testing.T) {
+	if got := remoteJoin(`C:\maya-stall`, "runs", "run-1"); got != "/C:/maya-stall/runs/run-1" {
+		t.Fatalf("remoteJoin Windows drive path = %q, want /C:/maya-stall/runs/run-1", got)
+	}
+
+	batch := newSFTPBatch()
+	batch.mkdirAll("C:/maya-stall/runs")
+	for _, want := range []string{
+		`-mkdir "/C:"`,
+		`-mkdir "/C:/maya-stall"`,
+		`-mkdir "/C:/maya-stall/runs"`,
+	} {
+		if !strings.Contains(batch.String(), want) {
+			t.Fatalf("sftp mkdirAll missing %q:\n%s", want, batch.String())
+		}
+	}
+	if strings.Contains(batch.String(), `-mkdir "C:"`) || strings.Contains(batch.String(), `-mkdir "C:/`) {
+		t.Fatalf("sftp mkdirAll emitted relative Windows drive path:\n%s", batch.String())
 	}
 }
 
@@ -3495,6 +3568,19 @@ func writeFakeCommand(t *testing.T, dir string, name string, logPath string, exi
 	}
 	path := filepath.Join(dir, name)
 	content := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$0 $*\" >> %s\nexit %d\n", shellQuote(logPath), exitCode)
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write fake command: %v", err)
+	}
+	return path
+}
+
+func writeFakeCommandWithStdout(t *testing.T, dir string, name string, logPath string, stdout string, exitCode int) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake command fixtures need /bin/sh")
+	}
+	path := filepath.Join(dir, name)
+	content := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$0 $*\" >> %s\nprintf %%s %s\nexit %d\n", shellQuote(logPath), shellQuote(stdout), exitCode)
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("write fake command: %v", err)
 	}

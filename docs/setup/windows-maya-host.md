@@ -109,6 +109,16 @@ Doctor layer:
 - Install and configure `gg_mayasessiond` as the v1 Session Broker for the Maya Host.
 - Run the Session Broker from the interactive desktop path, not as a headless service-only Maya launcher.
 - Give it access to the work root, Maya executable, MCP or helper code it needs, and any configured state directory.
+- Configure the host-side Session Broker paths outside repo config:
+
+```yaml
+sessiond:
+  projectDir: C:/PROJECTS/GG/GG_MayaSessiond
+  python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+  stateDir: C:/maya-stall/sessiond-ui
+  timeout: 5m
+```
+
 - Keep host-specific paths in host-managed config; do not bake them into consuming repos.
 
 Doctor layer:

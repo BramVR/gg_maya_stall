@@ -41,14 +41,22 @@ type hostPoolConfig struct {
 }
 
 type mayaHostConfig struct {
-	ID             string    `yaml:"id"`
-	Health         string    `yaml:"health"`
-	Transport      string    `yaml:"transport"`
-	SSH            sshConfig `yaml:"ssh"`
-	WorkRoot       string    `yaml:"workRoot"`
-	Broker         string    `yaml:"broker"`
-	MayaVersions   []string  `yaml:"mayaVersions"`
-	VisualEvidence *bool     `yaml:"visualEvidence"`
+	ID             string         `yaml:"id"`
+	Health         string         `yaml:"health"`
+	Transport      string         `yaml:"transport"`
+	SSH            sshConfig      `yaml:"ssh"`
+	WorkRoot       string         `yaml:"workRoot"`
+	Broker         string         `yaml:"broker"`
+	SessionD       sessionDConfig `yaml:"sessiond"`
+	MayaVersions   []string       `yaml:"mayaVersions"`
+	VisualEvidence *bool          `yaml:"visualEvidence"`
+}
+
+type sessionDConfig struct {
+	ProjectDir string `yaml:"projectDir"`
+	Python     string `yaml:"python"`
+	StateDir   string `yaml:"stateDir"`
+	Timeout    string `yaml:"timeout"`
 }
 
 type sshConfig struct {

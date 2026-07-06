@@ -205,11 +205,16 @@ hostPools:
           sftpTimeout: 30m
         workRoot: C:/maya-stall
         broker: ok
+        sessiond:
+          projectDir: C:/PROJECTS/GG/GG_MayaSessiond
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          stateDir: C:/maya-stall/sessiond-ui
+          timeout: 5m
         mayaVersions: ["2025"]
         visualEvidence: true
 ```
 
-With `transport: ssh`, `maya-stall doctor` runs real SSH connectivity and writable work-root checks. `maya-stall run` uploads declared Run Payload paths with `sftp` into a clean remote run workspace under `workRoot/runs/<run-id>/`, then downloads declared `expectedOutputs.scenarioResult` and `expectedOutputs.files` back into the local Evidence Bundle path. `ssh.sftpTimeout` defaults to `30m`; set it to `0` to rely on SSH keepalives without a wall-clock transfer cap. Session Broker launch remains a separate layer.
+With `transport: ssh`, `maya-stall doctor` runs real SSH connectivity and writable work-root checks. `maya-stall run` uploads declared Run Payload paths with `sftp` into a clean remote run workspace under `workRoot/runs/<run-id>/`. When `sessiond.stateDir` is configured, it executes staged Maya scripts through `gg_mayasessiond`, captures screenshots through `viewport.capture`, then downloads declared `expectedOutputs.scenarioResult` and `expectedOutputs.files` back into the local Evidence Bundle path. `ssh.sftpTimeout` defaults to `30m`; set it to `0` to rely on SSH keepalives without a wall-clock transfer cap.
 
 Opt-in live smoke is skipped unless the exact host config env var is set:
 

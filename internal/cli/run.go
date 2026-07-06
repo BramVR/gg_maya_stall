@@ -143,9 +143,6 @@ type validatorResult struct {
 }
 
 func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcome runOutcome, err error) {
-	if runtime.Broker == nil {
-		runtime.Broker = fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "fake Scenario completed"}}
-	}
 	if runtime.Now == nil {
 		runtime.Now = time.Now
 	}
@@ -171,6 +168,13 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 	}
 	if runtime.Host == nil {
 		runtime.Host = runHostForConfig(host.Config)
+	}
+	if runtime.Broker == nil {
+		if realHost, ok := runtime.Host.(realSSHHost); ok && realHost.hasSessionD() {
+			runtime.Broker = realHost
+		} else {
+			runtime.Broker = fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "fake Scenario completed"}}
+		}
 	}
 	releaseHostLock := true
 	defer func() {

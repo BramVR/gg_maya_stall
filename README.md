@@ -1,4 +1,10 @@
+![Maya Stall hero](docs/assets/github-hero.png)
+
 # Maya Stall
+
+[![Proof](https://github.com/BramVR/gg_maya_stall/actions/workflows/proof.yml/badge.svg)](https://github.com/BramVR/gg_maya_stall/actions/workflows/proof.yml)
+[![Go 1.22](https://img.shields.io/badge/go-1.22-00ADD8?logo=go&logoColor=white)](go.mod)
+[![Go Report Card](https://goreportcard.com/badge/github.com/BramVR/gg_maya_stall)](https://goreportcard.com/report/github.com/BramVR/gg_maya_stall)
 
 **Run real Autodesk Maya UI Scenarios from repo-owned config.**
 

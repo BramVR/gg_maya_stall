@@ -179,13 +179,18 @@ jobs:
         with:
           node-version: 22
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        env:
-          AGENT_TOOLSDIRECTORY: ${{ runner.temp }}/_tool
-          RUNNER_TOOL_CACHE: ${{ runner.temp }}/_tool
-        with:
-          python-version: "3.12"
+      - name: Check Live Runner Python
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import ensurepip
+          import sys
+          import venv
+          if sys.version_info < (3, 10):
+              raise SystemExit("python3 >= 3.10 is required for the consuming repo local gate")
+          print(f"python: {sys.version.split()[0]}")
+          print(f"venv: {venv.__name__}; ensurepip: {ensurepip.__name__}")
+          PY
 
       - name: Download Proof Manifest
         uses: actions/download-artifact@v4
@@ -224,7 +229,7 @@ jobs:
       - name: Consuming Repo Local Gate
         run: |
           set -euo pipefail
-          python -m venv "$RUNNER_TEMP/maya-stall/consumer-venv"
+          python3 -m venv "$RUNNER_TEMP/maya-stall/consumer-venv"
           . "$RUNNER_TEMP/maya-stall/consumer-venv/bin/activate"
           python -m pip install --upgrade pip
           python -m pip install -e "${{ steps.consumer-repo.outputs.path }}" pytest build

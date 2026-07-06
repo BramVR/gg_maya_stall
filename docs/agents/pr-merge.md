@@ -53,6 +53,9 @@ Add the live host config as an environment secret named
 `MAYA_STALL_LIVE_HOST_CONFIG_B64`, containing base64-encoded host config YAML.
 Add the canonical consuming repo checkout path as an environment or repository
 variable named `MAYA_STALL_LIVE_CONSUMING_REPO_SMOKE_DIR`.
+The self-hosted `maya-live-proof` runner must provide `python3 >= 3.10` with
+`venv` and `ensurepip`; the live job checks this before running the consuming
+repo local gate.
 Optional environment or repository variables:
 
 - `MAYA_STALL_LIVE_TARGET_PROFILE`

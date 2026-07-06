@@ -51,3 +51,23 @@ Publishing writes:
 
 Publishing the same run again replaces the previous published run directory so
 stale files do not survive.
+
+## live proof artifact
+
+The protected GitHub Actions live proof workflow can also publish a sanitized
+downloadable artifact named `live-visual-evidence-proof`. It is disabled by
+default and enabled only in the live workflow through
+`MAYA_STALL_LIVE_PROOF_ARTIFACT_ENABLED=true`.
+
+The artifact contains only reviewer-facing proof:
+
+- `proof-artifact-manifest.json`
+- `evidence-metadata.json`
+- `media-review.json`
+- `screenshots/desktop-screenshot.png`
+- `recordings/desktop-recording.mp4`
+
+Retention is short and configurable with
+`MAYA_STALL_LIVE_PROOF_RETENTION_DAYS` or the matching workflow variable.
+Private host names should be replaced with
+`MAYA_STALL_LIVE_PROOF_PUBLIC_HOST_ALIAS` before upload.

@@ -161,6 +161,9 @@ jobs:
     environment: maya-live-proof
     env:
       PROOF_MANIFEST: artifacts/proof/proof-manifest.json
+      LIVE_PROOF_ARTIFACT_DIR: ${{ github.workspace }}/artifacts/live-visual-evidence-proof
+      LIVE_PROOF_RETENTION_DAYS: ${{ vars.MAYA_STALL_LIVE_PROOF_RETENTION_DAYS || '3' }}
+      LIVE_PROOF_PUBLIC_HOST_ALIAS: ${{ vars.MAYA_STALL_LIVE_PROOF_PUBLIC_HOST_ALIAS || 'maya-live-proof-host' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -246,16 +249,42 @@ jobs:
           MAYA_STALL_SMOKE_TARGET_PROFILE: ${{ vars.MAYA_STALL_LIVE_TARGET_PROFILE }}
           MAYA_STALL_SMOKE_HOST: ${{ vars.MAYA_STALL_LIVE_HOST }}
           MAYA_STALL_CONSUMING_REPO_SMOKE_DIR: ${{ steps.consumer-repo.outputs.path }}
+          MAYA_STALL_LIVE_PROOF_ARTIFACT_ENABLED: "true"
+          MAYA_STALL_LIVE_PROOF_ARTIFACT_DIR: ${{ env.LIVE_PROOF_ARTIFACT_DIR }}
+          MAYA_STALL_LIVE_PROOF_RETENTION_DAYS: ${{ env.LIVE_PROOF_RETENTION_DAYS }}
+          MAYA_STALL_LIVE_PROOF_PUBLIC_HOST_ALIAS: ${{ env.LIVE_PROOF_PUBLIC_HOST_ALIAS }}
+          MAYA_STALL_LIVE_PROOF_MEDIA_REVIEWED: "true"
         run: |
           set -euo pipefail
           go test -json ./internal/cli -run TestOptInRealVisualEvidenceSmoke -count=1 | tee artifacts/proof/live-smoke.jsonl
           go test -json ./internal/cli -run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke' -count=1 | tee -a artifacts/proof/live-smoke.jsonl
+
+      - name: Public Artifact Confidentiality Gate
+        id: public-artifact-confidentiality
+        if: steps.live-smoke.outcome == 'success'
+        run: |
+          node scripts/proof/assert-public-artifact-confidentiality.mjs \
+            --path artifacts/live-visual-evidence-proof \
+            --path artifacts/proof/proof-manifest.json
+
+      - name: Upload Live Visual Evidence Proof
+        id: upload-live-visual-evidence-proof
+        if: steps.live-smoke.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-visual-evidence-proof
+          path: artifacts/live-visual-evidence-proof/
+          if-no-files-found: error
+          retention-days: ${{ env.LIVE_PROOF_RETENTION_DAYS }}
 
       - name: Assert Live Maya Gate
         if: always()
         env:
           HOST_CONFIG_STATE: ${{ steps.live-config.outputs.state }}
           LIVE_OUTCOME: ${{ steps.live-smoke.outcome }}
+          CONFIDENTIALITY_OUTCOME: ${{ steps.public-artifact-confidentiality.outcome }}
+          PROOF_UPLOAD_OUTCOME: ${{ steps.upload-live-visual-evidence-proof.outcome }}
+          PROOF_ARTIFACT_MANIFEST: artifacts/live-visual-evidence-proof/proof-artifact-manifest.json
         run: |
           live_status="skipped"
           if [ "$LIVE_OUTCOME" = "success" ]; then
@@ -263,9 +292,9 @@ jobs:
           elif [ "$LIVE_OUTCOME" = "failure" ]; then
             live_status="failed"
           fi
-          node - "$PROOF_MANIFEST" "${HOST_CONFIG_STATE:-missing}" "$live_status" artifacts/proof/live-smoke.jsonl <<'NODE'
+          node - "$PROOF_MANIFEST" "${HOST_CONFIG_STATE:-missing}" "$live_status" artifacts/proof/live-smoke.jsonl "$PROOF_ARTIFACT_MANIFEST" <<'NODE'
           const fs = require("node:fs");
-          const [manifestPath, hostConfigState, liveStatus, smokePath] = process.argv.slice(2);
+          const [manifestPath, hostConfigState, liveStatus, smokePath, proofArtifactManifestPath] = process.argv.slice(2);
           const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
           const expected = new Set(["TestOptInRealSSHDoctorSmoke", "TestOptInRealSSHRunSmoke", "TestOptInRealSSHConsumingRepoSmoke", "TestOptInRealVisualEvidenceSmoke"]);
           const passed = new Set();
@@ -291,6 +320,15 @@ jobs:
           } else if (missing.length > 0 || skipped.size > 0) {
             status = "failed_missing_smoke_tests";
             detail = `missing pass: ${missing.join(", ") || "none"}; skipped: ${[...skipped].join(", ") || "none"}`;
+          } else if (!fs.existsSync(proofArtifactManifestPath)) {
+            status = "failed_missing_visual_evidence_proof_artifact";
+            detail = "live Visual Evidence proof artifact manifest missing";
+          } else if (process.env.CONFIDENTIALITY_OUTCOME !== "success") {
+            status = "failed_visual_evidence_proof_confidentiality";
+            detail = "live Visual Evidence proof artifact confidentiality gate failed";
+          } else if (process.env.PROOF_UPLOAD_OUTCOME !== "success") {
+            status = "failed_visual_evidence_proof_upload";
+            detail = "live Visual Evidence proof artifact upload failed";
           }
           manifest.gates = manifest.gates || {};
           manifest.gates.live_maya = {
@@ -313,7 +351,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: proof-manifest-live
-          path: artifacts/proof/
+          path: artifacts/proof/proof-manifest.json
           if-no-files-found: error
 
   live-maya-proof-untrusted-fork:

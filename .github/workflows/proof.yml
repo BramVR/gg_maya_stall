@@ -229,12 +229,13 @@ jobs:
       - name: Consuming Repo Local Gate
         run: |
           set -euo pipefail
+          consumer_repo="${{ steps.consumer-repo.outputs.path }}"
           python3 -m venv "$RUNNER_TEMP/maya-stall/consumer-venv"
           . "$RUNNER_TEMP/maya-stall/consumer-venv/bin/activate"
           python -m pip install --upgrade pip
-          python -m pip install -e "${{ steps.consumer-repo.outputs.path }}" pytest build
-          python -m pytest "${{ steps.consumer-repo.outputs.path }}"
-          python -m build "${{ steps.consumer-repo.outputs.path }}" --wheel --outdir "$RUNNER_TEMP/maya-stall/consumer-dist"
+          python -m pip install -e "$consumer_repo" pytest build
+          (cd "$consumer_repo" && python -m pytest -q)
+          python -m build "$consumer_repo" --wheel --outdir "$RUNNER_TEMP/maya-stall/consumer-dist"
 
       - name: Live Maya Smoke
         id: live-smoke

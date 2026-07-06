@@ -129,6 +129,7 @@ test("check-only fixture reports planned host shape without mutation when pwsh i
     "python-venv",
     "launcher",
     "scheduled-task",
+    "scheduled-task-start",
   ]);
 });
 

@@ -298,7 +298,9 @@ func captureWindowsDesktopRecording(host mayaHostConfig, remoteRoot string, dura
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 	framesDir := filepath.Join(tempDir, "frames")
 	if err := os.MkdirAll(framesDir, 0o755); err != nil {
 		return nil, err

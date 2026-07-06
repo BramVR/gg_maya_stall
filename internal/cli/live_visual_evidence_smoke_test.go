@@ -151,7 +151,8 @@ func TestLiveVisualEvidenceProofWorkflowRequiresSmokePass(t *testing.T) {
 	text := string(content)
 	for _, want := range []string{
 		"TestOptInRealVisualEvidenceSmoke",
-		"TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke|TestOptInRealVisualEvidenceSmoke",
+		"run TestOptInRealVisualEvidenceSmoke -count=1",
+		"run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke' -count=1",
 		"failed_missing_host_config",
 	} {
 		if !strings.Contains(text, want) {

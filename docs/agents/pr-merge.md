@@ -27,10 +27,12 @@ real-product proof. For `live_maya_required=true`, the live Maya gate must pass
 against a configured real Windows Maya Host. Skipped, missing, or fake-only live
 proof is a failure.
 
-The live gate runs:
+The live gate runs the desktop Visual Evidence proof first, then the older SSH
+smokes:
 
 ```sh
-go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke|TestOptInRealVisualEvidenceSmoke' -count=1
+go test ./internal/cli -run TestOptInRealVisualEvidenceSmoke -count=1
+go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke' -count=1
 ```
 
 That opt-in smoke runs `maya-stall doctor --scenario smoke`, then one real

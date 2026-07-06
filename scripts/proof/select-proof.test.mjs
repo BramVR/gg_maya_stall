@@ -31,7 +31,7 @@ test("selector requires live Maya proof for live product behavior paths", () => 
   ]);
   assert.equal(manifest.live_maya_reasons[0].rule, "session-broker");
   assert.equal(manifest.gates.live_maya.status, "required");
-  assert.equal(manifest.gates.live_maya.command, "go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke|TestOptInRealVisualEvidenceSmoke' -count=1");
+  assert.equal(manifest.gates.live_maya.command, "go test ./internal/cli -run TestOptInRealVisualEvidenceSmoke -count=1 && go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke' -count=1");
   assert.equal(manifest.gates.local.status, "pending");
   assert.equal(manifest.gates.docs.status, "pending");
   assert.equal(manifest.gates.artifacts.status, "pending");

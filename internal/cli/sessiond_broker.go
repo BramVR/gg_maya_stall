@@ -106,22 +106,11 @@ func (broker ggMayaSessiondBroker) CaptureScreenshot(context runContext, request
 		return visualEvidenceArtifact{}, err
 	}
 	name = visualEvidenceNameForMediaType(name, mediaType)
-	relative := filepath.Join("screenshots", name)
-	path := filepath.Join(context.EvidenceDir, relative)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return visualEvidenceArtifact{}, err
-	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return visualEvidenceArtifact{}, err
-	}
-	if err := appendEvent(context.EventsPath, "broker.screenshot.captured", filepath.ToSlash(relative)); err != nil {
-		return visualEvidenceArtifact{}, err
-	}
-	return visualEvidenceArtifact{Kind: "screenshot", Path: filepath.ToSlash(relative), MediaType: mediaType}, nil
+	return registerVisualEvidenceBytes(context, "screenshot", name, mediaType, data)
 }
 
 func (broker ggMayaSessiondBroker) CaptureRecording(runContext, recordingRequest) (visualEvidenceArtifact, error) {
-	return visualEvidenceArtifact{}, fmt.Errorf("gg_mayasessiond does not expose recording capture; disable recording evidence or use screenshot/viewport capture")
+	return visualEvidenceArtifact{}, recordingDeferredError()
 }
 
 func (broker ggMayaSessiondBroker) validate() error {

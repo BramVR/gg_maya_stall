@@ -134,8 +134,6 @@ scenarios:
     evidence:
       screenshots:
         enabled: true
-      recording:
-        enabled: false
     validators:
       - type: scenarioResultStatus
         status: passed

@@ -2,7 +2,7 @@
 
 ## Problem Statement
 
-Maya plugin repositories need reliable real Autodesk Maya UI end-to-end testing on owned Windows machines. Existing generic CI and batch/headless Maya checks do not prove that a plugin works in an interactive Maya desktop, and failures are hard to debug without screenshots, video, logs, scenes, and structured output.
+Maya plugin repositories need reliable real Autodesk Maya UI end-to-end testing on owned Windows machines. Existing generic CI and batch/headless Maya checks do not prove that a plugin works in an interactive Maya desktop, and failures are hard to debug without screenshots, logs, scenes, and structured output.
 
 Crabbox already proves useful patterns for remote execution, static SSH, stop policy, doctor checks, visual evidence, artifacts, and publishing, but Maya Stall needs a Maya-specific product boundary: owned Maya Hosts, `gg_mayasessiond`, typed Run Payloads, Scenario Results, Maya version compatibility, and review-ready Evidence Bundles.
 
@@ -32,7 +32,7 @@ Maya Stall uses Crabbox as a reference and may selectively vendor MIT-licensed C
 
 9. As a developer, I want layered `doctor` checks, so that failures point to SSH, work root, Session Broker, Maya version, visual capture, Host Lock, or Scenario inputs instead of one vague readiness error.
 
-10. As a reviewer, I want screenshots and optional videos attached to each run, so that UI failures can be understood without reproducing them.
+10. As a reviewer, I want screenshots attached to each run, so that UI failures can be understood without reproducing them.
 
 11. As a reviewer, I want Evidence Bundles published through Review Comments on GitHub PRs or GitLab MRs, so that visual proof is part of the normal code review workflow.
 
@@ -68,7 +68,7 @@ Maya Stall uses Crabbox as a reference and may selectively vendor MIT-licensed C
 
 - Define a Session Broker interface and implement `gg_mayasessiond` as the only v1 broker.
 
-- Capture Visual Evidence through the Session Broker. The broker may use Crabbox-style Windows helpers such as interactive scheduled tasks internally.
+- Capture Visual Evidence through the Session Broker. The broker may use Crabbox-style Windows helpers such as interactive scheduled tasks internally. Recording is deferred for v1 until the Session Broker exposes real recording capture.
 
 - Use typed Run Payloads, not generic folder-plus-command execution.
 
@@ -98,7 +98,7 @@ Maya Stall uses Crabbox as a reference and may selectively vendor MIT-licensed C
 
 - Use layered Host Health checks and ship `doctor` as a core v1 command.
 
-- Ship a compact command surface: `init`, `doctor`, `run`, `status`, `stop`, `attach`, `screenshot`, `record`, `evidence collect`, and `evidence publish`.
+- Ship a compact command surface: `init`, `doctor`, `run`, `status`, `stop`, `attach`, `screenshot`, `evidence collect`, and `evidence publish`.
 
 - Use `attach` for run/session event and log following, not UI viewing. Keep UI viewer out of v1.
 
@@ -112,7 +112,7 @@ Maya Stall uses Crabbox as a reference and may selectively vendor MIT-licensed C
 
 - Leave S3/R2/MinIO and brokered upload backends for later unless a first consumer needs them immediately.
 
-- Use Crabbox-like timeout defaults where they map: kept-session TTL around 90 minutes, idle timeout around 30 minutes, screenshot settle around 2 seconds, normal recording around 10 seconds at 15 fps, and proof/failure clips around 5 seconds at 8 fps. Define Maya launch and Scenario timeouts separately.
+- Use Crabbox-like timeout defaults where they map: kept-session TTL around 90 minutes, idle timeout around 30 minutes, and screenshot settle around 2 seconds. Define Maya launch and Scenario timeouts separately.
 
 - Include a Windows Maya Host setup document.
 
@@ -136,7 +136,7 @@ Maya Stall uses Crabbox as a reference and may selectively vendor MIT-licensed C
 
 - Test run state, Stop Policy, Fresh Run, Debug Attach, and Kept Session behavior with fakes.
 
-- Test Evidence Bundle layout, artifact manifests, screenshots/video metadata, and missing-evidence failures.
+- Test Evidence Bundle layout, artifact manifests, screenshot metadata, and missing-evidence failures.
 
 - Test Review Comment markdown rendering once, then test GitHub and GitLab adapters as thin command/API shaping layers.
 
@@ -148,9 +148,9 @@ Maya Stall uses Crabbox as a reference and may selectively vendor MIT-licensed C
 
 - Test `init` output to ensure it writes repo-only config and no host credentials.
 
-- Add opt-in live smoke tests gated by explicit environment/configuration for real SSH Maya Host, `gg_mayasessiond`, screenshot/record capture, and one smoke Scenario.
+- Add opt-in live smoke tests gated by explicit environment/configuration for real SSH Maya Host, `gg_mayasessiond`, screenshot capture, and one smoke Scenario.
 
-- Live smoke tests must assert the Maya process is in the interactive Windows desktop session before accepting screenshot or recording proof.
+- Live smoke tests must assert the Maya process is in the interactive Windows desktop session before accepting screenshot proof.
 
 - PRs that change live product behavior must use a checked-in proof selector and Proof Manifest. Fake-first tests remain required, but they do not satisfy real-product proof; the live Maya proof gate must fail closed when required proof is skipped, missing, or fake-only.
 

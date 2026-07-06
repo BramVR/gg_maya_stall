@@ -136,14 +136,15 @@ Doctor layer:
 
 ### Visual Evidence
 
-- Confirm the Session Broker can capture screenshots and recordings from the same desktop session as the Maya UI Session.
-- Store screenshots, recordings, logs, Scenario Results, and declared outputs in each Evidence Bundle.
+- Confirm the Session Broker can capture screenshots from the same desktop session as the Maya UI Session.
+- Store screenshots, logs, Scenario Results, and declared outputs in each Evidence Bundle.
 - Treat viewport capture alone as insufficient if the Maya process is not in the interactive desktop.
 - Keep Visual Evidence enabled for CI proof unless a Scenario explicitly does not require it.
+- Recording evidence is deferred for v1 until the Session Broker exposes real recording capture.
 
 Doctor layer:
 
-- `visual-evidence`: screenshot or recording capture is unavailable through the Session Broker.
+- `visual-evidence`: screenshot capture is unavailable through the Session Broker, or recording evidence is configured even though it is deferred for v1.
 
 ### Evidence Store
 
@@ -215,7 +216,7 @@ To run the full live smoke, use:
 MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run)Smoke' -count=1
 ```
 
-`TestOptInRealSSHRunSmoke` first runs `doctor --scenario smoke`, then runs one generated `smoke` Scenario through the configured `gg_mayasessiond` Session Broker, requires screenshot Visual Evidence, and checks that the local Evidence Bundle contains `evidence.json`, events, logs, Scenario Result, and the captured screenshot. Recording is not required for this smoke while `gg_mayasessiond` exposes screenshot capture but not recording capture.
+`TestOptInRealSSHRunSmoke` first runs `doctor --scenario smoke`, then runs one generated `smoke` Scenario through the configured `gg_mayasessiond` Session Broker, requires screenshot Visual Evidence, and checks that the local Evidence Bundle contains `evidence.json`, events, logs, Scenario Result, and the captured screenshot. Recording is not part of the v1 live smoke while recording evidence is deferred.
 
 Both live smoke tests assert the Host Health report before accepting proof. Required live proof must show `ssh-sessiond`, `gg-mayasessiond`, interactive desktop readiness, and `viewport.capture` Visual Evidence readiness.
 

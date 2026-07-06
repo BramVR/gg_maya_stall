@@ -13,7 +13,7 @@ Bundle, and can publish a Review Comment with durable artifact links.
 
 It is for plugin maintainers, CI maintainers, Scenario authors, and reviewers
 who need more than headless pass/fail. Use it when a real Maya UI Session,
-screenshots, recordings, logs, and structured Scenario Results are part of the
+screenshots, logs, and structured Scenario Results are part of the
 proof. It is not a generic CI runner, a secrets manager, a hostile multi-tenant
 sandbox, or a replacement for repo-owned build steps.
 
@@ -31,7 +31,7 @@ consuming repo              maya-stall CLI             Windows Maya Host
 .maya-stall.yaml  ----->    select Scenario      SSH   clean run workspace
 payload paths                stage payload       ---->  Session Broker
 validators                   collect evidence    <----  Maya UI Session
-review target                publish comment            screenshots/video
+review target                publish comment            screenshots
 ```
 
 The CLI is a Go binary (`cmd/maya-stall`, `internal/cli`). The consuming repo
@@ -114,7 +114,7 @@ Pick whichever matches your intent:
 - **Use the CLI:** [Command reference](commands/README.md),
   [init](commands/init.md), [doctor](commands/doctor.md),
   [run](commands/run.md), [evidence](commands/evidence.md),
-  [review-comment](commands/review-comment.md).
+  [screenshot](commands/screenshot.md), [review-comment](commands/review-comment.md).
 - **Prepare real hosts:** [Windows Maya Host setup](setup/windows-maya-host.md).
 - **Understand the product boundary:** [Maya Stall V1 PRD](prd/0001-maya-stall-v1.md),
   [ADRs](adr/), [Source map](source-map.md).

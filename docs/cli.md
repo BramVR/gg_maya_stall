@@ -69,10 +69,10 @@ See [run](commands/run.md), [status](commands/status.md),
 
 ```text
 maya-stall screenshot [host flags]
-maya-stall record [host flags]
 ```
 
-See [screenshot](commands/screenshot.md) and [record](commands/record.md).
+See [screenshot](commands/screenshot.md). Recording is deferred for v1; the
+legacy `record` command returns an actionable unsupported error.
 
 ### Evidence And Review Publishing
 

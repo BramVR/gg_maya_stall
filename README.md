@@ -26,7 +26,7 @@ headless check is not enough:
 - CI maintainers who own Windows Maya Hosts and want deterministic UI evidence;
 - Scenario authors who want repo-owned scripts, outputs, and Validators without
   storing host credentials in the repo;
-- reviewers who need screenshots, recordings, logs, metadata, and structured
+- reviewers who need screenshots, logs, metadata, and structured
   Scenario Results linked from normal code review.
 
 Use Maya Stall for owned-host Maya UI proof. Do not use it as a generic remote
@@ -41,7 +41,7 @@ consuming repo              maya-stall CLI             Windows Maya Host
 .maya-stall.yaml  ----->    select Scenario      SSH   clean run workspace
 payload paths                stage payload       ---->  Session Broker
 validators                   collect evidence    <----  Maya UI Session
-review target                publish comment            screenshots/video
+review target                publish comment            screenshots
 ```
 
 - **CLI** - Go binary under `cmd/maya-stall`. Owns config loading, Scenario
@@ -86,12 +86,11 @@ Capture standalone Visual Evidence:
 
 ```sh
 maya-stall screenshot
-maya-stall record
 ```
 
-The fake broker supports screenshots and recordings. The `gg_mayasessiond`
-broker captures screenshots through `viewport.capture`; recording reports an
-actionable unsupported error until the daemon exposes a recording tool.
+Maya Stall v1 supports screenshot Visual Evidence. Recording is deferred until
+the Session Broker exposes real recording capture, so `maya-stall record`
+returns an actionable unsupported error.
 
 Prepare real hosts with the
 [Windows Maya Host setup checklist](docs/setup/windows-maya-host.md), then keep

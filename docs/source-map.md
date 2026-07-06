@@ -57,7 +57,7 @@ descriptive; code is the source-backed check when behavior claims disagree.
 
 ## Visual Evidence And Publishing
 
-- Standalone screenshot and recording commands: `internal/cli/visual_evidence.go`
+- Standalone screenshot command and deferred recording behavior: `internal/cli/visual_evidence.go`
 - Evidence Bundle publishing, filesystem Evidence Store copying, URL generation,
   artifact manifest, and review comment markdown: `internal/cli/publish.go`
 - GitHub and GitLab Review Comment rendering, marker handling, platform clients,

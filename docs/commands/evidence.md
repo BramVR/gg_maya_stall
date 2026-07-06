@@ -26,8 +26,8 @@ Validator failures are recorded in `evidence.json` and mark the run failed.
 
 The fake broker supports configured Visual Evidence. With
 `broker.type: gg-mayasessiond`, screenshot Visual Evidence uses
-`viewport.capture`; recording is not required for live smoke while the daemon
-exposes screenshot capture but not recording capture.
+`viewport.capture`. Recording evidence is deferred for v1 until the Session
+Broker exposes real recording capture.
 
 ## publish
 

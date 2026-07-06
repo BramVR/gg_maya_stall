@@ -290,7 +290,6 @@ Usage:
   maya-stall doctor [--host-config <path>] [--target-profile <name>] [--host <id>] [--scenario <name>]
   maya-stall run [--host-config <path>] [--target-profile <name>] [--host <id>] [--host-lock-wait <duration>|--host-lock-fail-fast] [--keep-on-failure|--stop-after <success|failure|always|never>] <scenario>
   maya-stall screenshot [--host-config <path>] [--target-profile <name>] [--host <id>]
-  maya-stall record [--host-config <path>] [--target-profile <name>] [--host <id>]
   maya-stall evidence collect [--host-config <path>] [--target-profile <name>] [--host <id>] <scenario>
   maya-stall evidence publish --destination <path> --base-url <url> <evidence-bundle-dir>
   maya-stall review-comment github --repo <owner/name> --pr <number> [--token-env <name>] [--api-url <url>] [--dry-run] <published-evidence-dir>
@@ -305,7 +304,6 @@ Commands:
   evidence collect   run a Scenario and write a complete Evidence Bundle
   evidence publish   copy an Evidence Bundle to a filesystem Evidence Store
   init      write a repo-only sample .maya-stall.yaml
-  record    capture a Session Broker recording artifact
   review-comment   create or update a GitHub PR or GitLab MR Review Comment
   run       run a named Scenario with fake or configured SSH transport
   screenshot   capture a Session Broker screenshot artifact
@@ -503,6 +501,4 @@ scenarios:
     evidence:
       screenshots:
         enabled: true
-      recording:
-        enabled: false
 `

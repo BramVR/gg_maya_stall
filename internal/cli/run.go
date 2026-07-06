@@ -125,6 +125,7 @@ type evidenceBundle struct {
 	Payload        []manifestPayload        `json:"payload"`
 	VisualEvidence []visualEvidenceArtifact `json:"visualEvidence,omitempty"`
 	Outputs        []outputArtifact         `json:"outputs,omitempty"`
+	Artifacts      []evidenceArtifact       `json:"artifacts,omitempty"`
 	Validators     []validatorResult        `json:"validators,omitempty"`
 }
 
@@ -151,11 +152,13 @@ func runScenario(repoDir string, options runOptions, runtime runRuntime) (outcom
 
 func rejectUnsupportedEvidenceConfig(broker sessionBroker, scenario scenarioConfig) error {
 	if scenario.Evidence.Recording.Enabled {
-		if _, ok := broker.(ggMayaSessiondBroker); ok {
-			return fmt.Errorf("gg_mayasessiond does not expose recording capture; disable recording evidence or use screenshot/viewport capture")
-		}
+		return recordingDeferredError()
 	}
 	return nil
+}
+
+func recordingDeferredError() error {
+	return fmt.Errorf("recording Visual Evidence is deferred for v1 until the Session Broker exposes real recording capture; use screenshot Visual Evidence")
 }
 
 func rejectMismatchedRuntimeOverride(resolved resolvedRuntime, runtime runRuntime) error {
@@ -176,56 +179,6 @@ func rejectInvalidSessionBroker(broker sessionBroker) error {
 		return broker.validate()
 	}
 	return nil
-}
-
-func collectScenarioVisualEvidence(broker sessionBroker, context runContext, scenarioName string, config evidenceConfig) ([]visualEvidenceArtifact, error) {
-	var artifacts []visualEvidenceArtifact
-	if config.Screenshots.Enabled {
-		capturer, ok := broker.(screenshotCapturer)
-		if !ok {
-			return nil, fmt.Errorf("Session Broker does not support screenshot capture")
-		}
-		artifact, err := capturer.CaptureScreenshot(context, screenshotRequest{Name: visualEvidenceFileName(scenarioName, ".png")})
-		if err != nil {
-			return nil, err
-		}
-		artifacts = append(artifacts, artifact)
-	}
-	if config.Recording.Enabled {
-		capturer, ok := broker.(recordingCapturer)
-		if !ok {
-			return nil, fmt.Errorf("Session Broker does not support recording capture")
-		}
-		artifact, err := capturer.CaptureRecording(context, recordingRequest{Name: visualEvidenceFileName(scenarioName, ".mp4"), Duration: defaultRecordingDuration, FPS: defaultRecordingFPS})
-		if err != nil {
-			return nil, err
-		}
-		artifacts = append(artifacts, artifact)
-	}
-	return artifacts, nil
-}
-
-func visualEvidenceFileName(name string, extension string) string {
-	var builder strings.Builder
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z':
-			builder.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			builder.WriteRune(r)
-		case r >= '0' && r <= '9':
-			builder.WriteRune(r)
-		case r == '.' || r == '_' || r == '-':
-			builder.WriteRune(r)
-		default:
-			builder.WriteByte('-')
-		}
-	}
-	clean := strings.Trim(builder.String(), ".-")
-	if clean == "" {
-		clean = "scenario"
-	}
-	return clean + extension
 }
 
 func isValidStopAfter(value string) bool {
@@ -758,16 +711,17 @@ func writeEvidenceBundle(context runContext, manifest runManifest, scenario scen
 		TargetProfile:  manifest.TargetProfile,
 		Host:           manifest.Host,
 		Runtime:        manifest.Runtime,
-		Manifest:       "manifest.json",
-		Events:         "events.jsonl",
-		Log:            filepath.Join("logs", "session.log"),
-		ScenarioResult: "scenario-result.json",
+		Manifest:       evidenceManifestFileName,
+		Events:         evidenceEventsFileName,
+		Log:            evidenceLogPath,
+		ScenarioResult: evidenceScenarioResultFileName,
 		Payload:        manifest.Payload,
 		VisualEvidence: visualEvidence,
 		Outputs:        outputs,
 		Validators:     validators,
 	}
-	return writeJSONFile(filepath.Join(context.EvidenceDir, "evidence.json"), bundle)
+	bundle.Artifacts = buildEvidenceBundleCatalog(bundle)
+	return writeJSONFile(filepath.Join(context.EvidenceDir, evidenceBundleFileName), bundle)
 }
 
 func mergeVisualEvidence(preferred []visualEvidenceArtifact, discovered []visualEvidenceArtifact) []visualEvidenceArtifact {
@@ -893,26 +847,6 @@ func copyEvidenceOutputFile(context runContext, source string, relativePath stri
 	seen[clean] = true
 	*outputs = append(*outputs, outputArtifact{Path: clean, MediaType: mediaTypeForPath(clean)})
 	return nil
-}
-
-func isReservedEvidenceArtifactPath(path string) bool {
-	slashed := strings.ToLower(filepath.ToSlash(path))
-	for _, reserved := range []string{
-		"evidence.json",
-		"manifest.json",
-		"events.jsonl",
-		"scenario-result.json",
-		"artifact-manifest.json",
-		"review-comment.md",
-		"logs",
-		"screenshots",
-		"recordings",
-	} {
-		if slashed == reserved || strings.HasPrefix(slashed, reserved+"/") {
-			return true
-		}
-	}
-	return false
 }
 
 func discoverVisualEvidence(evidenceDir string) ([]visualEvidenceArtifact, error) {
@@ -1070,48 +1004,18 @@ func (broker fakeSessionBroker) RunScenario(context runContext, scenario scenari
 func (fakeSessionBroker) CaptureScreenshot(context runContext, request screenshotRequest) (visualEvidenceArtifact, error) {
 	name := request.Name
 	if name == "" {
-		name = "screenshot.png"
+		name = evidenceDefaultScreenshotName
 	}
-	name = filepath.Base(filepath.ToSlash(name))
-	if name == "." || name == ".." || name == "" {
-		name = "screenshot.png"
-	}
-	relative := filepath.Join("screenshots", name)
-	path := filepath.Join(context.EvidenceDir, relative)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return visualEvidenceArtifact{}, err
-	}
-	if err := os.WriteFile(path, []byte("fake screenshot\n"), 0o644); err != nil {
-		return visualEvidenceArtifact{}, err
-	}
-	if err := appendEvent(context.EventsPath, "broker.screenshot.captured", filepath.ToSlash(relative)); err != nil {
-		return visualEvidenceArtifact{}, err
-	}
-	return visualEvidenceArtifact{Kind: "screenshot", Path: filepath.ToSlash(relative), MediaType: "image/png"}, nil
+	return registerVisualEvidenceBytes(context, "screenshot", name, "image/png", []byte("fake screenshot\n"))
 }
 
 func (fakeSessionBroker) CaptureRecording(context runContext, request recordingRequest) (visualEvidenceArtifact, error) {
 	name := request.Name
 	if name == "" {
-		name = "recording.mp4"
-	}
-	name = filepath.Base(filepath.ToSlash(name))
-	if name == "." || name == ".." || name == "" {
-		name = "recording.mp4"
-	}
-	relative := filepath.Join("recordings", name)
-	path := filepath.Join(context.EvidenceDir, relative)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return visualEvidenceArtifact{}, err
+		name = evidenceDefaultRecordingName
 	}
 	content := fmt.Sprintf("fake recording duration=%s fps=%d\n", request.Duration, request.FPS)
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		return visualEvidenceArtifact{}, err
-	}
-	if err := appendEvent(context.EventsPath, "broker.recording.captured", filepath.ToSlash(relative)); err != nil {
-		return visualEvidenceArtifact{}, err
-	}
-	return visualEvidenceArtifact{Kind: "recording", Path: filepath.ToSlash(relative), MediaType: "video/mp4"}, nil
+	return registerVisualEvidenceBytes(context, "recording", name, "video/mp4", []byte(content))
 }
 
 type invalidSessionBroker struct {

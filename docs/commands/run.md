@@ -17,7 +17,8 @@ maya-stall run --stop-after never smoke
 
 ## Behavior
 
-The run flow is:
+The command calls the Fresh Run lifecycle, which owns this setup, execute, and
+settle flow:
 
 1. Load Repo Run Config.
 2. Select and normalize the named Scenario.

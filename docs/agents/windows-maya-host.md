@@ -113,7 +113,7 @@ ssh desktop-mtiofol 'powershell -NoProfile -Command "$j=Get-Content C:\maya-stal
 ## Development Implications
 
 - `doctor` needs an explicit interactive-desktop/session check, not only `maya.exe` found.
-- Live smoke tests must assert `maya.exe` is in `Console` session before accepting screenshots or recordings.
+- Live smoke tests must assert `maya.exe` is in `Console` session before accepting screenshots.
 - The broker adapter should treat service-session Maya as unhealthy for UI runs.
 - Host paths, user, Maya version, scheduled-task strategy, and state dirs must be configurable.
 - Keep this host fixture out of default tests; use it only for opt-in live smoke.

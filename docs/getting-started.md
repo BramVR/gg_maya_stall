@@ -62,8 +62,6 @@ scenarios:
     evidence:
       screenshots:
         enabled: true
-      recording:
-        enabled: false
     validators:
       - type: scenarioResultStatus
         status: passed
@@ -159,7 +157,6 @@ Capture standalone visual evidence when debugging:
 
 ```sh
 maya-stall screenshot
-maya-stall record
 ```
 
 Publish the bundle to a filesystem Evidence Store:

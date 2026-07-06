@@ -58,6 +58,7 @@
       "id": "evidence-bundle",
       "reason": "Evidence Bundle, manifest, logs, publishing, or Review Comment proof changed",
       "paths": [
+        "internal/cli/evidence_bundle.go",
         "internal/cli/publish.go",
         "internal/cli/review_comment.go"
       ]

@@ -1,21 +1,8 @@
 # record
 
-`maya-stall record` captures a standalone recording artifact through the Session
-Broker.
+`maya-stall record` is deferred for v1.
 
-```sh
-maya-stall record
-maya-stall record --host-config ci-hosts.yaml --target-profile ci
-maya-stall record --host-config ci-hosts.yaml --target-profile ci --host maya-win-01
-```
-
-Normal recording defaults follow the selected Crabbox timing slice: 10 seconds
-at 15 fps. Other timing defaults remain decision records until implemented.
-
-The fake Session Broker supports recordings. With
-`broker.type: gg-mayasessiond`, recording reports an actionable unsupported
-error until the daemon exposes a recording tool. SSH Maya Hosts must use the
-`ssh-sessiond` runtime profile and do not fall back to fake recording capture.
-
-The command writes a local Evidence Bundle under `artifacts/maya-stall/` with
-the resolved runtime metadata.
+Maya Stall v1 supports screenshot Visual Evidence through the Session Broker.
+Recording support needs real broker-backed recording capture before it can be a
+proof surface. Until then, `maya-stall record` fails before creating an Evidence
+Bundle and reports that recording Visual Evidence is deferred for v1.

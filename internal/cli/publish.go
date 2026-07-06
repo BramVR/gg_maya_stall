@@ -134,7 +134,7 @@ func publishEvidenceBundle(repoDir string, options evidencePublishOptions) (publ
 }
 
 func readEvidenceBundleFile(bundleDir string) (evidenceBundle, error) {
-	content, err := os.ReadFile(filepath.Join(bundleDir, "evidence.json"))
+	content, err := os.ReadFile(filepath.Join(bundleDir, evidenceBundleFileName))
 	if err != nil {
 		return evidenceBundle{}, err
 	}
@@ -196,7 +196,11 @@ func replacePublishedDir(bundleDir string, publishedDir string, populate func(st
 
 func buildPublishedArtifactManifest(publishedDir string, bundle evidenceBundle, baseURL string) (publishedArtifactManifest, error) {
 	var artifacts []publishedArtifact
-	add := func(label string, kind string, path string, mediaType string) error {
+	add := func(artifact evidenceArtifact) error {
+		label := artifact.Label
+		kind := artifact.Kind
+		path := artifact.Path
+		mediaType := artifact.MediaType
 		if path == "" {
 			return nil
 		}
@@ -220,32 +224,8 @@ func buildPublishedArtifactManifest(publishedDir string, bundle evidenceBundle, 
 		})
 		return nil
 	}
-	for _, artifact := range bundle.VisualEvidence {
-		if err := add("Visual Evidence", artifact.Kind, artifact.Path, artifact.MediaType); err != nil {
-			return publishedArtifactManifest{}, err
-		}
-	}
-	if err := add("logs", "log", bundle.Log, "text/plain"); err != nil {
-		return publishedArtifactManifest{}, err
-	}
-	if err := add("logs", "events", bundle.Events, "application/x-ndjson"); err != nil {
-		return publishedArtifactManifest{}, err
-	}
-	for _, path := range []string{"evidence.json", bundle.Manifest, bundle.ScenarioResult} {
-		if err := add("metadata", "metadata", path, "application/json"); err != nil {
-			return publishedArtifactManifest{}, err
-		}
-	}
-	outputs := bundle.Outputs
-	if len(outputs) == 0 {
-		discovered, err := discoverPublishedOutputs(publishedDir)
-		if err != nil {
-			return publishedArtifactManifest{}, err
-		}
-		outputs = discovered
-	}
-	for _, output := range outputs {
-		if err := add("outputs", "output", output.Path, output.MediaType); err != nil {
+	for _, artifact := range evidenceBundleCatalog(bundle) {
+		if err := add(artifact); err != nil {
 			return publishedArtifactManifest{}, err
 		}
 	}
@@ -264,37 +244,6 @@ func buildPublishedArtifactManifest(publishedDir string, bundle evidenceBundle, 
 		BaseURL:       baseURL,
 		Artifacts:     artifacts,
 	}, nil
-}
-
-func discoverPublishedOutputs(publishedDir string) ([]outputArtifact, error) {
-	root := filepath.Join(publishedDir, "outputs")
-	var outputs []outputArtifact
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		if err != nil || entry.IsDir() {
-			return err
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if !info.Mode().IsRegular() {
-			return nil
-		}
-		relative, err := filepath.Rel(publishedDir, path)
-		if err != nil {
-			return err
-		}
-		outputPath := filepath.ToSlash(relative)
-		outputs = append(outputs, outputArtifact{Path: outputPath, MediaType: mediaTypeForPath(outputPath)})
-		return nil
-	})
-	sort.Slice(outputs, func(i, j int) bool {
-		return outputs[i].Path < outputs[j].Path
-	})
-	return outputs, err
 }
 
 func renderReviewMarkdown(bundle evidenceBundle, manifest publishedArtifactManifest) string {
@@ -404,23 +353,6 @@ func cleanPublishedRelativePath(path string) (string, error) {
 		return "", fmt.Errorf("published artifact path %q must be relative", path)
 	}
 	return clean, nil
-}
-
-func mediaTypeForPath(path string) string {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".json":
-		return "application/json"
-	case ".txt", ".log":
-		return "text/plain"
-	case ".png":
-		return "image/png"
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".mp4":
-		return "video/mp4"
-	default:
-		return "application/octet-stream"
-	}
 }
 
 func markdownText(value string) string {

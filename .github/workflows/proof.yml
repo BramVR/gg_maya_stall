@@ -216,7 +216,7 @@ jobs:
       - name: Prepare Consuming Repo Smoke
         id: consumer-repo
         env:
-          SOURCE_REPO: ${{ vars.MAYA_STALL_LIVE_CONSUMING_REPO_SMOKE_DIR }}
+          SOURCE_REPO: ${{ secrets.MAYA_STALL_LIVE_CONSUMING_REPO_SMOKE_DIR || vars.MAYA_STALL_LIVE_CONSUMING_REPO_SMOKE_DIR }}
         run: |
           if [ -z "$SOURCE_REPO" ]; then
             echo "::error::MAYA_STALL_LIVE_CONSUMING_REPO_SMOKE_DIR is required for live Maya proof"

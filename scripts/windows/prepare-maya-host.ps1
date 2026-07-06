@@ -225,8 +225,25 @@ function Ensure-Launcher {
     if ($parent) {
         New-Item -ItemType Directory -Force -Path $parent | Out-Null
     }
-    Set-Content -LiteralPath $Path -Value $Content -Encoding ASCII
+    $encoding = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($Path, $Content, $encoding)
     Add-PrepareStep "launcher" $Path "changed" "wrote UI Session Broker launcher" $true
+}
+
+function Test-LauncherCanChange {
+    param([string]$Path, [string]$Content)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $true
+    }
+    $existing = Get-Content -LiteralPath $Path -Raw
+    if ((Normalize-LauncherContent $existing) -eq (Normalize-LauncherContent $Content)) {
+        return $true
+    }
+    if (($existing -notlike "*$Marker*") -and (-not $Force)) {
+        Add-PrepareStep "launcher" $Path "blocked" "existing launcher is not marked as Maya Stall generated; rerun with -Force to replace it" $false
+        return $false
+    }
+    return $true
 }
 
 function Ensure-Venv {
@@ -319,13 +336,28 @@ Assert-ExistingPath $MayaExe "maya-exe" "Leaf"
 if ((-not $Ready) -and (-not $CheckOnly)) {
     Add-PrepareStep "dependent-setup" $WorkRoot "skipped" "required paths are missing; not mutating virtual environment, launcher, or scheduled task" $false
 } else {
-    Ensure-Venv
     $launcherContent = New-LauncherContent $SessiondRepo $VenvPython $StateDir $MayaExe $McpSource $RunRoot $WaitTimeoutSeconds
-    Ensure-Launcher $LauncherPath $launcherContent
-    if ($Ready) {
-        Ensure-ScheduledTask
+    $launcherCanChange = Test-LauncherCanChange $LauncherPath $launcherContent
+    if ($CheckOnly) {
+        if (-not $launcherCanChange) {
+            Add-PrepareStep "scheduled-task" $TaskName "skipped" "launcher is blocked; not creating or updating scheduled task" $false
+        } else {
+            Ensure-Launcher $LauncherPath $launcherContent
+            Ensure-Venv
+            Ensure-ScheduledTask
+        }
     } else {
-        Add-PrepareStep "scheduled-task" $TaskName "skipped" "launcher is blocked; not creating or updating scheduled task" $false
+        if ($Ready) {
+            Ensure-Venv
+        }
+        if ($Ready) {
+            Ensure-Launcher $LauncherPath $launcherContent
+        }
+        if ($Ready) {
+            Ensure-ScheduledTask
+        } else {
+            Add-PrepareStep "scheduled-task" $TaskName "skipped" "launcher is blocked; not creating or updating scheduled task" $false
+        }
     }
 }
 

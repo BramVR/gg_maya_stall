@@ -16,11 +16,24 @@ test("prepare script exposes safe host-admin modes", () => {
   assert.match(script, /existing launcher is not marked as Maya Stall generated/);
   assert.match(script, /rerun with -Force to replace it/);
   assert.match(script, /Normalize-LauncherContent/);
+  assert.match(script, /Test-LauncherCanChange/);
   assert.match(script, /Invoke-CheckedNativeCommand/);
   assert.match(script, /Start-Process/);
   assert.match(script, /RedirectStandardOutput/);
   assert.match(script, /Quote-NativeArgument/);
+  assert.match(script, /UTF8Encoding/);
   assert.match(script, /if \(-not \$Json\)/);
+});
+
+test("apply mode validates launcher replacement before venv but writes launcher after venv", () => {
+  const preflightIndex = script.indexOf("$launcherCanChange = Test-LauncherCanChange");
+  const applyBlockIndex = script.indexOf("} else {\n        if ($Ready) {", preflightIndex);
+  const applyVenvIndex = script.indexOf("Ensure-Venv", applyBlockIndex);
+  const applyLauncherIndex = script.indexOf("Ensure-Launcher $LauncherPath $launcherContent", applyVenvIndex);
+  assert.ok(preflightIndex > -1, "launcher replacement preflight should be present");
+  assert.ok(applyBlockIndex > preflightIndex, "apply mode branch should follow launcher preflight");
+  assert.ok(applyVenvIndex > preflightIndex, "apply mode should create/install venv after launcher preflight");
+  assert.ok(applyLauncherIndex > applyVenvIndex, "apply mode should write launcher after venv succeeds");
 });
 
 test("prepare script creates the expected work-root layout", () => {
@@ -48,7 +61,7 @@ test("generated launcher starts gg_mayasessiond with UI broker paths", () => {
 });
 
 test("scheduled task command is interactive and idempotent", () => {
-  const taskArgs = script.match(/return @\(([^;]+?)\)\n}\n\nfunction Ensure-ScheduledTask/s)?.[1] ?? "";
+  const taskArgs = script.match(/return @\(([^;]+?)\)\r?\n}\r?\n\r?\nfunction Ensure-ScheduledTask/s)?.[1] ?? "";
   for (const token of ["/Create", "/TN", "/TR", "/SC", "ONLOGON", "/RL", "HIGHEST", "/IT", "/F"]) {
     assert.match(taskArgs, new RegExp(escapeRegExp(token)));
   }
@@ -126,11 +139,61 @@ test("check-only fixture reports planned host shape without mutation when pwsh i
     "run-root",
     "artifact-root",
     "sessiond-state",
-    "python-venv",
     "launcher",
+    "python-venv",
     "scheduled-task",
     "scheduled-task-start",
   ]);
+});
+
+test("check-only fixture keeps dependent plan visible when a manual prerequisite is missing", { skip: !hasCommand("pwsh") }, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "maya-stall-prepare-missing-"));
+  const sessiondRepo = path.join(dir, "GG_MayaSessiond");
+  const mcpSource = path.join(dir, "GG_MayaMCP");
+  const mayaExe = path.join(dir, "maya.exe");
+  const workRoot = path.join(dir, "maya-stall");
+  const venvPath = path.join(dir, "venv");
+  const launcherPath = path.join(dir, "start-sessiond-ui.cmd");
+  fs.mkdirSync(sessiondRepo);
+  fs.writeFileSync(mayaExe, "");
+
+  const raw = execFileSync("pwsh", [
+    "-NoProfile",
+    "-File",
+    scriptPath,
+    "-CheckOnly",
+    "-Json",
+    "-SkipSessiondInstall",
+    "-WorkRoot",
+    workRoot,
+    "-VenvPath",
+    venvPath,
+    "-LauncherPath",
+    launcherPath,
+    "-SessiondRepo",
+    sessiondRepo,
+    "-McpSource",
+    mcpSource,
+    "-MayaExe",
+    mayaExe,
+    "-HostId",
+    "maya-win-fixture",
+    "-TargetProfile",
+    "ci",
+    "-SshHost",
+    "maya-win-fixture",
+    "-SshUser",
+    "maya-runner",
+  ], { cwd: root, encoding: "utf8" });
+
+  const result = JSON.parse(raw);
+  assert.equal(result.ready, false);
+  const byKind = new Map(result.plan.map((step) => [step.kind, step]));
+  assert.equal(byKind.get("GG_MayaMCP")?.status, "missing");
+  assert.equal(byKind.get("launcher")?.status, "planned");
+  assert.equal(byKind.get("python-venv")?.status, "planned");
+  assert.equal(byKind.get("scheduled-task")?.status, "planned");
+  assert.equal(byKind.get("scheduled-task-start")?.status, "planned");
 });
 
 function hasCommand(command) {

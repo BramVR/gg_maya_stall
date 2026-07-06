@@ -23,6 +23,7 @@ test("prepare script exposes safe host-admin modes", () => {
   assert.match(script, /Quote-NativeArgument/);
   assert.match(script, /UTF8Encoding/);
   assert.match(script, /if \(-not \$Json\)/);
+  assert.doesNotMatch(script, /C:\\PROJECTS\\GG/);
 });
 
 test("apply mode validates launcher replacement before venv but writes launcher after venv", () => {

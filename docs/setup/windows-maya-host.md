@@ -17,8 +17,8 @@ already-licensed Windows Maya Hosts:
 powershell -ExecutionPolicy Bypass -File scripts/windows/prepare-maya-host.ps1 `
   -CheckOnly `
   -MayaExe "C:\Program Files\Autodesk\Maya2025\bin\maya.exe" `
-  -SessiondRepo "C:\PROJECTS\GG\GG_MayaSessiond" `
-  -McpSource "C:\PROJECTS\GG\GG_MayaMCP"
+  -SessiondRepo "C:\maya-stall-src\GG_MayaSessiond" `
+  -McpSource "C:\maya-stall-src\GG_MayaMCP"
 ```
 
 Run it on the Windows Maya Host after OpenSSH, the Windows account,
@@ -56,8 +56,8 @@ Example apply:
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/windows/prepare-maya-host.ps1 `
   -MayaExe "C:\Program Files\Autodesk\Maya2025\bin\maya.exe" `
-  -SessiondRepo "C:\PROJECTS\GG\GG_MayaSessiond" `
-  -McpSource "C:\PROJECTS\GG\GG_MayaMCP" `
+  -SessiondRepo "C:\maya-stall-src\GG_MayaSessiond" `
+  -McpSource "C:\maya-stall-src\GG_MayaMCP" `
   -HostId "maya-win-01" `
   -TargetProfile "ci" `
   -SshHost "maya-win-01" `
@@ -185,8 +185,8 @@ broker:
   type: gg-mayasessiond
   stateDir: C:/maya-stall/sessiond-ui
   python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
-  repo: C:/PROJECTS/GG/GG_MayaSessiond
-  mcpSource: C:/PROJECTS/GG/GG_MayaMCP
+  repo: C:/maya-stall-src/GG_MayaSessiond
+  mcpSource: C:/maya-stall-src/GG_MayaMCP
 ```
 
 Maya Stall invokes `gg_maya_sessiond.cli` on the Windows host through the same SSH transport. Runs stage declared payloads under `workRoot/runs/<run-id>/`, execute a staged wrapper with `script.execute`, download declared outputs from the remote workspace, and capture screenshots with `viewport.capture`. Remote Scenario execution through `script.execute` is capped at 10 minutes. The Session Broker launcher must allow the staged wrapper directory; otherwise doctor fails the `session-broker` layer with a `script.execute` repair hint.

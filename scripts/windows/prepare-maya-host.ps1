@@ -11,8 +11,8 @@ create Windows users, store credentials, or write repo config.
 [CmdletBinding()]
 param(
     [string]$WorkRoot = "C:\maya-stall",
-    [string]$SessiondRepo = "C:\PROJECTS\GG\GG_MayaSessiond",
-    [string]$McpSource = "C:\PROJECTS\GG\GG_MayaMCP",
+    [string]$SessiondRepo = "C:\maya-stall-src\GG_MayaSessiond",
+    [string]$McpSource = "C:\maya-stall-src\GG_MayaMCP",
     [Parameter(Mandatory = $true)]
     [string]$MayaExe,
     [string]$VenvPath,

@@ -121,7 +121,7 @@ func (broker ggMayaSessiondBroker) CaptureScreenshot(context runContext, request
 	defer func() {
 		_ = broker.removeRemotePath(remoteRoot)
 	}()
-	data, err := captureWindowsDesktopScreenshot(sshWindowsDesktopTransport{host: broker.host}, remoteRoot)
+	data, err := captureWindowsDesktopScreenshot(sshWindowsDesktopTransport(broker.host), remoteRoot)
 	if err != nil {
 		return visualEvidenceArtifact{}, err
 	}
@@ -140,7 +140,7 @@ func (broker ggMayaSessiondBroker) CaptureRecording(context runContext, request 
 	defer func() {
 		_ = broker.removeRemotePath(remoteRoot)
 	}()
-	data, err := captureWindowsDesktopRecording(sshWindowsDesktopTransport{host: broker.host}, remoteRoot, request.Duration, request.FPS, "")
+	data, err := captureWindowsDesktopRecording(sshWindowsDesktopTransport(broker.host), remoteRoot, request.Duration, request.FPS, "")
 	if err != nil {
 		return visualEvidenceArtifact{}, err
 	}

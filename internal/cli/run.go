@@ -168,7 +168,7 @@ func rejectUnsupportedEvidenceConfig(broker sessionBroker, scenario scenarioConf
 }
 
 func recordingDeferredError() error {
-	return fmt.Errorf("Session Broker does not support recording capture")
+	return fmt.Errorf("session broker does not support recording capture")
 }
 
 func rejectMismatchedRuntimeOverride(resolved resolvedRuntime, runtime runRuntime) error {

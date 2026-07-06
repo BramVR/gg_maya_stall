@@ -19,16 +19,14 @@ type windowsDesktopTransport interface {
 	WritePowerShellScript(remotePath string, content string, timeout time.Duration) error
 }
 
-type sshWindowsDesktopTransport struct {
-	host mayaHostConfig
-}
+type sshWindowsDesktopTransport mayaHostConfig
 
 func (transport sshWindowsDesktopTransport) RunPowerShell(script string, timeout time.Duration) ([]byte, error) {
-	return runSSHCommandOutput(transport.host, encodedPowerShellCommand(script), timeout)
+	return runSSHCommandOutput(mayaHostConfig(transport), encodedPowerShellCommand(script), timeout)
 }
 
 func (transport sshWindowsDesktopTransport) WritePowerShellScript(remotePath string, content string, timeout time.Duration) error {
-	return writeRemotePowerShellScript(transport.host, remotePath, content, timeout)
+	return writeRemotePowerShellScript(mayaHostConfig(transport), remotePath, content, timeout)
 }
 
 func captureWindowsDesktopScreenshot(transport windowsDesktopTransport, remoteRoot string) ([]byte, error) {
@@ -301,7 +299,7 @@ func extractWindowsDesktopFrameArchive(zipBytes []byte, framesDir string) error 
 		count++
 	}
 	if count == 0 {
-		return fmt.Errorf("Windows desktop frame archive contained no frames")
+		return fmt.Errorf("windows desktop frame archive contained no frames")
 	}
 	return nil
 }

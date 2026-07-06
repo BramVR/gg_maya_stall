@@ -35,7 +35,7 @@ descriptive; code is the source-backed check when behavior claims disagree.
   `scripts/windows/prepare-maya-host.ps1`,
   `scripts/windows/prepare-maya-host.test.mjs`
 - `gg_mayasessiond` Session Broker adapter, `script.execute` wrapper behavior,
-  interactive session checks, and `viewport.capture` evidence:
+  interactive session checks, and desktop Visual Evidence:
   `internal/cli/sessiond_broker.go`
 - Platform process helpers: `internal/cli/process_posix.go`,
   `internal/cli/process_windows.go`
@@ -60,7 +60,9 @@ descriptive; code is the source-backed check when behavior claims disagree.
 
 ## Visual Evidence And Publishing
 
-- Standalone screenshot command and deferred recording behavior: `internal/cli/visual_evidence.go`
+- Standalone screenshot/record commands and Visual Evidence planning:
+  `internal/cli/visual_evidence.go`,
+  `internal/cli/windows_desktop_capture.go`
 - Evidence Bundle publishing, filesystem Evidence Store copying, URL generation,
   artifact manifest, and review comment markdown: `internal/cli/publish.go`
 - GitHub and GitLab Review Comment rendering, marker handling, platform clients,

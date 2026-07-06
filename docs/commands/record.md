@@ -1,8 +1,19 @@
 # record
 
-`maya-stall record` is deferred for v1.
+`maya-stall record` captures a standalone MP4 desktop recording artifact through
+the Session Broker.
 
-Maya Stall v1 supports screenshot Visual Evidence through the Session Broker.
-Recording support needs real broker-backed recording capture before it can be a
-proof surface. Until then, `maya-stall record` fails before creating an Evidence
-Bundle and reports that recording Visual Evidence is deferred for v1.
+```sh
+maya-stall record
+maya-stall record --host-config ci-hosts.yaml --target-profile ci
+maya-stall record --host-config ci-hosts.yaml --target-profile ci --host maya-win-01
+```
+
+Default commands use the fake Session Broker. Real SSH hosts use an interactive
+Windows scheduled task to capture desktop frames from the same visible desktop
+that owns Maya, download the frame archive, and encode `recordings/recording.mp4`
+locally with `ffmpeg`. The default recording duration is 10 seconds at 15 fps.
+
+The command writes a local Evidence Bundle under `artifacts/maya-stall/`.
+`evidence.json` records the artifact kind, relative path, media type, duration,
+FPS, selected Target Profile, and selected Maya Host.

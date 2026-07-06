@@ -213,9 +213,6 @@ func TestWindowsDesktopCaptureCommandsUseInteractiveDesktop(t *testing.T) {
 
 func captureLiveDesktopVisualEvidenceProof(t *testing.T, repoDir string, options realSSHSmokeOptions) string {
 	t.Helper()
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		t.Fatalf("ffmpeg is required for live Visual Evidence recording proof: %v", err)
-	}
 	host, err := selectHostForRun(repoDir, runOptions{
 		HostConfig:    options.HostConfig,
 		TargetProfile: options.TargetProfile,
@@ -281,7 +278,8 @@ func captureLiveDesktopVisualEvidenceProof(t *testing.T, repoDir string, options
 	}
 
 	remoteRoot := remoteJoin(host.Config.WorkRoot, "artifacts", "live-visual-evidence-"+runID)
-	screenshotBytes, err := captureWindowsDesktopScreenshot(host.Config, remoteRoot)
+	transport := sshWindowsDesktopTransport{host: host.Config}
+	screenshotBytes, err := captureWindowsDesktopScreenshot(transport, remoteRoot)
 	if err != nil {
 		t.Fatalf("capture desktop screenshot: %v", err)
 	}
@@ -289,7 +287,7 @@ func captureLiveDesktopVisualEvidenceProof(t *testing.T, repoDir string, options
 	if err != nil {
 		t.Fatalf("register desktop screenshot: %v", err)
 	}
-	recordingBytes, err := captureWindowsDesktopRecording(host.Config, remoteRoot, liveVisualEvidenceSmokeDuration, 2)
+	recordingBytes, err := captureWindowsDesktopRecording(transport, remoteRoot, liveVisualEvidenceSmokeDuration, 2, "")
 	if err != nil {
 		t.Fatalf("capture desktop recording: %v", err)
 	}
@@ -313,17 +311,17 @@ func captureLiveDesktopVisualEvidenceProof(t *testing.T, repoDir string, options
 	return context.EvidenceDir
 }
 
-func captureWindowsDesktopScreenshot(host mayaHostConfig, remoteRoot string) ([]byte, error) {
-	return runSSHCommandOutput(host, encodedPowerShellCommand(windowsDesktopScreenshotPowerShell(remoteRoot)), sessiondCommandTimeout)
+func legacyLiveCaptureWindowsDesktopScreenshot(host mayaHostConfig, remoteRoot string) ([]byte, error) {
+	return runSSHCommandOutput(host, encodedPowerShellCommand(legacyLiveWindowsDesktopScreenshotPowerShell(remoteRoot)), sessiondCommandTimeout)
 }
 
-func captureWindowsDesktopRecording(host mayaHostConfig, remoteRoot string, duration time.Duration, fps int) ([]byte, error) {
-	frames, intervalMS := windowsDesktopFrameTiming(duration, fps)
+func legacyLiveCaptureWindowsDesktopRecording(host mayaHostConfig, remoteRoot string, duration time.Duration, fps int) ([]byte, error) {
+	frames, intervalMS := legacyLiveWindowsDesktopFrameTiming(duration, fps)
 	if err := runSSHCommand(host, encodedPowerShellCommand(fmt.Sprintf("New-Item -ItemType Directory -Force -Path %s | Out-Null", powerShellSingleQuoted(remoteRoot)))); err != nil {
 		return nil, err
 	}
 	scriptPath := remoteJoin(remoteRoot, "desktop-recording.ps1")
-	if err := writeRemotePowerShellScript(host, scriptPath, windowsDesktopRecordingPowerShell(remoteRoot, frames, intervalMS), sessiondCommandTimeout); err != nil {
+	if err := legacyLiveWriteRemotePowerShellScript(host, scriptPath, legacyLiveWindowsDesktopRecordingPowerShell(remoteRoot, frames, intervalMS), sessiondCommandTimeout); err != nil {
 		return nil, err
 	}
 	zipBytes, err := runSSHCommandOutput(host, encodedPowerShellCommand(fmt.Sprintf("Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; & %s", powerShellSingleQuoted(scriptPath))), duration+sessiondCommandTimeout)
@@ -341,7 +339,7 @@ func captureWindowsDesktopRecording(host mayaHostConfig, remoteRoot string, dura
 	if err := os.MkdirAll(framesDir, 0o755); err != nil {
 		return nil, err
 	}
-	if err := extractLiveFrameArchive(zipBytes, framesDir); err != nil {
+	if err := legacyLiveExtractFrameArchive(zipBytes, framesDir); err != nil {
 		return nil, err
 	}
 	outputPath := filepath.Join(tempDir, "desktop-recording.mp4")
@@ -363,7 +361,7 @@ func captureWindowsDesktopRecording(host mayaHostConfig, remoteRoot string, dura
 	return os.ReadFile(outputPath)
 }
 
-func writeRemotePowerShellScript(host mayaHostConfig, remotePath string, content string, timeout time.Duration) error {
+func legacyLiveWriteRemotePowerShellScript(host mayaHostConfig, remotePath string, content string, timeout time.Duration) error {
 	binary := host.SSH.Binary
 	if binary == "" {
 		binary = "ssh"
@@ -391,7 +389,7 @@ func writeRemotePowerShellScript(host mayaHostConfig, remotePath string, content
 	return nil
 }
 
-func windowsDesktopFrameTiming(duration time.Duration, fps int) (int, int) {
+func legacyLiveWindowsDesktopFrameTiming(duration time.Duration, fps int) (int, int) {
 	if fps < 1 {
 		fps = 1
 	}
@@ -406,7 +404,7 @@ func windowsDesktopFrameTiming(duration time.Duration, fps int) (int, int) {
 	return frames, intervalMS
 }
 
-func windowsDesktopScreenshotPowerShell(remoteRoot string) string {
+func legacyLiveWindowsDesktopScreenshotPowerShell(remoteRoot string) string {
 	return fmt.Sprintf(`$ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $root = %s
@@ -459,7 +457,7 @@ Remove-Item -Recurse -Force -LiteralPath $root -ErrorAction SilentlyContinue
 throw "scheduled interactive desktop screenshot did not produce output"`, powerShellSingleQuoted(remoteRoot))
 }
 
-func windowsDesktopRecordingPowerShell(remoteRoot string, frames int, intervalMS int) string {
+func legacyLiveWindowsDesktopRecordingPowerShell(remoteRoot string, frames int, intervalMS int) string {
 	return fmt.Sprintf(`$ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $root = %s
@@ -528,7 +526,7 @@ Remove-Item -Recurse -Force -LiteralPath $root -ErrorAction SilentlyContinue
 throw "scheduled interactive desktop recording did not produce output"`, powerShellSingleQuoted(remoteRoot), frames, intervalMS)
 }
 
-func extractLiveFrameArchive(zipBytes []byte, framesDir string) error {
+func legacyLiveExtractFrameArchive(zipBytes []byte, framesDir string) error {
 	reader, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
 	if err != nil {
 		return fmt.Errorf("read Windows desktop frame archive: %w", err)

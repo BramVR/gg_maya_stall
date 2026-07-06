@@ -46,7 +46,8 @@ malformed broker config are not silently downgraded.
 With `broker.type: gg-mayasessiond`, `run` stages declared payloads under
 `workRoot/runs/<run-id>/`, writes a small Scenario wrapper into the remote
 workspace, executes it through `gg_maya_sessiond.cli call ... script.execute`,
-downloads declared outputs, and captures screenshots through `viewport.capture`.
+downloads declared outputs, and captures configured Visual Evidence from the
+interactive Windows desktop session.
 Remote Scenario execution through `script.execute` is capped at 10 minutes.
 `manifest.json` and `evidence.json` record the resolved runtime profile, host
 adapter, broker adapter, broker config source, and live-proof eligibility.

@@ -195,6 +195,7 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 	if err != nil {
 		return runOutcome{}, err
 	}
+	annotateVisualEvidenceTarget(run.visualEvidence, run.manifest.TargetProfile, run.manifest.Host)
 	resultDocument.setResult(run.result)
 	if err := writeScenarioResult(run.context, run.scenario.ScenarioResultPath, resultDocument); err != nil {
 		return runOutcome{}, err

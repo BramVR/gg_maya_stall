@@ -280,9 +280,11 @@ type sessiondStatusOutput struct {
 }
 
 type windowsProcessSession struct {
-	ProcessID int    `json:"ProcessId"`
-	SessionID int    `json:"SessionId"`
-	Name      string `json:"Name"`
+	ProcessID   int    `json:"ProcessId"`
+	SessionID   int    `json:"SessionId"`
+	SessionName string `json:"SessionName"`
+	UserName    string `json:"UserName"`
+	Name        string `json:"Name"`
 }
 
 func realSessionBrokerLayer(host mayaHostConfig) doctorCheck {

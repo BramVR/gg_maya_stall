@@ -239,3 +239,10 @@ To run the protected consuming-repo proof path too, set
 ```sh
 MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml MAYA_STALL_CONSUMING_REPO_SMOKE_DIR=/path/to/consuming-repo go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke' -count=1
 ```
+
+For the live desktop Visual Evidence proof gate, pin the same configured host
+and ensure the local runner has `ffmpeg`:
+
+```sh
+MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml MAYA_STALL_SMOKE_TARGET_PROFILE=ci MAYA_STALL_SMOKE_HOST=maya-win-01 go test ./internal/cli -run TestOptInRealVisualEvidenceSmoke -count=1
+```

@@ -30,7 +30,7 @@ proof is a failure.
 The live gate runs:
 
 ```sh
-go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke' -count=1
+go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke|TestOptInRealVisualEvidenceSmoke' -count=1
 ```
 
 That opt-in smoke runs `maya-stall doctor --scenario smoke`, then one real
@@ -38,7 +38,10 @@ That opt-in smoke runs `maya-stall doctor --scenario smoke`, then one real
 Bundle, Scenario Result, logs, manifest, and real Visual Evidence bytes.
 It also runs one canonical Consuming Repo Scenario from a checked-out consuming
 repo path, then publishes the Evidence Bundle to a temporary filesystem
-Evidence Store and verifies review-ready artifact files.
+Evidence Store and verifies review-ready artifact files. The live Visual
+Evidence smoke additionally asserts `maya.exe` is in the interactive Windows
+`Console` session and stores a desktop screenshot plus short MP4 in its Evidence
+Bundle.
 
 Non-live-only changes may merge with local gates plus a manifest saying
 `live_maya_required=false`.

@@ -291,7 +291,14 @@ func captureWindowsDesktopScreenshot(host mayaHostConfig, remoteRoot string) ([]
 
 func captureWindowsDesktopRecording(host mayaHostConfig, remoteRoot string, duration time.Duration, fps int) ([]byte, error) {
 	frames, intervalMS := windowsDesktopFrameTiming(duration, fps)
-	zipBytes, err := runSSHCommandOutput(host, encodedPowerShellCommand(windowsDesktopRecordingPowerShell(remoteRoot, frames, intervalMS)), duration+sessiondCommandTimeout)
+	if err := runSSHCommand(host, encodedPowerShellCommand(fmt.Sprintf("New-Item -ItemType Directory -Force -Path %s | Out-Null", powerShellSingleQuoted(remoteRoot)))); err != nil {
+		return nil, err
+	}
+	scriptPath := remoteJoin(remoteRoot, "desktop-recording.ps1")
+	if err := writeRemotePowerShellScript(host, scriptPath, windowsDesktopRecordingPowerShell(remoteRoot, frames, intervalMS), sessiondCommandTimeout); err != nil {
+		return nil, err
+	}
+	zipBytes, err := runSSHCommandOutput(host, encodedPowerShellCommand(fmt.Sprintf("Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; & %s", powerShellSingleQuoted(scriptPath))), duration+sessiondCommandTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -326,6 +333,34 @@ func captureWindowsDesktopRecording(host mayaHostConfig, remoteRoot string, dura
 		return nil, fmt.Errorf("encode Windows desktop frames with ffmpeg: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return os.ReadFile(outputPath)
+}
+
+func writeRemotePowerShellScript(host mayaHostConfig, remotePath string, content string, timeout time.Duration) error {
+	binary := host.SSH.Binary
+	if binary == "" {
+		binary = "ssh"
+	}
+	if timeout <= 0 {
+		timeout = sshCommandTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	script := fmt.Sprintf("$content = [Console]::In.ReadToEnd(); Set-Content -Encoding UTF8 -LiteralPath %s -Value $content", powerShellSingleQuoted(remotePath))
+	command := exec.CommandContext(ctx, binary, append(sshArgs(host), encodedPowerShellCommand(script)...)...)
+	command.Stdin = strings.NewReader(content)
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("write remote PowerShell script timed out after %s", timeout)
+		}
+		detail := firstUsefulStderrLine(stderr.String())
+		if detail != "" {
+			return fmt.Errorf("write remote PowerShell script failed: %w: %s", err, detail)
+		}
+		return fmt.Errorf("write remote PowerShell script failed: %w", err)
+	}
+	return nil
 }
 
 func windowsDesktopFrameTiming(duration time.Duration, fps int) (int, int) {

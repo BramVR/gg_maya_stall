@@ -6,6 +6,7 @@ Release history starts with `v0.1.0`.
 
 ## Unreleased
 
+- Changed recording docs to describe the supported `maya-stall record` desktop MP4 path, local `ffmpeg` encoding, and the distinction between viewport capture and desktop Visual Evidence proof.
 - Added Scenario-level recording Visual Evidence proof so `maya-stall run` captures MP4 recordings in the Evidence Bundle with duration/FPS, Target Profile, and selected Maya Host metadata, and the live proof gate validates a recording-enabled Scenario.
 - Changed the live Visual Evidence proof gate to exercise the standalone `maya-stall record` command and validate its MP4 Evidence Bundle before publishing sanitized review proof.
 - Changed `maya-stall doctor` Host Health so real `visual-evidence: ok` now proves broker viewport capture plus desktop recording capture/MP4 encoding readiness, with clear repair hints for missing `ffmpeg` or Windows desktop recording prerequisites.

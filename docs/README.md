@@ -114,7 +114,8 @@ Pick whichever matches your intent:
 - **Use the CLI:** [Command reference](commands/README.md),
   [init](commands/init.md), [doctor](commands/doctor.md),
   [run](commands/run.md), [evidence](commands/evidence.md),
-  [screenshot](commands/screenshot.md), [review-comment](commands/review-comment.md).
+  [screenshot](commands/screenshot.md), [record](commands/record.md),
+  [review-comment](commands/review-comment.md).
 - **Prepare real hosts:** [Windows Maya Host setup](setup/windows-maya-host.md).
 - **Prepare releases:** [Release checklist](RELEASING.md),
   [Changelog](../CHANGELOG.md).

@@ -92,11 +92,13 @@ Capture standalone Visual Evidence:
 
 ```sh
 maya-stall screenshot
+maya-stall record
 ```
 
-Maya Stall v1 supports screenshot Visual Evidence. Recording is deferred until
-the Session Broker exposes real recording capture, so `maya-stall record`
-returns an actionable unsupported error.
+Maya Stall v1 supports screenshot and recording Visual Evidence. On real SSH
+Windows Maya Hosts, `maya-stall record` captures desktop frames from the
+interactive Windows Maya session and encodes `recordings/recording.mp4` locally
+with `ffmpeg`.
 
 Prepare real hosts with the
 [Windows Maya Host setup checklist](docs/setup/windows-maya-host.md), then keep

@@ -41,9 +41,11 @@ Bundle, Scenario Result, logs, manifest, and real Visual Evidence bytes.
 It also runs one canonical Consuming Repo Scenario from a checked-out consuming
 repo path, then publishes the Evidence Bundle to a temporary filesystem
 Evidence Store and verifies review-ready artifact files. The live Visual
-Evidence smoke additionally asserts `maya.exe` is in the interactive Windows
-`Console` session and stores a desktop screenshot plus short MP4 in its Evidence
-Bundle.
+Evidence smoke additionally invokes the standalone `maya-stall record` command,
+asserts `maya.exe` is in the interactive Windows `Console` session, validates
+the command's Evidence Bundle has one real MP4 recording with duration/FPS and
+selected-host metadata, and adds a desktop screenshot only for the sanitized
+downloadable proof artifact.
 
 Non-live-only changes may merge with local gates plus a manifest saying
 `live_maya_required=false`.
@@ -83,7 +85,7 @@ When the live gate passes, the workflow uploads a GitHub Actions artifact named
 - `evidence-metadata.json`
 - `media-review.json`
 - `screenshots/desktop-screenshot.png`
-- `recordings/desktop-recording.mp4`
+- `recordings/recording.mp4`
 
 The proof artifact is generated only after the local Evidence Bundle exists and
 only when the live workflow sets

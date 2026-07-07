@@ -6,6 +6,7 @@ Release history starts with `v0.1.0`.
 
 ## Unreleased
 
+- Changed the live Visual Evidence proof gate to exercise the standalone `maya-stall record` command and validate its MP4 Evidence Bundle before publishing sanitized review proof.
 - Changed `maya-stall doctor` Host Health so real `visual-evidence: ok` now proves broker viewport capture plus desktop recording capture/MP4 encoding readiness, with clear repair hints for missing `ffmpeg` or Windows desktop recording prerequisites.
 
 ## v0.1.0 - 2026-07-07

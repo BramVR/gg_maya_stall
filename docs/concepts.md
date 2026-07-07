@@ -89,10 +89,11 @@ Expected Outputs.
 
 ## Evidence And Publishing
 
-**Evidence Bundle** - logs, screenshots, metadata, Scenario Result,
-and output files returned from a run.
+**Evidence Bundle** - logs, screenshots, recordings, metadata,
+Scenario Result, and output files returned from a run.
 
-**Visual Evidence** - screenshots captured from the Maya UI Session.
+**Visual Evidence** - screenshots or recordings captured from the Maya UI
+Session.
 
 **Evidence Store** - durable filesystem or network location where published
 Evidence Bundles are kept.

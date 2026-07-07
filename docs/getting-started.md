@@ -157,6 +157,7 @@ Capture standalone visual evidence when debugging:
 
 ```sh
 maya-stall screenshot
+maya-stall record
 ```
 
 Publish the bundle to a filesystem Evidence Store:

@@ -111,6 +111,8 @@ Start with [Maya Stall Docs](docs/README.md), then read:
 - [CLI overview](docs/cli.md)
 - [Command reference](docs/commands/README.md)
 - [Concepts and glossary](docs/concepts.md)
+- [Changelog](CHANGELOG.md)
+- [Release checklist](docs/RELEASING.md)
 - [Windows Maya Host setup](docs/setup/windows-maya-host.md)
 - [Source map](docs/source-map.md)
 

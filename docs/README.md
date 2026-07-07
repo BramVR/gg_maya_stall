@@ -116,6 +116,8 @@ Pick whichever matches your intent:
   [run](commands/run.md), [evidence](commands/evidence.md),
   [screenshot](commands/screenshot.md), [review-comment](commands/review-comment.md).
 - **Prepare real hosts:** [Windows Maya Host setup](setup/windows-maya-host.md).
+- **Prepare releases:** [Release checklist](RELEASING.md),
+  [Changelog](../CHANGELOG.md).
 - **Understand the product boundary:** [Maya Stall V1 PRD](prd/0001-maya-stall-v1.md),
   [ADRs](adr/), [Source map](source-map.md).
 - **Help agents work here:** [Domain docs](agents/domain.md),

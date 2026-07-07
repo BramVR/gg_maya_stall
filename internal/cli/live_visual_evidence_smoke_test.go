@@ -215,6 +215,16 @@ func TestLiveRecordCommandProofRejectsInvalidProofShapes(t *testing.T) {
 			wantErr: "duration/FPS metadata",
 		},
 		{
+			name:      "missing selected host metadata",
+			runtime:   liveRuntime,
+			processes: console,
+			visual: []visualEvidenceArtifact{
+				{Kind: "recording", Path: "recordings/recording.mp4", MediaType: "video/mp4", DurationSeconds: defaultRecordingDuration.Seconds(), FPS: defaultRecordingFPS, TargetProfile: "ci"},
+			},
+			files:   map[string][]byte{"recordings/recording.mp4": mp4HeaderBytes()},
+			wantErr: "selected Maya Host metadata",
+		},
+		{
 			name:      "fake bytes",
 			runtime:   liveRuntime,
 			processes: console,
@@ -233,6 +243,16 @@ func TestLiveRecordCommandProofRejectsInvalidProofShapes(t *testing.T) {
 			},
 			files:   map[string][]byte{"recordings/recording.mp4": mp4HeaderBytes()},
 			wantErr: "live-proof-eligible ssh-sessiond",
+		},
+		{
+			name:      "traversal recording path",
+			runtime:   liveRuntime,
+			processes: console,
+			visual: []visualEvidenceArtifact{
+				{Kind: "recording", Path: "recordings/../logs/session.log", MediaType: "video/mp4", DurationSeconds: defaultRecordingDuration.Seconds(), FPS: defaultRecordingFPS, TargetProfile: "ci", Host: "maya-win-01"},
+			},
+			files:   map[string][]byte{"logs/session.log": mp4HeaderBytes()},
+			wantErr: "under recordings/",
 		},
 		{
 			name:      "non console maya",
@@ -524,6 +544,9 @@ func validateLiveRecordCommandProofBundle(evidenceDir string, processes []window
 	if bundle.TargetProfile != targetProfile {
 		return evidenceBundle{}, fmt.Errorf("Evidence Bundle Target Profile = %q, want %q", bundle.TargetProfile, targetProfile)
 	}
+	if bundle.Host == "" {
+		return evidenceBundle{}, fmt.Errorf("Evidence Bundle missing selected Maya Host metadata")
+	}
 	if hostPin != "" && bundle.Host != hostPin {
 		return evidenceBundle{}, fmt.Errorf("Evidence Bundle selected Maya Host = %q, want pinned host %q", bundle.Host, hostPin)
 	}
@@ -551,6 +574,11 @@ func liveRecordCommandArtifact(bundle evidenceBundle) (visualEvidenceArtifact, e
 	var recordings []visualEvidenceArtifact
 	for _, artifact := range bundle.VisualEvidence {
 		if artifact.Kind == "recording" {
+			cleanPath := cleanEvidenceArtifactPath(artifact.Path)
+			if !strings.HasPrefix(cleanPath, evidenceRecordingsDir+"/") {
+				return visualEvidenceArtifact{}, fmt.Errorf("recording artifact = %+v, want path under recordings/", artifact)
+			}
+			artifact.Path = cleanPath
 			recordings = append(recordings, artifact)
 		}
 	}

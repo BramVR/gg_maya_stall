@@ -1276,6 +1276,7 @@ func TestDoctorReturnsStableHostHealthReportBeforeRendering(t *testing.T) {
 
 func TestDoctorRealSSHVerifiesConnectivityAndWritableWorkRoot(t *testing.T) {
 	dir := writeRunConfigFixture(t)
+	useFakeFFmpegLookPath(t, dir)
 	sshLog := filepath.Join(dir, "ssh.log")
 	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
 		`maya-stall-ssh-ok`,
@@ -1286,6 +1287,10 @@ func TestDoctorRealSSHVerifiesConnectivityAndWritableWorkRoot(t *testing.T) {
 		`{"ok":true,"tool":"script.execute"}`,
 		`removed`,
 		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
+		``,
+		``,
+		writeFakeSSHBinaryOutput(t, dir, "recording-frames.zip", zipFrameArchive(t)),
+		`removed`,
 	})
 	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -1351,6 +1356,7 @@ hostPools:
 
 func TestDoctorHostHealthTiesRealVisualEvidenceToSessionBroker(t *testing.T) {
 	dir := writeRunConfigFixture(t)
+	useFakeFFmpegLookPath(t, dir)
 	sshLog := filepath.Join(dir, "ssh.log")
 	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
 		`maya-stall-ssh-ok`,
@@ -1361,6 +1367,10 @@ func TestDoctorHostHealthTiesRealVisualEvidenceToSessionBroker(t *testing.T) {
 		`{"ok":true,"tool":"script.execute"}`,
 		`removed`,
 		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
+		``,
+		``,
+		writeFakeSSHBinaryOutput(t, dir, "recording-frames.zip", zipFrameArchive(t)),
+		`removed`,
 	})
 	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -1400,8 +1410,10 @@ hostPools:
 	if visual.Status != "ok" || visual.Source != "session-broker" || visual.BlockedBy != "" {
 		t.Fatalf("visual-evidence Host Health = %+v, want broker-backed ok", visual)
 	}
-	if !strings.Contains(visual.Detail, "viewport.capture") {
-		t.Fatalf("visual-evidence detail = %q, want viewport.capture proof", visual.Detail)
+	for _, want := range []string{"viewport.capture", "desktop recording"} {
+		if !strings.Contains(visual.Detail, want) {
+			t.Fatalf("visual-evidence detail = %q, want %s proof", visual.Detail, want)
+		}
 	}
 }
 
@@ -1463,6 +1475,7 @@ hostPools:
 
 func TestDoctorGGMayaSessiondVerifiesScriptExecuteProbe(t *testing.T) {
 	dir := writeRunConfigFixture(t)
+	useFakeFFmpegLookPath(t, dir)
 	sshLog := filepath.Join(dir, "ssh.log")
 	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
 	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
@@ -1474,6 +1487,10 @@ func TestDoctorGGMayaSessiondVerifiesScriptExecuteProbe(t *testing.T) {
 		`{"ok":true,"tool":"script.execute"}`,
 		``,
 		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
+		``,
+		``,
+		writeFakeSSHBinaryOutput(t, dir, "recording-frames.zip", zipFrameArchive(t)),
+		``,
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
 	mustWriteFile(t, hostConfigPath, `version: 1
@@ -1556,6 +1573,7 @@ hostPools:
 
 func TestDoctorGGMayaSessiondAcceptsRecordingScenario(t *testing.T) {
 	dir := writeRunConfigFixture(t)
+	useFakeFFmpegLookPath(t, dir)
 	configPath := filepath.Join(dir, ".maya-stall.yaml")
 	contentBytes, err := os.ReadFile(configPath)
 	if err != nil {
@@ -1574,6 +1592,10 @@ func TestDoctorGGMayaSessiondAcceptsRecordingScenario(t *testing.T) {
 		`{"ok":true,"tool":"script.execute"}`,
 		`removed`,
 		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}],"output":{"mime_type":"image/jpeg"}}`,
+		``,
+		``,
+		writeFakeSSHBinaryOutput(t, dir, "recording-frames.zip", zipFrameArchive(t)),
+		`removed`,
 	})
 	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -1605,6 +1627,157 @@ hostPools:
 	}
 	if !strings.Contains(stdout.String(), "visual-evidence: ok") {
 		t.Fatalf("doctor did not accept recording scenario:\n%s", stdout.String())
+	}
+}
+
+func TestDoctorGGMayaSessiondRequiresDesktopRecordingReadiness(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	previousLookPath := lookPath
+	lookPath = func(string) (string, error) {
+		return "", fmt.Errorf("executable file not found in PATH")
+	}
+	defer func() {
+		lookPath = previousLookPath
+	}()
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		``,
+		``,
+		`{"ok":true,"checks":[{"id":"state_dir","ok":true}]}`,
+		`{"derived_status":"running","state":{"status":"running","call_server_ready":true,"maya_alive":true,"mcp_alive":true}}`,
+		`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
+		`{"ok":true,"tool":"script.execute"}`,
+		`removed`,
+		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}],"output":{"mime_type":"image/jpeg"}}`,
+	})
+	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+        visualEvidence: true
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"visual-evidence: fail",
+		"local ffmpeg is required for Windows desktop recording capture",
+		"viewport.capture",
+		"desktop recording",
+		"hint: Install ffmpeg locally and repair Windows desktop recording prerequisites. See docs/setup/windows-maya-host.md#visual-evidence.",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("doctor output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestDoctorGGMayaSessiondReportsDesktopRecordingPrerequisiteFailures(t *testing.T) {
+	tests := []struct {
+		name       string
+		failIndex  int
+		failDetail string
+	}{
+		{
+			name:       "remote capture root",
+			failIndex:  9,
+			failDetail: "remote capture root is not writable",
+		},
+		{
+			name:       "interactive scheduled task",
+			failIndex:  11,
+			failDetail: "schtasks.exe is required for interactive desktop capture",
+		},
+		{
+			name:       "desktop assemblies",
+			failIndex:  11,
+			failDetail: "Windows PowerShell desktop assemblies System.Windows.Forms and System.Drawing are required",
+		},
+		{
+			name:       "compress archive",
+			failIndex:  11,
+			failDetail: "Compress-Archive is not recognized",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := writeRunConfigFixture(t)
+			useFakeFFmpegLookPath(t, dir)
+			outputs := []string{
+				``,
+				``,
+				`{"ok":true,"checks":[{"id":"state_dir","ok":true}]}`,
+				`{"derived_status":"running","state":{"status":"running","call_server_ready":true,"maya_alive":true,"mcp_alive":true}}`,
+				`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
+				`{"ok":true,"tool":"script.execute"}`,
+				`removed`,
+				`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}],"output":{"mime_type":"image/jpeg"}}`,
+				``,
+				``,
+				writeFakeSSHBinaryOutput(t, dir, "recording-frames.zip", zipFrameArchive(t)),
+				`removed`,
+			}
+			outputs[tt.failIndex-1] = "@fail:" + tt.failDetail
+			sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), outputs)
+			sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+			hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+			mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+        visualEvidence: true
+`)
+			var stdout, stderr bytes.Buffer
+
+			code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha"}, &stdout, &stderr, dir, "test-version")
+			if code != 1 {
+				t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+			}
+			for _, want := range []string{
+				"visual-evidence: fail",
+				"desktop recording unavailable",
+				tt.failDetail,
+				"hint: Install ffmpeg locally and repair Windows desktop recording prerequisites. See docs/setup/windows-maya-host.md#visual-evidence.",
+			} {
+				if !strings.Contains(stdout.String(), want) {
+					t.Fatalf("doctor output missing %q:\n%s", want, stdout.String())
+				}
+			}
+		})
 	}
 }
 
@@ -5529,6 +5702,14 @@ func writeSequencedFakeSSHCommand(t *testing.T, dir string, logPath string, outp
 		if output == "" {
 			continue
 		}
+		if path, ok := strings.CutPrefix(output, "@file:"); ok {
+			fmt.Fprintf(&cases, "%d) /bin/cat %s\n;;\n", index+1, shellQuote(path))
+			continue
+		}
+		if message, ok := strings.CutPrefix(output, "@fail:"); ok {
+			fmt.Fprintf(&cases, "%d) printf '%%s\\n' %s >&2; exit 1\n;;\n", index+1, shellQuote(message))
+			continue
+		}
 		fmt.Fprintf(&cases, "%d) cat <<'JSON'\n%s\nJSON\n;;\n", index+1, output)
 	}
 	content := fmt.Sprintf(`#!/bin/sh
@@ -5548,6 +5729,30 @@ exit 0
 		t.Fatalf("write sequenced fake ssh command: %v", err)
 	}
 	return path
+}
+
+func writeFakeSSHBinaryOutput(t *testing.T, dir string, name string, content []byte) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("write fake SSH binary output: %v", err)
+	}
+	return "@file:" + path
+}
+
+func useFakeFFmpegLookPath(t *testing.T, dir string) {
+	t.Helper()
+	ffmpeg := writeFakeFFmpeg(t, dir)
+	previousLookPath := lookPath
+	lookPath = func(name string) (string, error) {
+		if name == "ffmpeg" {
+			return ffmpeg, nil
+		}
+		return previousLookPath(name)
+	}
+	t.Cleanup(func() {
+		lookPath = previousLookPath
+	})
 }
 
 func sessiondStatusFixture(sessionID string) string {

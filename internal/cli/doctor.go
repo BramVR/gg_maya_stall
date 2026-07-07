@@ -365,7 +365,10 @@ func realSessionBrokerVisualEvidenceLayer(host mayaHostConfig) doctorCheck {
 	if _, _, err := captureImageData(result); err != nil {
 		return withSource(failedCheck("visual-evidence", err.Error(), "Repair viewport.capture in gg_mayasessiond. See docs/setup/windows-maya-host.md#visual-evidence."), "session-broker")
 	}
-	return withSource(okCheck("visual-evidence", "viewport.capture available"), "session-broker")
+	if err := broker.probeDesktopRecordingReadiness(); err != nil {
+		return withSource(failedCheck("visual-evidence", "viewport.capture available; desktop recording unavailable: "+err.Error(), "Install ffmpeg locally and repair Windows desktop recording prerequisites. See docs/setup/windows-maya-host.md#visual-evidence."), "session-broker")
+	}
+	return withSource(okCheck("visual-evidence", "viewport.capture available; desktop recording available"), "session-broker")
 }
 
 func sessiondDoctorArgs(host mayaHostConfig) []string {

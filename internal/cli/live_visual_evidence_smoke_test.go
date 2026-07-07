@@ -23,13 +23,24 @@ func TestOptInRealVisualEvidenceSmoke(t *testing.T) {
 	assertLiveVisualEvidenceHostProof(t, report)
 	t.Logf("Host Health: %s", formatHostHealthReport(report))
 
-	evidenceDir := captureLiveRecordCommandProof(t, dir, options)
-	bundle := assertLiveRecordCommandProofBundle(t, evidenceDir, options)
-	recording := requireLiveRecordCommandArtifact(t, evidenceDir, bundle)
+	recordEvidenceDir := captureLiveRecordCommandProof(t, dir, options)
+	recordBundle := assertLiveRecordCommandProofBundle(t, recordEvidenceDir, options)
+	recording := requireLiveRecordCommandArtifact(t, recordEvidenceDir, recordBundle)
 	t.Logf("Live record command proof: run=%s recording=%s bytes=%d",
-		bundle.RunID,
+		recordBundle.RunID,
 		recording.Path,
-		artifactSize(t, evidenceDir, recording),
+		artifactSize(t, recordEvidenceDir, recording),
+	)
+	evidenceDir := captureLiveScenarioRecordingProof(t, dir, options)
+	bundle := assertLiveSmokeEvidenceBundle(t, evidenceDir)
+	if bundle.Scenario != "smoke" {
+		t.Fatalf("Evidence Bundle scenario = %q, want smoke", bundle.Scenario)
+	}
+	scenarioRecording := requireLiveScenarioRecordingArtifact(t, evidenceDir, bundle)
+	t.Logf("Live Scenario recording proof: run=%s recording=%s bytes=%d",
+		bundle.RunID,
+		scenarioRecording.Path,
+		artifactSize(t, evidenceDir, scenarioRecording),
 	)
 	addLiveDesktopScreenshotForProofArtifact(t, dir, evidenceDir, options)
 	bundle = assertLiveVisualEvidenceProofBundle(t, evidenceDir)
@@ -67,6 +78,20 @@ func TestLiveVisualEvidenceProofRejectsInvalidProofShapes(t *testing.T) {
 			files: map[string][]byte{
 				"screenshots/desktop-screenshot.png": pngHeaderBytes(),
 				"recordings/desktop-recording.mp4":   mp4HeaderBytes(),
+			},
+			wantValid: true,
+		},
+		{
+			name:      "valid desktop screenshot and Scenario recording",
+			runtime:   liveRuntime,
+			processes: console,
+			visual: []visualEvidenceArtifact{
+				{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png"},
+				{Kind: "recording", Path: "recordings/smoke.mp4", MediaType: "video/mp4", DurationSeconds: defaultRecordingDuration.Seconds(), FPS: defaultRecordingFPS},
+			},
+			files: map[string][]byte{
+				"screenshots/desktop-screenshot.png": pngHeaderBytes(),
+				"recordings/smoke.mp4":               mp4HeaderBytes(),
 			},
 			wantValid: true,
 		},
@@ -346,6 +371,20 @@ func captureLiveRecordCommandProof(t *testing.T, repoDir string, options realSSH
 	evidenceDir := smokeOutputValue(stdout.String(), "evidence")
 	if evidenceDir == "" {
 		t.Fatalf("live record command did not print Evidence Bundle path:\n%s", stdout.String())
+	}
+	return evidenceDir
+}
+
+func captureLiveScenarioRecordingProof(t *testing.T, repoDir string, options realSSHSmokeOptions) string {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	code := Run(options.runArgs("smoke"), &stdout, &stderr, repoDir, "test-version")
+	if code != 0 {
+		t.Fatalf("live recording Scenario run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	evidenceDir := smokeOutputValue(stdout.String(), "evidence")
+	if evidenceDir == "" {
+		t.Fatalf("live recording Scenario run did not print Evidence Bundle path:\n%s", stdout.String())
 	}
 	return evidenceDir
 }

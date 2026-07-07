@@ -1072,8 +1072,8 @@ func (fakeSessionBroker) CaptureRecording(context runContext, request recordingR
 	if name == "" {
 		name = evidenceDefaultRecordingName
 	}
-	content := fmt.Sprintf("fake recording duration=%s fps=%d\n", request.Duration, request.FPS)
-	return registerVisualEvidenceBytes(context, "recording", name, "video/mp4", []byte(content))
+	content := []byte{0, 0, 0, 24, 'f', 't', 'y', 'p', 'm', 'p', '4', '2', 'f', 'a', 'k', 'e', '\n'}
+	return registerVisualEvidenceBytes(context, "recording", name, "video/mp4", content)
 }
 
 type invalidSessionBroker struct {

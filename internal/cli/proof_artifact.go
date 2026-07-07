@@ -301,7 +301,7 @@ func liveDesktopVisualArtifacts(bundle evidenceBundle) (visualEvidenceArtifact, 
 
 func isLiveDesktopRecordingPath(path string) bool {
 	switch path {
-	case "recordings/desktop-recording.mp4", "recordings/recording.mp4":
+	case "recordings/desktop-recording.mp4", "recordings/recording.mp4", "recordings/smoke.mp4":
 		return true
 	default:
 		return false

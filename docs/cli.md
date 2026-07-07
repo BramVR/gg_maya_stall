@@ -69,10 +69,13 @@ See [run](commands/run.md), [status](commands/status.md),
 
 ```text
 maya-stall screenshot [host flags]
+maya-stall record [host flags]
 ```
 
-See [screenshot](commands/screenshot.md). Recording is deferred for v1; the
-legacy `record` command returns an actionable unsupported error.
+See [screenshot](commands/screenshot.md) and [record](commands/record.md).
+Scenarios can also enable screenshot and recording Visual Evidence in repo
+config; `maya-stall run` and `maya-stall evidence collect` write those artifacts
+into the Scenario Evidence Bundle.
 
 ### Evidence And Review Publishing
 

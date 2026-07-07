@@ -196,6 +196,62 @@ func TestRunScenarioStagesPayloadAndWritesStateAndEvidence(t *testing.T) {
 	}
 }
 
+func TestRunScenarioCapturesRecordingVisualEvidenceArtifact(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload: {}
+    expectedOutputs:
+      scenarioResult: "outputs/result.json"
+    evidence:
+      recording:
+        enabled: true
+    validators:
+      - type: visualEvidence
+        required: true
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "status: passed") {
+		t.Fatalf("run output missing passed status:\n%s", stdout.String())
+	}
+
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	recordingPath := filepath.Join(evidence, "recordings", "smoke.mp4")
+	recordingBytes, err := os.ReadFile(recordingPath)
+	if err != nil {
+		t.Fatalf("read recording artifact: %v", err)
+	}
+	if !looksLikeMP4Bytes(recordingBytes) {
+		t.Fatalf("recording artifact does not look like MP4 bytes: %q", string(recordingBytes))
+	}
+	bundle := readEvidenceBundle(t, evidence)
+	if bundle.TargetProfile != "default" || bundle.Host != defaultFakeHostID {
+		t.Fatalf("Evidence Bundle selected target metadata = target %q host %q", bundle.TargetProfile, bundle.Host)
+	}
+	if len(bundle.VisualEvidence) != 1 {
+		t.Fatalf("visual evidence metadata = %+v", bundle.VisualEvidence)
+	}
+	got := bundle.VisualEvidence[0]
+	if got.Kind != "recording" || got.Path != "recordings/smoke.mp4" || got.MediaType != "video/mp4" {
+		t.Fatalf("recording metadata = %+v", got)
+	}
+	if got.DurationSeconds != defaultRecordingDuration.Seconds() || got.FPS != defaultRecordingFPS {
+		t.Fatalf("recording timing metadata = %+v", got)
+	}
+	if got.TargetProfile != bundle.TargetProfile || got.Host != bundle.Host {
+		t.Fatalf("recording target metadata = %+v, want Target Profile %q and Maya Host %q", got, bundle.TargetProfile, bundle.Host)
+	}
+	if len(bundle.Validators) != 1 || bundle.Validators[0].Type != "visualEvidence" || bundle.Validators[0].Status != resultStatusPassed {
+		t.Fatalf("validator metadata = %+v", bundle.Validators)
+	}
+}
+
 func TestScreenshotCapturesVisualEvidenceArtifact(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	var stdout, stderr bytes.Buffer

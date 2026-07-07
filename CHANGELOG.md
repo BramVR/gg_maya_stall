@@ -2,19 +2,9 @@
 
 All notable user-facing changes for Maya Stall are recorded here.
 
-This project has not shipped a tagged release yet. The notes below are release
-candidate notes for a future first release, not evidence that a release exists.
+Release history starts with `v0.1.0`.
 
-## Unreleased
-
-- Release preparation only: added this changelog and the first-release checklist.
-
-## Proposed v0.1.0
-
-Recommended first version: `v0.1.0`. Rationale: this would be the first tagged
-SemVer release of a real but still early CLI. Use `v1.0.0` only after Bram
-explicitly confirms the CLI, config, proof, and artifact contracts are stable
-enough for a 1.0 compatibility promise.
+## v0.1.0 - 2026-07-07
 
 ### Added
 
@@ -25,6 +15,7 @@ enough for a 1.0 compatibility promise.
 - Added a non-skippable live Maya proof workflow with checked-in proof policy, fail-closed live gate behavior, local/docs/artifact gates, and fork-safe live credential withholding: https://github.com/BramVR/gg_maya_stall/pull/44, https://github.com/BramVR/gg_maya_stall/pull/60.
 - Added a tiny optional `maya_stall` Python helper for Maya Scenario scripts to write structured Scenario Result JSON: https://github.com/BramVR/gg_maya_stall/pull/21.
 - Added first-user documentation: Windows Maya Host setup, Crabbox attribution, docs site checks, README hero/badges, command docs, concepts, source map, and a Windows host prepare script: https://github.com/BramVR/gg_maya_stall/pull/26, https://github.com/BramVR/gg_maya_stall/pull/28, https://github.com/BramVR/gg_maya_stall/pull/32, https://github.com/BramVR/gg_maya_stall/pull/33, https://github.com/BramVR/gg_maya_stall/pull/57, https://github.com/BramVR/gg_maya_stall/pull/58.
+- Added first-release metadata, this changelog, and the release checklist: https://github.com/BramVR/gg_maya_stall/pull/64.
 
 ### Changed
 

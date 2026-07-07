@@ -65,11 +65,11 @@ The artifact contains only reviewer-facing proof:
 - `evidence-metadata.json`
 - `media-review.json`
 - `screenshots/desktop-screenshot.png`
-- `recordings/smoke.mp4`
+- `recordings/recording.mp4`
 
-The MP4 comes from a recording-enabled Scenario Evidence Bundle captured from
-the interactive desktop session. The live proof smoke also validates the
-standalone `maya-stall record` path before publishing sanitized review proof.
+The MP4 comes from the standalone `maya-stall record` Evidence Bundle. The live
+proof smoke also validates a recording-enabled Scenario through the paired live
+run gate before accepting the PR.
 
 Retention is short and configurable with
 `MAYA_STALL_LIVE_PROOF_RETENTION_DAYS` or the matching workflow variable.

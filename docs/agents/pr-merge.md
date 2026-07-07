@@ -86,7 +86,7 @@ When the live gate passes, the workflow uploads a GitHub Actions artifact named
 - `evidence-metadata.json`
 - `media-review.json`
 - `screenshots/desktop-screenshot.png`
-- `recordings/smoke.mp4`
+- `recordings/recording.mp4`
 
 The proof artifact is generated only after the local Evidence Bundle exists and
 only when the live workflow sets

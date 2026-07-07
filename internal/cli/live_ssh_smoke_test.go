@@ -65,6 +65,7 @@ func TestOptInRealSSHRunSmoke(t *testing.T) {
 	if bundle.Scenario != "smoke" {
 		t.Fatalf("Evidence Bundle scenario = %q, want smoke", bundle.Scenario)
 	}
+	requireLiveScenarioRecordingArtifact(t, evidenceDir, bundle)
 
 	var keptStdout, keptStderr bytes.Buffer
 	keptCode := Run(options.runArgs("retention-failure", "--keep-on-failure"), &keptStdout, &keptStderr, dir, "test-version")
@@ -271,6 +272,8 @@ scenarios:
     evidence:
       screenshots:
         enabled: true
+      recording:
+        enabled: true
     validators:
       - type: scenarioResultStatus
         status: passed
@@ -335,6 +338,9 @@ func assertLiveSmokeEvidenceBundle(t *testing.T, evidenceDir string) evidenceBun
 		if artifact.Kind == "" || artifact.Path == "" || artifact.MediaType == "" {
 			t.Fatalf("Visual Evidence artifact incomplete: %+v", artifact)
 		}
+		if artifact.TargetProfile != bundle.TargetProfile || artifact.Host != bundle.Host {
+			t.Fatalf("Visual Evidence target metadata = %+v, want Target Profile %q and Maya Host %q", artifact, bundle.TargetProfile, bundle.Host)
+		}
 		visualPath := filepath.Join(evidenceDir, filepath.FromSlash(artifact.Path))
 		content, err := os.ReadFile(visualPath)
 		if err != nil {
@@ -343,11 +349,52 @@ func assertLiveSmokeEvidenceBundle(t *testing.T, evidenceDir string) evidenceBun
 		if len(content) == 0 {
 			t.Fatalf("Visual Evidence artifact %s is empty", artifact.Path)
 		}
-		if !looksLikeImageBytes(artifact.MediaType, content) {
-			t.Fatalf("Visual Evidence artifact %s does not match media type %s", artifact.Path, artifact.MediaType)
+		switch artifact.Kind {
+		case "recording":
+			if artifact.MediaType != "video/mp4" {
+				t.Fatalf("recording Visual Evidence media type = %q, want video/mp4", artifact.MediaType)
+			}
+			if artifact.DurationSeconds <= 0 || artifact.FPS <= 0 {
+				t.Fatalf("recording Visual Evidence missing duration/FPS metadata: %+v", artifact)
+			}
+			if !looksLikeMP4Bytes(content) {
+				t.Fatalf("recording Visual Evidence artifact %s does not look like an MP4", artifact.Path)
+			}
+		default:
+			if !looksLikeImageBytes(artifact.MediaType, content) {
+				t.Fatalf("Visual Evidence artifact %s does not match media type %s", artifact.Path, artifact.MediaType)
+			}
 		}
 	}
 	return bundle
+}
+
+func requireLiveScenarioRecordingArtifact(t *testing.T, evidenceDir string, bundle evidenceBundle) visualEvidenceArtifact {
+	t.Helper()
+	for _, artifact := range bundle.VisualEvidence {
+		if artifact.Kind != "recording" {
+			continue
+		}
+		if artifact.MediaType != "video/mp4" || !strings.HasPrefix(cleanEvidenceArtifactPath(artifact.Path), evidenceRecordingsDir+"/") {
+			t.Fatalf("Scenario recording artifact = %+v, want video/mp4 under recordings/", artifact)
+		}
+		if artifact.DurationSeconds <= 0 || artifact.FPS <= 0 {
+			t.Fatalf("Scenario recording missing duration/FPS metadata: %+v", artifact)
+		}
+		if artifact.TargetProfile != bundle.TargetProfile || artifact.Host != bundle.Host {
+			t.Fatalf("Scenario recording target metadata = %+v, want Target Profile %q and Maya Host %q", artifact, bundle.TargetProfile, bundle.Host)
+		}
+		content, err := os.ReadFile(filepath.Join(evidenceDir, filepath.FromSlash(artifact.Path)))
+		if err != nil {
+			t.Fatalf("read Scenario recording %s: %v", artifact.Path, err)
+		}
+		if !looksLikeMP4Bytes(content) {
+			t.Fatalf("Scenario recording %s does not look like an MP4", artifact.Path)
+		}
+		return artifact
+	}
+	t.Fatalf("Evidence Bundle missing Scenario recording Visual Evidence: %+v", bundle.VisualEvidence)
+	return visualEvidenceArtifact{}
 }
 
 func writeKLVPushConsumingRepoSmokeFixture(t *testing.T, sourceRepoDir string) string {

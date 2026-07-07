@@ -23,16 +23,17 @@ func TestOptInRealVisualEvidenceSmoke(t *testing.T) {
 	assertLiveVisualEvidenceHostProof(t, report)
 	t.Logf("Host Health: %s", formatHostHealthReport(report))
 
-	evidenceDir := captureLiveRecordCommandProof(t, dir, options)
-	bundle := assertLiveRecordCommandProofBundle(t, evidenceDir, options)
-	recording := requireLiveRecordCommandArtifact(t, evidenceDir, bundle)
+	recordEvidenceDir := captureLiveRecordCommandProof(t, dir, options)
+	recordBundle := assertLiveRecordCommandProofBundle(t, recordEvidenceDir, options)
+	recording := requireLiveRecordCommandArtifact(t, recordEvidenceDir, recordBundle)
 	t.Logf("Live record command proof: run=%s recording=%s bytes=%d",
-		bundle.RunID,
+		recordBundle.RunID,
 		recording.Path,
-		artifactSize(t, evidenceDir, recording),
+		artifactSize(t, recordEvidenceDir, recording),
 	)
+	evidenceDir := recordEvidenceDir
 	addLiveDesktopScreenshotForProofArtifact(t, dir, evidenceDir, options)
-	bundle = assertLiveVisualEvidenceProofBundle(t, evidenceDir)
+	bundle := assertLiveVisualEvidenceProofBundle(t, evidenceDir)
 	screenshot, recording := requireLiveDesktopVisualArtifacts(t, evidenceDir, bundle)
 	t.Logf("Live Visual Evidence proof artifact source: run=%s screenshot=%s bytes=%d recording=%s bytes=%d",
 		bundle.RunID,

@@ -301,7 +301,7 @@ To run the full live smoke, use:
 MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run)Smoke' -count=1
 ```
 
-`TestOptInRealSSHRunSmoke` first runs `doctor --scenario smoke`, then runs one generated `smoke` Scenario through the configured `gg_mayasessiond` Session Broker, requires screenshot Visual Evidence, and checks that the local Evidence Bundle contains `evidence.json`, events, logs, Scenario Result, and the captured screenshot.
+`TestOptInRealSSHRunSmoke` first runs `doctor --scenario smoke`, then runs one generated `smoke` Scenario through the configured `gg_mayasessiond` Session Broker, requires screenshot and recording Visual Evidence, and checks that the local Evidence Bundle contains `evidence.json`, events, logs, Scenario Result, the captured screenshot, and an MP4 recording with duration/FPS plus selected Target Profile and Maya Host metadata.
 
 To include the canonical Consuming Repo smoke, add a checked-out consuming repo path and run:
 
@@ -319,7 +319,7 @@ To prove live desktop Visual Evidence, run:
 MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml MAYA_STALL_SMOKE_TARGET_PROFILE=ci MAYA_STALL_SMOKE_HOST=maya-win-01 go test ./internal/cli -run TestOptInRealVisualEvidenceSmoke -count=1
 ```
 
-`TestOptInRealVisualEvidenceSmoke` selects the configured host through Host Config, Target Profile, and optional Maya Host id. It runs Host Health first, invokes the public `maya-stall record` command, asserts `maya.exe` is running in the interactive Windows `Console` session, validates the command's local Evidence Bundle has one real MP4 recording with duration/FPS and selected-host metadata, and adds a desktop PNG only for the sanitized downloadable proof artifact. The machine running the test must have `ffmpeg` on `PATH` to encode the MP4 from captured Windows desktop frames. A skipped test, missing host config, fake runtime, viewport-only screenshot, missing recording, fake MP4 bytes, or non-Console Maya process is not acceptable live proof.
+`TestOptInRealVisualEvidenceSmoke` selects the configured host through Host Config, Target Profile, and optional Maya Host id. It runs Host Health first, invokes the public `maya-stall record` command, asserts `maya.exe` is running in the interactive Windows `Console` session, validates the command's local Evidence Bundle has one real MP4 recording with duration/FPS and selected-host metadata, and adds a desktop PNG only for the sanitized downloadable proof artifact. The paired `TestOptInRealSSHRunSmoke` validates a recording-enabled Scenario. The machine running the test must have `ffmpeg` on `PATH` to encode the MP4 from captured Windows desktop frames. A skipped test, missing host config, fake runtime, viewport-only screenshot, missing recording, fake MP4 bytes, or non-Console Maya process is not acceptable live proof.
 
 Optional:
 

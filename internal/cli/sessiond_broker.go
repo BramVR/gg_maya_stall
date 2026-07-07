@@ -603,6 +603,26 @@ func (broker ggMayaSessiondBroker) probeScriptExecute() (err error) {
 	return nil
 }
 
+func (broker ggMayaSessiondBroker) probeDesktopRecordingReadiness() (err error) {
+	runID := fmt.Sprintf("doctor-%d", time.Now().UTC().UnixNano())
+	probeRoot := remoteJoin(broker.host.WorkRoot, "runs", runID)
+	remoteRoot := remoteJoin(probeRoot, "visual-evidence", "recording")
+	defer func() {
+		if cleanupErr := broker.removeRemotePath(probeRoot); cleanupErr != nil {
+			cleanupErr = fmt.Errorf("cleanup desktop recording readiness probe: %w", cleanupErr)
+			if err == nil {
+				err = cleanupErr
+			} else {
+				err = errors.Join(err, cleanupErr)
+			}
+		}
+	}()
+	if _, err := captureWindowsDesktopRecording(sshWindowsDesktopTransport(broker.host), remoteRoot, time.Second, 1, ""); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (broker ggMayaSessiondBroker) removeRemotePath(path string) error {
 	script := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
 Remove-Item -LiteralPath %s -Recurse -Force`, powerShellSingleQuoted(path))

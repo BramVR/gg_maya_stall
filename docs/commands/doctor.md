@@ -43,9 +43,11 @@ instead of falling back to the fake Session Broker.
 With `broker.type: gg-mayasessiond`, doctor runs the daemon `doctor` and
 `status` commands, checks that `maya.exe` is in the interactive desktop session,
 stages and executes a tiny `script.execute` probe under `workRoot/runs/doctor-*`,
-checks `viewport.capture`, and fails if Maya is running in Windows Services
-session `0`. Visual Evidence readiness is reported from that same Session Broker
-probe, not from the static host config alone.
+checks `viewport.capture`, runs a short desktop recording capture/MP4 encode
+probe under the configured work root, and fails if Maya is running in Windows
+Services session `0`. Visual Evidence readiness is reported from those same
+Session Broker and recording prerequisites, not from the static host config or
+viewport capture alone.
 
 ## When To Run
 

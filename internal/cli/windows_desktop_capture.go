@@ -21,6 +21,8 @@ type windowsDesktopTransport interface {
 
 type sshWindowsDesktopTransport mayaHostConfig
 
+var lookPath = exec.LookPath
+
 func (transport sshWindowsDesktopTransport) RunPowerShell(script string, timeout time.Duration) ([]byte, error) {
 	return runSSHCommandOutput(mayaHostConfig(transport), encodedPowerShellCommand(script), timeout)
 }
@@ -35,7 +37,7 @@ func captureWindowsDesktopScreenshot(transport windowsDesktopTransport, remoteRo
 
 func captureWindowsDesktopRecording(transport windowsDesktopTransport, remoteRoot string, duration time.Duration, fps int, ffmpegPath string) ([]byte, error) {
 	if strings.TrimSpace(ffmpegPath) == "" {
-		found, err := exec.LookPath("ffmpeg")
+		found, err := lookPath("ffmpeg")
 		if err != nil {
 			return nil, fmt.Errorf("local ffmpeg is required for Windows desktop recording capture: %w", err)
 		}

@@ -1,16 +1,14 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
-
-const liveVisualEvidenceSmokeDuration = 2 * time.Second
 
 func TestOptInRealVisualEvidenceSmoke(t *testing.T) {
 	options, ok := realSSHSmokeOptionsFromEnv(t)
@@ -25,10 +23,18 @@ func TestOptInRealVisualEvidenceSmoke(t *testing.T) {
 	assertLiveVisualEvidenceHostProof(t, report)
 	t.Logf("Host Health: %s", formatHostHealthReport(report))
 
-	evidenceDir := captureLiveDesktopVisualEvidenceProof(t, dir, options)
-	bundle := assertLiveVisualEvidenceProofBundle(t, evidenceDir)
+	evidenceDir := captureLiveRecordCommandProof(t, dir, options)
+	bundle := assertLiveRecordCommandProofBundle(t, evidenceDir, options)
+	recording := requireLiveRecordCommandArtifact(t, evidenceDir, bundle)
+	t.Logf("Live record command proof: run=%s recording=%s bytes=%d",
+		bundle.RunID,
+		recording.Path,
+		artifactSize(t, evidenceDir, recording),
+	)
+	addLiveDesktopScreenshotForProofArtifact(t, dir, evidenceDir, options)
+	bundle = assertLiveVisualEvidenceProofBundle(t, evidenceDir)
 	screenshot, recording := requireLiveDesktopVisualArtifacts(t, evidenceDir, bundle)
-	t.Logf("Live Visual Evidence proof: run=%s screenshot=%s bytes=%d recording=%s bytes=%d",
+	t.Logf("Live Visual Evidence proof artifact source: run=%s screenshot=%s bytes=%d recording=%s bytes=%d",
 		bundle.RunID,
 		screenshot.Path,
 		artifactSize(t, evidenceDir, screenshot),
@@ -163,6 +169,103 @@ func TestLiveVisualEvidenceProofWorkflowRequiresSmokePass(t *testing.T) {
 	}
 }
 
+func TestRealSSHSmokeRecordArgsUseStandaloneCommand(t *testing.T) {
+	options := realSSHSmokeOptions{
+		HostConfig:    "/tmp/hosts.yaml",
+		TargetProfile: "ci",
+		Host:          "maya-win-01",
+	}
+	got := options.recordArgs()
+	want := []string{"record", "--host-config", "/tmp/hosts.yaml", "--target-profile", "ci", "--host", "maya-win-01"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("record args = %#v, want %#v", got, want)
+	}
+}
+
+func TestLiveRecordCommandProofRejectsInvalidProofShapes(t *testing.T) {
+	liveRuntime := runtimeMetadata{Profile: "ssh-sessiond", HostAdapter: "ssh", BrokerAdapter: "gg-mayasessiond", LiveProofEligible: true}
+	console := []windowsProcessSession{{ProcessID: 42, SessionID: 1, SessionName: "Console", Name: "maya.exe"}}
+	cases := []struct {
+		name      string
+		runtime   runtimeMetadata
+		processes []windowsProcessSession
+		visual    []visualEvidenceArtifact
+		files     map[string][]byte
+		wantErr   string
+		wantValid bool
+	}{
+		{
+			name:      "valid standalone record command bundle",
+			runtime:   liveRuntime,
+			processes: console,
+			visual: []visualEvidenceArtifact{
+				{Kind: "recording", Path: "recordings/recording.mp4", MediaType: "video/mp4", DurationSeconds: defaultRecordingDuration.Seconds(), FPS: defaultRecordingFPS, TargetProfile: "ci", Host: "maya-win-01"},
+			},
+			files:     map[string][]byte{"recordings/recording.mp4": mp4HeaderBytes()},
+			wantValid: true,
+		},
+		{
+			name:      "missing recording metadata",
+			runtime:   liveRuntime,
+			processes: console,
+			visual: []visualEvidenceArtifact{
+				{Kind: "recording", Path: "recordings/recording.mp4", MediaType: "video/mp4", TargetProfile: "ci", Host: "maya-win-01"},
+			},
+			files:   map[string][]byte{"recordings/recording.mp4": mp4HeaderBytes()},
+			wantErr: "duration/FPS metadata",
+		},
+		{
+			name:      "fake bytes",
+			runtime:   liveRuntime,
+			processes: console,
+			visual: []visualEvidenceArtifact{
+				{Kind: "recording", Path: "recordings/recording.mp4", MediaType: "video/mp4", DurationSeconds: defaultRecordingDuration.Seconds(), FPS: defaultRecordingFPS, TargetProfile: "ci", Host: "maya-win-01"},
+			},
+			files:   map[string][]byte{"recordings/recording.mp4": []byte("fake recording")},
+			wantErr: "does not look like an MP4",
+		},
+		{
+			name:      "fake runtime",
+			runtime:   runtimeMetadata{Profile: "fake-local", HostAdapter: "fake", BrokerAdapter: "fake"},
+			processes: console,
+			visual: []visualEvidenceArtifact{
+				{Kind: "recording", Path: "recordings/recording.mp4", MediaType: "video/mp4", DurationSeconds: defaultRecordingDuration.Seconds(), FPS: defaultRecordingFPS, TargetProfile: "ci", Host: "maya-win-01"},
+			},
+			files:   map[string][]byte{"recordings/recording.mp4": mp4HeaderBytes()},
+			wantErr: "live-proof-eligible ssh-sessiond",
+		},
+		{
+			name:      "non console maya",
+			runtime:   liveRuntime,
+			processes: []windowsProcessSession{{ProcessID: 42, SessionID: 0, SessionName: "Services", Name: "maya.exe"}},
+			visual: []visualEvidenceArtifact{
+				{Kind: "recording", Path: "recordings/recording.mp4", MediaType: "video/mp4", DurationSeconds: defaultRecordingDuration.Seconds(), FPS: defaultRecordingFPS, TargetProfile: "ci", Host: "maya-win-01"},
+			},
+			files:   map[string][]byte{"recordings/recording.mp4": mp4HeaderBytes()},
+			wantErr: "interactive Console session",
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			evidenceDir := writeLiveRecordCommandProofBundle(t, tt.runtime, tt.visual, tt.files)
+			bundle, err := validateLiveRecordCommandProofBundle(evidenceDir, tt.processes, "ci", "maya-win-01")
+			if tt.wantValid {
+				if err != nil {
+					t.Fatalf("validateLiveRecordCommandProofBundle returned error: %v", err)
+				}
+				if len(bundle.VisualEvidence) != 1 {
+					t.Fatalf("Visual Evidence count = %d, want 1", len(bundle.VisualEvidence))
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateLiveRecordCommandProofBundle error = %v, want containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestLiveVisualEvidenceHostProofDoesNotDependOnViewportCapture(t *testing.T) {
 	report := hostHealthReport{
 		Runtime: runtimeMetadata{Profile: "ssh-sessiond", HostAdapter: "ssh", BrokerAdapter: "gg-mayasessiond", LiveProofEligible: true},
@@ -213,104 +316,88 @@ func TestWindowsDesktopCaptureCommandsUseInteractiveDesktop(t *testing.T) {
 	}
 }
 
-func captureLiveDesktopVisualEvidenceProof(t *testing.T, repoDir string, options realSSHSmokeOptions) string {
+func captureLiveRecordCommandProof(t *testing.T, repoDir string, options realSSHSmokeOptions) string {
 	t.Helper()
-	host, err := selectHostForRun(repoDir, runOptions{
-		HostConfig:    options.HostConfig,
-		TargetProfile: options.TargetProfile,
-		HostPin:       options.Host,
-	})
+	var stdout, stderr bytes.Buffer
+	code := Run(options.recordArgs(), &stdout, &stderr, repoDir, "test-version")
+	if code != 0 {
+		t.Fatalf("live record command exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	evidenceDir := smokeOutputValue(stdout.String(), "evidence")
+	if evidenceDir == "" {
+		t.Fatalf("live record command did not print Evidence Bundle path:\n%s", stdout.String())
+	}
+	return evidenceDir
+}
+
+func addLiveDesktopScreenshotForProofArtifact(t *testing.T, repoDir string, evidenceDir string, options realSSHSmokeOptions) {
+	t.Helper()
+	bundle := readEvidenceBundle(t, evidenceDir)
+	release, locked, err := acquireHostLock(repoDir, bundle.Host)
 	if err != nil {
-		t.Fatalf("select live Maya Host: %v", err)
+		t.Fatalf("acquire Host Lock for proof artifact screenshot on %s: %v", bundle.Host, err)
+	}
+	if locked {
+		t.Fatalf("selected Maya Host %s became locked before proof artifact screenshot", bundle.Host)
 	}
 	defer func() {
-		if host.release != nil {
-			if err := host.release(); err != nil {
-				t.Fatalf("release Host Lock for %s: %v", host.HostID, err)
-			}
+		if err := release(); err != nil {
+			t.Fatalf("release Host Lock for proof artifact screenshot on %s: %v", bundle.Host, err)
 		}
 	}()
-	resolved, err := resolveRuntimeForHost(host.Config)
-	if err != nil {
-		t.Fatalf("resolve live runtime: %v", err)
-	}
-	if err := requireLiveRuntime(resolved.Metadata); err != nil {
-		t.Fatal(err)
-	}
-	processes, err := mayaTasklistSessions(host.Config)
+	host := liveSmokeHostConfigByID(t, options, bundle.Host)
+	processes, err := mayaTasklistSessions(host)
 	if err != nil {
 		t.Fatalf("query maya.exe tasklist sessions: %v", err)
 	}
 	if err := requireConsoleMayaProcess(processes); err != nil {
 		t.Fatal(err)
 	}
-
-	runID := time.Now().UTC().Format("20060102T150405.000000000Z")
-	workspace, err := newRunWorkspace(repoDir, runID, host.Config.WorkRoot, evidenceStandaloneResultName)
+	remoteRoot := remoteJoin(host.WorkRoot, "artifacts", "live-visual-evidence-"+bundle.RunID)
+	defer func() {
+		_ = ggMayaSessiondBroker{host: host}.removeRemotePath(remoteRoot)
+	}()
+	screenshotBytes, err := captureWindowsDesktopScreenshot(sshWindowsDesktopTransport(host), remoteRoot)
 	if err != nil {
-		t.Fatalf("create live Visual Evidence workspace: %v", err)
+		t.Fatalf("capture desktop screenshot for proof artifact: %v", err)
 	}
 	context := runContext{
-		RepoDir:      repoDir,
-		RunWorkspace: workspace,
-		StateDir:     workspace.StateDir(),
-		EvidenceDir:  workspace.EvidenceDir(),
-		Workspace:    workspace.LocalWorkspace(),
-		EventsPath:   workspace.EventsPath(),
-		LogPath:      workspace.LogPath(),
-	}
-	if err := createCleanRunDirs(context); err != nil {
-		t.Fatalf("create live Visual Evidence dirs: %v", err)
-	}
-	manifest := runManifest{
-		RunID:         runID,
-		Scenario:      "live-visual-evidence-proof",
-		TargetProfile: host.TargetProfile,
-		Host:          host.HostID,
-		Runtime:       resolved.Metadata,
-	}
-	if err := writeJSONFile(filepath.Join(context.StateDir, "manifest.json"), manifest); err != nil {
-		t.Fatalf("write manifest: %v", err)
-	}
-	if err := appendEvent(context.EventsPath, "visual-evidence.live-proof.started", "desktop"); err != nil {
-		t.Fatalf("write start event: %v", err)
-	}
-	if err := os.WriteFile(context.LogPath, []byte("live desktop Visual Evidence proof captured from the interactive Windows session\n"), 0o644); err != nil {
-		t.Fatalf("write proof log: %v", err)
-	}
-
-	remoteRoot := remoteJoin(host.Config.WorkRoot, "artifacts", "live-visual-evidence-"+runID)
-	transport := sshWindowsDesktopTransport(host.Config)
-	screenshotBytes, err := captureWindowsDesktopScreenshot(transport, remoteRoot)
-	if err != nil {
-		t.Fatalf("capture desktop screenshot: %v", err)
+		EvidenceDir: evidenceDir,
+		EventsPath:  filepath.Join(evidenceDir, evidenceEventsFileName),
 	}
 	screenshot, err := registerVisualEvidenceBytes(context, "screenshot", "desktop-screenshot.png", "image/png", screenshotBytes)
 	if err != nil {
-		t.Fatalf("register desktop screenshot: %v", err)
+		t.Fatalf("register desktop screenshot for proof artifact: %v", err)
 	}
-	recordingBytes, err := captureWindowsDesktopRecording(transport, remoteRoot, liveVisualEvidenceSmokeDuration, 2, "")
+	screenshot.TargetProfile = bundle.TargetProfile
+	screenshot.Host = bundle.Host
+	bundle.VisualEvidence = append([]visualEvidenceArtifact{screenshot}, bundle.VisualEvidence...)
+	bundle.Artifacts = buildEvidenceBundleCatalog(bundle)
+	if err := writeJSONFile(filepath.Join(evidenceDir, evidenceBundleFileName), bundle); err != nil {
+		t.Fatalf("update live proof Evidence Bundle with desktop screenshot: %v", err)
+	}
+}
+
+func liveSmokeHostConfigByID(t *testing.T, options realSSHSmokeOptions, hostID string) mayaHostConfig {
+	t.Helper()
+	if hostID == "" {
+		t.Fatalf("live Evidence Bundle did not record a selected Maya Host")
+	}
+	config, err := loadUserHostConfig(options.HostConfig)
 	if err != nil {
-		t.Fatalf("capture desktop recording: %v", err)
+		t.Fatalf("load live host config: %v", err)
 	}
-	recording, err := registerVisualEvidenceBytes(context, "recording", "desktop-recording.mp4", "video/mp4", recordingBytes)
+	candidates, err := hostCandidates(config, options.TargetProfile, hostID)
 	if err != nil {
-		t.Fatalf("register desktop recording: %v", err)
+		t.Fatalf("select live host config: %v", err)
 	}
-	result := ScenarioResult{Status: resultStatusPassed, Summary: "live desktop Visual Evidence proof captured"}
-	if err := writeJSONFile(filepath.Join(context.EvidenceDir, evidenceScenarioResultFileName), result); err != nil {
-		t.Fatalf("write proof result: %v", err)
+	if len(candidates) != 1 || candidates[0].ID != hostID {
+		t.Fatalf("selected live host config = %+v, want host %q", candidates, hostID)
 	}
-	if err := appendEvent(context.EventsPath, "visual-evidence.live-proof.completed", screenshot.Path+" "+recording.Path); err != nil {
-		t.Fatalf("write complete event: %v", err)
+	if !isHealthyHost(candidates[0]) {
+		t.Fatalf("selected live host %q is not healthy in Target Profile %q", hostID, options.TargetProfile)
 	}
-	if err := writeEvidenceBundle(context, manifest, scenarioContract{}, result, []visualEvidenceArtifact{screenshot, recording}, nil); err != nil {
-		t.Fatalf("write Evidence Bundle: %v", err)
-	}
-	if _, err := validateLiveVisualEvidenceProofBundle(context.EvidenceDir, processes); err != nil {
-		t.Fatalf("validate live Visual Evidence proof: %v", err)
-	}
-	return context.EvidenceDir
+	return candidates[0]
 }
 
 func publishOptionalLiveVisualEvidenceProofArtifact(t *testing.T, evidenceDir string) {
@@ -399,6 +486,94 @@ func validateLiveVisualEvidenceHostProof(report hostHealthReport) error {
 		return fmt.Errorf("session-broker Host Health = %+v, want interactive gg_mayasessiond", broker)
 	}
 	return nil
+}
+
+func assertLiveRecordCommandProofBundle(t *testing.T, evidenceDir string, options realSSHSmokeOptions) evidenceBundle {
+	t.Helper()
+	selected := readEvidenceBundle(t, evidenceDir)
+	host := liveSmokeHostConfigByID(t, options, selected.Host)
+	processes, err := mayaTasklistSessions(host)
+	if err != nil {
+		t.Fatalf("query maya.exe tasklist sessions: %v", err)
+	}
+	bundle, err := validateLiveRecordCommandProofBundle(evidenceDir, processes, options.TargetProfile, options.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bundle
+}
+
+func validateLiveRecordCommandProofBundle(evidenceDir string, processes []windowsProcessSession, targetProfile string, hostPin string) (evidenceBundle, error) {
+	content, err := os.ReadFile(filepath.Join(evidenceDir, evidenceBundleFileName))
+	if err != nil {
+		return evidenceBundle{}, err
+	}
+	var bundle evidenceBundle
+	if err := json.Unmarshal(content, &bundle); err != nil {
+		return evidenceBundle{}, err
+	}
+	if err := requireLiveRuntime(bundle.Runtime); err != nil {
+		return evidenceBundle{}, err
+	}
+	if err := requireConsoleMayaProcess(processes); err != nil {
+		return evidenceBundle{}, err
+	}
+	if bundle.Scenario != evidenceStandaloneScenarioPrefix+"recording" {
+		return evidenceBundle{}, fmt.Errorf("Evidence Bundle scenario = %q, want standalone record command scenario", bundle.Scenario)
+	}
+	if bundle.TargetProfile != targetProfile {
+		return evidenceBundle{}, fmt.Errorf("Evidence Bundle Target Profile = %q, want %q", bundle.TargetProfile, targetProfile)
+	}
+	if hostPin != "" && bundle.Host != hostPin {
+		return evidenceBundle{}, fmt.Errorf("Evidence Bundle selected Maya Host = %q, want pinned host %q", bundle.Host, hostPin)
+	}
+	recording, err := liveRecordCommandArtifact(bundle)
+	if err != nil {
+		return evidenceBundle{}, err
+	}
+	if recording.DurationSeconds <= 0 || recording.FPS <= 0 {
+		return evidenceBundle{}, fmt.Errorf("recording %s missing duration/FPS metadata: %+v", recording.Path, recording)
+	}
+	if recording.TargetProfile != bundle.TargetProfile || recording.Host != bundle.Host {
+		return evidenceBundle{}, fmt.Errorf("recording target metadata = %+v, want Target Profile %q and Maya Host %q", recording, bundle.TargetProfile, bundle.Host)
+	}
+	recordingBytes, err := os.ReadFile(filepath.Join(evidenceDir, filepath.FromSlash(recording.Path)))
+	if err != nil {
+		return evidenceBundle{}, err
+	}
+	if !looksLikeMP4Bytes(recordingBytes) {
+		return evidenceBundle{}, fmt.Errorf("recording %s does not look like an MP4", recording.Path)
+	}
+	return bundle, nil
+}
+
+func liveRecordCommandArtifact(bundle evidenceBundle) (visualEvidenceArtifact, error) {
+	var recordings []visualEvidenceArtifact
+	for _, artifact := range bundle.VisualEvidence {
+		if artifact.Kind == "recording" {
+			recordings = append(recordings, artifact)
+		}
+	}
+	if len(recordings) != 1 {
+		return visualEvidenceArtifact{}, fmt.Errorf("Evidence Bundle has %d recording artifacts, want 1", len(recordings))
+	}
+	recording := recordings[0]
+	if recording.MediaType != "video/mp4" || !strings.HasPrefix(recording.Path, evidenceRecordingsDir+"/") {
+		return visualEvidenceArtifact{}, fmt.Errorf("recording artifact = %+v, want video/mp4 under recordings/", recording)
+	}
+	return recording, nil
+}
+
+func requireLiveRecordCommandArtifact(t *testing.T, evidenceDir string, bundle evidenceBundle) visualEvidenceArtifact {
+	t.Helper()
+	recording, err := liveRecordCommandArtifact(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(evidenceDir, filepath.FromSlash(recording.Path))); err != nil {
+		t.Fatalf("missing record command artifact %s: %v", recording.Path, err)
+	}
+	return recording
 }
 
 func hostHealthLayerByID(report hostHealthReport, id string) (hostHealthLayer, bool) {
@@ -521,6 +696,23 @@ func writeLiveVisualEvidenceProofBundle(t *testing.T, runtime runtimeMetadata, v
 	bundle.Artifacts = buildEvidenceBundleCatalog(bundle)
 	if err := writeJSONFile(filepath.Join(dir, evidenceBundleFileName), bundle); err != nil {
 		t.Fatalf("write evidence bundle: %v", err)
+	}
+	return dir
+}
+
+func writeLiveRecordCommandProofBundle(t *testing.T, runtime runtimeMetadata, visual []visualEvidenceArtifact, files map[string][]byte) string {
+	t.Helper()
+	dir := writeLiveVisualEvidenceProofBundle(t, runtime, visual, files)
+	bundle := readEvidenceBundle(t, dir)
+	bundle.Scenario = evidenceStandaloneScenarioPrefix + "recording"
+	if len(visual) > 0 {
+		bundle.TargetProfile = visual[0].TargetProfile
+		bundle.Host = visual[0].Host
+	}
+	bundle.VisualEvidence = visual
+	bundle.Artifacts = buildEvidenceBundleCatalog(bundle)
+	if err := writeJSONFile(filepath.Join(dir, evidenceBundleFileName), bundle); err != nil {
+		t.Fatalf("write record command proof bundle: %v", err)
 	}
 	return dir
 }

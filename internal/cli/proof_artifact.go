@@ -284,10 +284,12 @@ func liveDesktopVisualArtifacts(bundle evidenceBundle) (visualEvidenceArtifact, 
 	var screenshot visualEvidenceArtifact
 	var recording visualEvidenceArtifact
 	for _, artifact := range bundle.VisualEvidence {
+		cleanPath := cleanEvidenceArtifactPath(artifact.Path)
 		switch {
 		case artifact.Kind == "screenshot" && artifact.MediaType == "image/png" && artifact.Path == "screenshots/desktop-screenshot.png":
 			screenshot = artifact
-		case artifact.Kind == "recording" && artifact.MediaType == "video/mp4" && artifact.Path == "recordings/desktop-recording.mp4":
+		case artifact.Kind == "recording" && artifact.MediaType == "video/mp4" && isLiveDesktopRecordingPath(cleanPath):
+			artifact.Path = cleanPath
 			recording = artifact
 		}
 	}
@@ -295,6 +297,15 @@ func liveDesktopVisualArtifacts(bundle evidenceBundle) (visualEvidenceArtifact, 
 		return visualEvidenceArtifact{}, visualEvidenceArtifact{}, fmt.Errorf("live Visual Evidence proof requires desktop screenshot and desktop recording artifacts, got %+v", bundle.VisualEvidence)
 	}
 	return screenshot, recording, nil
+}
+
+func isLiveDesktopRecordingPath(path string) bool {
+	switch path {
+	case "recordings/desktop-recording.mp4", "recordings/recording.mp4":
+		return true
+	default:
+		return false
+	}
 }
 
 func proofArtifactFileEntry(root string, relative string, kind string, mediaType string) (liveVisualEvidenceProofArtifactFile, error) {

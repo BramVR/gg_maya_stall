@@ -226,6 +226,14 @@ func (options realSSHSmokeOptions) runArgs(scenario string, extra ...string) []s
 	return append(args, scenario)
 }
 
+func (options realSSHSmokeOptions) recordArgs(extra ...string) []string {
+	args := []string{"record", "--host-config", options.HostConfig, "--target-profile", options.TargetProfile}
+	if options.Host != "" {
+		args = append(args, "--host", options.Host)
+	}
+	return append(args, extra...)
+}
+
 func assertLiveHostHealthProof(t *testing.T, report hostHealthReport) {
 	t.Helper()
 	if !report.Healthy {

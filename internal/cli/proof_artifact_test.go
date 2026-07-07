@@ -156,6 +156,28 @@ func TestPublishLiveProofArtifactRejectsMissingLiveArtifactPath(t *testing.T) {
 	}
 }
 
+func TestPublishLiveProofArtifactRejectsTraversalRecordingPath(t *testing.T) {
+	evidenceDir := writeLiveVisualEvidenceProofBundle(t,
+		runtimeMetadata{Profile: "ssh-sessiond", HostAdapter: "ssh", BrokerAdapter: "gg-mayasessiond", LiveProofEligible: true},
+		[]visualEvidenceArtifact{
+			{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png"},
+			{Kind: "recording", Path: "recordings/../logs/session.log", MediaType: "video/mp4"},
+		},
+		map[string][]byte{
+			"screenshots/desktop-screenshot.png": pngHeaderBytes(),
+		},
+	)
+	_, err := publishLiveVisualEvidenceProofArtifact(evidenceDir, liveVisualEvidenceProofArtifactOptions{
+		Enabled:         true,
+		Destination:     filepath.Join(t.TempDir(), "proof"),
+		PublicHostAlias: "maya-live-proof-host",
+		MediaReviewed:   true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "desktop recording artifacts") {
+		t.Fatalf("traversal recording path error = %v", err)
+	}
+}
+
 func TestPublishLiveProofArtifactRejectsConfidentialHostAlias(t *testing.T) {
 	evidenceDir := writeLiveVisualEvidenceProofBundle(t,
 		runtimeMetadata{Profile: "ssh-sessiond", HostAdapter: "ssh", BrokerAdapter: "gg-mayasessiond", LiveProofEligible: true},

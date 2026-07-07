@@ -4,6 +4,10 @@ All notable user-facing changes for Maya Stall are recorded here.
 
 Release history starts with `v0.1.0`.
 
+## Unreleased
+
+- No changes yet.
+
 ## v0.1.0 - 2026-07-07
 
 ### Added

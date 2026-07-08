@@ -28,13 +28,18 @@ against a configured real Windows Maya Host. Skipped, missing, or fake-only live
 proof is a failure.
 
 The live gate runs desktop Visual Evidence and desktop control proof first,
-then the older SSH smokes:
+then the older SSH smokes, then the retained run-scoped desktop ops smoke last
+because stopping a retained `gg_mayasessiond` run can tear down the broker
+session. Retained-stop smokes restart the documented interactive sessiond UI
+scheduled task before the next proof step:
 
 ```sh
 go test ./internal/cli -run TestOptInRealVisualEvidenceSmoke -count=1
 go test ./internal/cli -run TestOptInRealDesktopControlModalSmoke -count=1
+go test ./internal/cli -run TestOptInRealSSHDoctorSmoke -count=1
+go test ./internal/cli -run TestOptInRealSSHConsumingRepoSmoke -count=1
+go test ./internal/cli -run TestOptInRealSSHRunSmoke -count=1
 go test ./internal/cli -run TestOptInRealRunScopedDesktopOpsSmoke -count=1
-go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke' -count=1
 ```
 
 That opt-in smoke runs `maya-stall doctor --scenario smoke`, then one real

@@ -258,8 +258,10 @@ jobs:
           set -euo pipefail
           go test -json ./internal/cli -run TestOptInRealVisualEvidenceSmoke -count=1 | tee artifacts/proof/live-smoke.jsonl
           go test -json ./internal/cli -run TestOptInRealDesktopControlModalSmoke -count=1 | tee -a artifacts/proof/live-smoke.jsonl
+          go test -json ./internal/cli -run TestOptInRealSSHDoctorSmoke -count=1 | tee -a artifacts/proof/live-smoke.jsonl
+          go test -json ./internal/cli -run TestOptInRealSSHConsumingRepoSmoke -count=1 | tee -a artifacts/proof/live-smoke.jsonl
+          go test -json ./internal/cli -run TestOptInRealSSHRunSmoke -count=1 | tee -a artifacts/proof/live-smoke.jsonl
           go test -json ./internal/cli -run TestOptInRealRunScopedDesktopOpsSmoke -count=1 | tee -a artifacts/proof/live-smoke.jsonl
-          go test -json ./internal/cli -run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke' -count=1 | tee -a artifacts/proof/live-smoke.jsonl
 
       - name: Public Artifact Confidentiality Gate
         id: public-artifact-confidentiality

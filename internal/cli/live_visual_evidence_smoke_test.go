@@ -132,6 +132,7 @@ func TestOptInRealRunScopedDesktopOpsSmoke(t *testing.T) {
 		if code != 0 && !strings.Contains(stderr.String(), "not found") {
 			t.Fatalf("cleanup retained run exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 		}
+		restoreLiveSessionBrokerFixture(t, host)
 	}()
 
 	var standaloneStdout, standaloneStderr bytes.Buffer
@@ -290,7 +291,10 @@ func TestLiveVisualEvidenceProofWorkflowRequiresSmokePass(t *testing.T) {
 		"TestOptInRealDesktopControlModalSmoke",
 		"run TestOptInRealVisualEvidenceSmoke -count=1",
 		"run TestOptInRealDesktopControlModalSmoke -count=1",
-		"run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke' -count=1",
+		"run TestOptInRealSSHDoctorSmoke -count=1",
+		"run TestOptInRealSSHConsumingRepoSmoke -count=1",
+		"run TestOptInRealSSHRunSmoke -count=1",
+		"run TestOptInRealRunScopedDesktopOpsSmoke -count=1",
 		"MAYA_STALL_LIVE_PROOF_ARTIFACT_ENABLED",
 		"MAYA_STALL_LIVE_PROOF_MEDIA_REVIEWED",
 		"live-visual-evidence-proof",
@@ -745,6 +749,8 @@ const (
 	liveDesktopControlModalButton = 130
 	liveDesktopControlModalClickX = 300
 	liveDesktopControlModalClickY = 251
+	defaultLiveSessiondUITaskName = "MayaStallSessiondUI"
+	smokeSessiondUITaskEnv        = "MAYA_STALL_SMOKE_SESSIOND_UI_TASK"
 )
 
 type liveDesktopControlModalFixture struct {
@@ -804,6 +810,19 @@ func cleanupLiveDesktopControlModalFixture(t *testing.T, host mayaHostConfig, fi
 
 func waitForLiveSessionBrokerCallReady(t *testing.T, host mayaHostConfig) {
 	t.Helper()
+	var lastErr error
+	for i := 0; i < 10; i++ {
+		if err := liveSessionBrokerCallReady(host); err == nil {
+			return
+		} else {
+			lastErr = err
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("session broker call server did not settle after desktop control modal proof: %v", lastErr)
+}
+
+func liveSessionBrokerCallReady(host mayaHostConfig) error {
 	stateDir := strings.TrimSpace(host.Broker.StateDir)
 	if stateDir == "" {
 		stateDir = "C:/maya-stall/sessiond-ui"
@@ -823,18 +842,61 @@ cd %s
 		powerShellSingleQuoted(python),
 		powerShellSingleQuoted(stateDir),
 	)
-	var lastErr error
-	var lastRaw []byte
-	for i := 0; i < 10; i++ {
-		raw, err := runSSHCommandOutput(host, encodedPowerShellCommand(script), 10*time.Second)
-		if err == nil && strings.Contains(string(raw), `"ok": true`) {
-			return
-		}
-		lastErr = err
-		lastRaw = raw
-		time.Sleep(500 * time.Millisecond)
+	raw, err := runSSHCommandOutput(host, encodedPowerShellCommand(script), 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(raw)))
 	}
-	t.Fatalf("session broker call server did not settle after desktop control modal proof: %v: %s", lastErr, strings.TrimSpace(string(lastRaw)))
+	if !strings.Contains(string(raw), `"ok": true`) {
+		return fmt.Errorf("session broker call list did not report ok: %s", strings.TrimSpace(string(raw)))
+	}
+	return nil
+}
+
+func liveSessionBrokerFixtureReady(host mayaHostConfig) error {
+	processes, err := mayaTasklistSessions(host)
+	if err != nil {
+		return err
+	}
+	if err := requireConsoleMayaProcess(processes); err != nil {
+		return err
+	}
+	return liveSessionBrokerCallReady(host)
+}
+
+func restoreLiveSessionBrokerFixture(t *testing.T, host mayaHostConfig) {
+	t.Helper()
+	if err := liveSessionBrokerFixtureReady(host); err == nil {
+		return
+	}
+	taskName := strings.TrimSpace(os.Getenv(smokeSessiondUITaskEnv))
+	if taskName == "" {
+		taskName = defaultLiveSessiondUITaskName
+	}
+	script := fmt.Sprintf(`$ErrorActionPreference = "Stop"
+$taskName = %s
+$task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+if ($task.State -eq "Running") {
+  Write-Output "running"
+} else {
+  Start-ScheduledTask -InputObject $task
+  Write-Output "started"
+}`,
+		powerShellSingleQuoted(taskName),
+	)
+	if raw, err := runSSHCommandOutput(host, encodedPowerShellCommand(script), sessiondCommandTimeout); err != nil {
+		t.Fatalf("restore live session broker fixture with scheduled task %q: %v: %s", taskName, err, strings.TrimSpace(string(raw)))
+	}
+	var lastErr error
+	deadline := time.Now().Add(3 * time.Minute)
+	for time.Now().Before(deadline) {
+		if err := liveSessionBrokerFixtureReady(host); err == nil {
+			return
+		} else {
+			lastErr = err
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatalf("restore live session broker fixture did not return Maya and session broker to the interactive Console session: %v", lastErr)
 }
 
 func liveDesktopControlModalFixturePowerShell(fixture liveDesktopControlModalFixture) string {

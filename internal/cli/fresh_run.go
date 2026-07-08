@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 )
@@ -157,11 +158,62 @@ func (run *freshRunLifecycle) setup() error {
 func (run *freshRunLifecycle) execute() error {
 	result, err := run.runtime.Broker.RunScenario(run.context, run.scenario.Config)
 	if err != nil {
+		if evidenceErr := run.collectPreResultFailureEvidence(err); evidenceErr != nil {
+			return errors.Join(err, evidenceErr)
+		}
 		return err
 	}
 	run.brokerResult = result
 	run.result = result
 	return nil
+}
+
+func (run *freshRunLifecycle) collectPreResultFailureEvidence(runErr error) error {
+	if err := ensureFailureLog(run.context, runErr); err != nil {
+		return err
+	}
+	summary := fmt.Sprintf("Scenario failed before result collection: %v", runErr)
+	if err := appendEvent(run.context.EventsPath, "run.failed-before-result-collection", summary); err != nil {
+		return err
+	}
+	result := ScenarioResult{Status: resultStatusFailed, Summary: summary}
+	document := newScenarioResultDocument(result)
+	if err := writeScenarioResult(run.context, run.scenario.ScenarioResultPath, document); err != nil {
+		return err
+	}
+	var artifacts []visualEvidenceArtifact
+	if capturer, ok := run.runtime.Broker.(screenshotCapturer); ok && run.scenario.Config.Evidence.Screenshots.Enabled {
+		artifact, err := capturer.CaptureScreenshot(run.context, screenshotRequest{Name: "failure-desktop.png"})
+		if err == nil {
+			artifacts = append(artifacts, artifact)
+			annotateVisualEvidenceTarget(artifacts, run.manifest.TargetProfile, run.manifest.Host)
+			if eventErr := appendEvent(run.context.EventsPath, "visual-evidence.failure-screenshot", artifact.Path); eventErr != nil {
+				return eventErr
+			}
+		} else if eventErr := appendEvent(run.context.EventsPath, "visual-evidence.failure-screenshot.failed", err.Error()); eventErr != nil {
+			return eventErr
+		}
+	}
+	return writeEvidenceBundle(run.context, run.manifest, run.scenario, result, artifacts, nil)
+}
+
+func ensureFailureLog(context runContext, runErr error) error {
+	if _, err := os.Stat(context.LogPath); err == nil {
+		return appendFile(context.LogPath, fmt.Sprintf("Scenario failed before result collection: %v\n", runErr))
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return os.WriteFile(context.LogPath, []byte(fmt.Sprintf("Scenario failed before result collection: %v\n", runErr)), 0o644)
+}
+
+func appendFile(path string, content string) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	_, err = file.WriteString(content)
+	return err
 }
 
 func (run *freshRunLifecycle) settle() (runOutcome, error) {

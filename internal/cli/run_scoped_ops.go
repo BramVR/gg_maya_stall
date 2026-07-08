@@ -357,10 +357,10 @@ func readHostLockRunOwner(lockPath string) (kind string, runID string, stale boo
 		return "", "", false, false, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return "", "", false, false, fmt.Errorf("Host Lock %s must not be a symlink", lockPath)
+		return "", "", false, false, fmt.Errorf("host lock %s must not be a symlink", lockPath)
 	}
 	if !info.Mode().IsRegular() {
-		return "", "", false, false, fmt.Errorf("Host Lock %s must be a regular file", lockPath)
+		return "", "", false, false, fmt.Errorf("host lock %s must be a regular file", lockPath)
 	}
 	content, err := os.ReadFile(lockPath)
 	if err != nil {

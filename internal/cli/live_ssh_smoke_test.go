@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -232,6 +233,27 @@ func (options realSSHSmokeOptions) recordArgs(extra ...string) []string {
 	if options.Host != "" {
 		args = append(args, "--host", options.Host)
 	}
+	return append(args, extra...)
+}
+
+func (options realSSHSmokeOptions) screenshotArgs(extra ...string) []string {
+	args := []string{"screenshot", "--host-config", options.HostConfig, "--target-profile", options.TargetProfile}
+	if options.Host != "" {
+		args = append(args, "--host", options.Host)
+	}
+	return append(args, extra...)
+}
+
+func (options realSSHSmokeOptions) controlClickArgs(x int, y int, extra ...string) []string {
+	args := []string{
+		"control", "click",
+		"--host-config", options.HostConfig,
+		"--target-profile", options.TargetProfile,
+	}
+	if options.Host != "" {
+		args = append(args, "--host", options.Host)
+	}
+	args = append(args, "--x", strconv.Itoa(x), "--y", strconv.Itoa(y))
 	return append(args, extra...)
 }
 

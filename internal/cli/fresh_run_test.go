@@ -271,7 +271,7 @@ type failingScreenshotSessionBroker struct {
 }
 
 func (broker failingScreenshotSessionBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
-	return failingSessionBroker{message: broker.message}.RunScenario(context, scenario)
+	return failingSessionBroker(broker).RunScenario(context, scenario)
 }
 
 func (failingScreenshotSessionBroker) CaptureScreenshot(context runContext, request screenshotRequest) (visualEvidenceArtifact, error) {

@@ -121,17 +121,17 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 	case "control":
 		options, err := parseDesktopControlArgs(args[1:])
 		if err != nil {
-			fmt.Fprintf(stderr, "maya-stall control: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "maya-stall control: %v\n", err)
 			return 2
 		}
 		outcome, err := runDesktopControl(workDir, options, runtime)
 		if err != nil {
 			var userErr *usageError
 			if errors.As(err, &userErr) {
-				fmt.Fprintf(stderr, "maya-stall control: %v\n", err)
+				_, _ = fmt.Fprintf(stderr, "maya-stall control: %v\n", err)
 				return 2
 			}
-			fmt.Fprintf(stderr, "maya-stall control: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "maya-stall control: %v\n", err)
 			return 1
 		}
 		printDesktopControlOutcome(stdout, outcome)

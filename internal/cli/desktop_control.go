@@ -132,7 +132,7 @@ func runDesktopControl(repoDir string, options desktopControlOptions, runtime ru
 	}
 	clicker, ok := runtime.Broker.(desktopClicker)
 	if !ok {
-		return desktopControlOutcome{}, fmt.Errorf("Session Broker does not support desktop control")
+		return desktopControlOutcome{}, fmt.Errorf("session broker does not support desktop control")
 	}
 	runID := runtime.Now().UTC().Format("20060102T150405.000000000Z")
 	workspace, err := newRunWorkspace(repoDir, runID, host.Config.WorkRoot, "outputs/desktop-control.json")

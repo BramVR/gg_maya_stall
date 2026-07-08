@@ -267,12 +267,13 @@ Doctor layer:
 - Treat real desktop screenshot and recording evidence as full Windows virtual
   desktop proof across attached monitors, not primary-screen-only proof.
 - When broker execution fails after the remote workspace exists, Maya Stall
-  writes a failed Evidence Bundle, best-effort downloads declared outputs and
-  any available Scenario Result JSON, and best-effort captures
-  `screenshots/failure-desktop.png` through the configured screenshot path when
-  Scenario screenshot evidence is enabled. The run remains failed even if the
-  collected Scenario Result says the Scenario passed before the broker
-  disconnected.
+  best-effort downloads declared outputs and any available Scenario Result JSON.
+  If that collected Scenario Result is valid, explicitly `passed`, and
+  configured Validators pass against the collected outputs, the run can recover
+  as passed without relying on screenshots. Missing, malformed, failed,
+  incomplete, or Validator-failing results remain failed; unrecovered failures
+  also best-effort capture `screenshots/failure-desktop.png` through the
+  configured screenshot path when Scenario screenshot evidence is enabled.
 - Treat viewport capture alone as insufficient if the Maya process is not in the interactive desktop.
 - Keep Visual Evidence enabled for CI proof unless a Scenario explicitly does not require it.
 - Screenshot capture writes PNG artifacts. Recording capture writes MP4

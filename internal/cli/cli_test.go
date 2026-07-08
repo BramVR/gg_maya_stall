@@ -4603,7 +4603,7 @@ hostPools:
 	}
 }
 
-func TestRunScenarioRealSSHCollectsOutputsAfterBrokerDisconnect(t *testing.T) {
+func TestRunScenarioRealSSHAcceptsCollectedCompletionAfterBrokerDisconnect(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	configPath := filepath.Join(dir, ".maya-stall.yaml")
 	contentBytes, err := os.ReadFile(configPath)
@@ -4611,6 +4611,19 @@ func TestRunScenarioRealSSHCollectsOutputsAfterBrokerDisconnect(t *testing.T) {
 		t.Fatalf("read config fixture: %v", err)
 	}
 	content := strings.Replace(string(contentBytes), "files: []", "files:\n        - \"outputs/product-ui-e2e-result.json\"\n        - \"outputs/parity.json\"", 1)
+	content = strings.Replace(content, "    evidence:", `    validators:
+      - type: scenarioResultStatus
+        status: passed
+      - type: jsonEquals
+        path: "outputs/product-ui-e2e-result.json"
+        jsonPath: "$.product"
+        equals: ok
+      - type: numericApprox
+        path: "outputs/parity.json"
+        jsonPath: "$.maxAbsDiff"
+        equals: 0
+        tolerance: 0.001
+    evidence:`, 1)
 	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("write config fixture: %v", err)
 	}
@@ -4647,23 +4660,35 @@ hostPools:
 	var stdout, stderr bytes.Buffer
 
 	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
-	if code != 1 {
-		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "Cannot connect to Maya commandPort") {
-		t.Fatalf("run error missing broker disconnect: %s", stderr.String())
+	if !strings.Contains(stdout.String(), "status: passed") {
+		t.Fatalf("run output missing passed status:\n%s", stdout.String())
 	}
 	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
 	bundle := readEvidenceBundle(t, evidence)
-	if bundle.Status != resultStatusFailed {
-		t.Fatalf("Evidence Bundle status = %q, want failed", bundle.Status)
+	if bundle.Status != resultStatusPassed {
+		t.Fatalf("Evidence Bundle status = %q, want passed", bundle.Status)
+	}
+	if len(bundle.Validators) != 3 {
+		t.Fatalf("validator count = %d, want 3: %+v", len(bundle.Validators), bundle.Validators)
+	}
+	for _, result := range bundle.Validators {
+		if result.Status != resultStatusPassed {
+			t.Fatalf("validator = %+v, want passed", result)
+		}
 	}
 	scenarioResultBytes, err := os.ReadFile(filepath.Join(evidence, "scenario-result.json"))
 	if err != nil {
 		t.Fatalf("read collected Scenario Result: %v", err)
 	}
-	if !strings.Contains(string(scenarioResultBytes), `"status":"passed"`) || !strings.Contains(string(scenarioResultBytes), "product Scenario passed") {
-		t.Fatalf("collected Scenario Result did not preserve product pass:\n%s", string(scenarioResultBytes))
+	var scenarioResult ScenarioResult
+	if err := json.Unmarshal(scenarioResultBytes, &scenarioResult); err != nil {
+		t.Fatalf("parse collected Scenario Result: %v", err)
+	}
+	if scenarioResult.Status != resultStatusPassed || scenarioResult.Summary != "product Scenario passed" {
+		t.Fatalf("collected Scenario Result = %+v, want product pass", scenarioResult)
 	}
 	for _, path := range []string{
 		filepath.Join(evidence, "outputs", "product-ui-e2e-result.json"),
@@ -4677,8 +4702,8 @@ hostPools:
 	if err != nil {
 		t.Fatalf("read failure events: %v", err)
 	}
-	if !strings.Contains(string(eventsBytes), "run.failed-before-result-collection") || !strings.Contains(string(eventsBytes), "Cannot connect to Maya commandPort") {
-		t.Fatalf("Evidence Bundle events missing broker failure:\n%s", string(eventsBytes))
+	if !strings.Contains(string(eventsBytes), "run.recovered-after-broker-failure") || !strings.Contains(string(eventsBytes), "Cannot connect to Maya commandPort") {
+		t.Fatalf("Evidence Bundle events missing broker recovery:\n%s", string(eventsBytes))
 	}
 }
 

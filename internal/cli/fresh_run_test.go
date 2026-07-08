@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -177,6 +178,170 @@ scenarios:
 	})
 }
 
+func TestFreshRunLifecycleAcceptsCompletedScenarioAfterBrokerFailure(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload: {}
+    expectedOutputs:
+      files:
+        - "outputs/parity.json"
+        - "outputs/smoke.ma"
+      scenarioResult: "outputs/result.json"
+    validators:
+      - type: scenarioResultStatus
+        status: passed
+      - type: outputExists
+        path: "outputs/parity.json"
+      - type: outputExists
+        path: "outputs/smoke.ma"
+      - type: numericApprox
+        path: "outputs/parity.json"
+        jsonPath: "$.maxAbsDiff"
+        equals: 0
+        tolerance: 0.001
+    evidence:
+      screenshots:
+        enabled: true
+`)
+	runtime := defaultRunRuntime()
+	runtime.Broker = brokerFailureAfterScenarioCompletion{
+		result: `{"status":"passed","summary":"Scenario completed before broker timeout"}` + "\n",
+		files: map[string]string{
+			"outputs/parity.json": `{"maxAbsDiff":0.000000035}` + "\n",
+			"outputs/smoke.ma":    "// saved scene\n",
+		},
+		message: "ssh command timed out after 10m30s",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := RunWithRuntime([]string{"run", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "status: passed") {
+		t.Fatalf("run output missing passed status:\n%s", stdout.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	bundle := readEvidenceBundle(t, evidence)
+	if bundle.Status != resultStatusPassed {
+		t.Fatalf("recovered Evidence Bundle status = %q, want passed", bundle.Status)
+	}
+	requireOutputArtifact(t, bundle, "outputs/parity.json")
+	requireOutputArtifact(t, bundle, "outputs/smoke.ma")
+	if len(bundle.VisualEvidence) != 0 {
+		t.Fatalf("recovered Evidence Bundle Visual Evidence = %+v, want none", bundle.VisualEvidence)
+	}
+	if len(bundle.Validators) != 4 {
+		t.Fatalf("validator count = %d, want 4: %+v", len(bundle.Validators), bundle.Validators)
+	}
+	for _, result := range bundle.Validators {
+		if result.Status != resultStatusPassed {
+			t.Fatalf("validator = %+v, want passed", result)
+		}
+	}
+	events, err := os.ReadFile(filepath.Join(evidence, "events.jsonl"))
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	if !strings.Contains(string(events), "run.recovered-after-broker-failure") {
+		t.Fatalf("events missing broker recovery marker:\n%s", string(events))
+	}
+}
+
+func TestFreshRunLifecycleRejectsInvalidScenarioCompletionAfterBrokerFailure(t *testing.T) {
+	tests := []struct {
+		name       string
+		result     string
+		files      map[string]string
+		wantStatus string
+		wantError  bool
+	}{
+		{
+			name:       "missing Scenario Result",
+			files:      map[string]string{"outputs/parity.json": `{"maxAbsDiff":0}` + "\n"},
+			wantStatus: resultStatusFailed,
+			wantError:  true,
+		},
+		{
+			name:       "malformed Scenario Result",
+			result:     `{"status":"passed"`,
+			files:      map[string]string{"outputs/parity.json": `{"maxAbsDiff":0}` + "\n"},
+			wantStatus: resultStatusFailed,
+			wantError:  true,
+		},
+		{
+			name:       "failed Scenario Result",
+			result:     `{"status":"failed","summary":"Scenario assertion failed"}` + "\n",
+			files:      map[string]string{"outputs/parity.json": `{"maxAbsDiff":0}` + "\n"},
+			wantStatus: resultStatusFailed,
+			wantError:  true,
+		},
+		{
+			name:       "Validator failure",
+			result:     `{"status":"passed","summary":"Scenario completed"}` + "\n",
+			files:      map[string]string{"outputs/parity.json": `{"maxAbsDiff":1}` + "\n"},
+			wantStatus: resultStatusFailed,
+			wantError:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload: {}
+    expectedOutputs:
+      files:
+        - "outputs/parity.json"
+      scenarioResult: "outputs/result.json"
+    validators:
+      - type: scenarioResultStatus
+        status: passed
+      - type: numericApprox
+        path: "outputs/parity.json"
+        jsonPath: "$.maxAbsDiff"
+        equals: 0
+        tolerance: 0.001
+    evidence:
+      screenshots:
+        enabled: true
+`)
+			runtime := defaultRunRuntime()
+			runtime.Broker = brokerFailureAfterScenarioCompletion{
+				result:  tt.result,
+				files:   tt.files,
+				message: "ssh command timed out after 10m30s",
+			}
+
+			outcome, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
+			if tt.wantError {
+				if err == nil || !strings.Contains(err.Error(), "ssh command timed out") {
+					t.Fatalf("Fresh Run error = %v, want broker timeout", err)
+				}
+			} else if err != nil {
+				t.Fatalf("Fresh Run returned error: %v", err)
+			}
+			if !tt.wantError && outcome.Result.Status != tt.wantStatus {
+				t.Fatalf("Fresh Run status = %q, want %q", outcome.Result.Status, tt.wantStatus)
+			}
+			evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+			bundle := readEvidenceBundle(t, evidence)
+			if bundle.Status != tt.wantStatus {
+				t.Fatalf("Evidence Bundle status = %q, want %q", bundle.Status, tt.wantStatus)
+			}
+			if tt.name == "Validator failure" {
+				if len(bundle.Validators) != 2 || bundle.Validators[1].Status != resultStatusFailed {
+					t.Fatalf("validator metadata = %+v, want numericApprox failure", bundle.Validators)
+				}
+				requireVisualEvidenceArtifact(t, bundle, "screenshots/failure-desktop.png")
+			}
+		})
+	}
+}
+
 type freshRunLifecycleRecorder struct {
 	events []string
 }
@@ -276,4 +441,61 @@ func (broker failingScreenshotSessionBroker) RunScenario(context runContext, sce
 
 func (failingScreenshotSessionBroker) CaptureScreenshot(context runContext, request screenshotRequest) (visualEvidenceArtifact, error) {
 	return fakeSessionBroker{}.CaptureScreenshot(context, request)
+}
+
+type brokerFailureAfterScenarioCompletion struct {
+	result  string
+	files   map[string]string
+	message string
+}
+
+func (broker brokerFailureAfterScenarioCompletion) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
+	if err := appendEvent(context.EventsPath, "broker.session.started", scenario.MayaVersion); err != nil {
+		return ScenarioResult{}, err
+	}
+	if err := os.WriteFile(context.LogPath, []byte("Scenario wrote outputs before broker failure\n"), 0o644); err != nil {
+		return ScenarioResult{}, err
+	}
+	if broker.result != "" {
+		if err := os.MkdirAll(filepath.Dir(context.ScenarioResultPath), 0o755); err != nil {
+			return ScenarioResult{}, err
+		}
+		if err := os.WriteFile(context.ScenarioResultPath, []byte(broker.result), 0o644); err != nil {
+			return ScenarioResult{}, err
+		}
+	}
+	for relativePath, content := range broker.files {
+		path := filepath.Join(context.Workspace, relativePath)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return ScenarioResult{}, err
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return ScenarioResult{}, err
+		}
+	}
+	return ScenarioResult{}, fmt.Errorf("%s", broker.message)
+}
+
+func (brokerFailureAfterScenarioCompletion) CaptureScreenshot(context runContext, request screenshotRequest) (visualEvidenceArtifact, error) {
+	return fakeSessionBroker{}.CaptureScreenshot(context, request)
+}
+
+func requireOutputArtifact(t *testing.T, bundle evidenceBundle, path string) {
+	t.Helper()
+	for _, output := range bundle.Outputs {
+		if output.Path == path {
+			return
+		}
+	}
+	t.Fatalf("Evidence Bundle missing output %q: %+v", path, bundle.Outputs)
+}
+
+func requireVisualEvidenceArtifact(t *testing.T, bundle evidenceBundle, path string) {
+	t.Helper()
+	for _, artifact := range bundle.VisualEvidence {
+		if artifact.Path == path {
+			return
+		}
+	}
+	t.Fatalf("Evidence Bundle missing Visual Evidence %q: %+v", path, bundle.VisualEvidence)
 }

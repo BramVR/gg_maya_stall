@@ -856,6 +856,20 @@ cd %s
 }
 
 func liveSessionBrokerFixtureReady(host mayaHostConfig) error {
+	status, err := ggMayaSessiondBroker{host: host}.status()
+	if err != nil {
+		return err
+	}
+	effectiveStatus := status.DerivedStatus
+	if effectiveStatus == "" {
+		effectiveStatus = status.State.Status
+	}
+	if effectiveStatus != "running" {
+		return fmt.Errorf("gg_mayasessiond status = %q, want running", effectiveStatus)
+	}
+	if !status.State.CallServerReady {
+		return fmt.Errorf("gg_mayasessiond call server is not ready")
+	}
 	processes, err := mayaTasklistSessions(host)
 	if err != nil {
 		return err
@@ -863,7 +877,7 @@ func liveSessionBrokerFixtureReady(host mayaHostConfig) error {
 	if err := requireConsoleMayaProcess(processes); err != nil {
 		return err
 	}
-	return liveSessionBrokerCallReady(host)
+	return nil
 }
 
 func restoreLiveSessionBrokerFixtures(t *testing.T, options realSSHSmokeOptions) {

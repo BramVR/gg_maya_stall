@@ -118,6 +118,24 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 		}
 		printVisualEvidenceOutcome(stdout, outcome, artifact)
 		return 0
+	case "control":
+		options, err := parseDesktopControlArgs(args[1:])
+		if err != nil {
+			fmt.Fprintf(stderr, "maya-stall control: %v\n", err)
+			return 2
+		}
+		outcome, err := runDesktopControl(workDir, options, runtime)
+		if err != nil {
+			var userErr *usageError
+			if errors.As(err, &userErr) {
+				fmt.Fprintf(stderr, "maya-stall control: %v\n", err)
+				return 2
+			}
+			fmt.Fprintf(stderr, "maya-stall control: %v\n", err)
+			return 1
+		}
+		printDesktopControlOutcome(stdout, outcome)
+		return 0
 	case "evidence":
 		if len(args) < 2 {
 			fmt.Fprintf(stderr, "maya-stall evidence: expected collect or publish\n")
@@ -291,6 +309,7 @@ Usage:
   maya-stall run [--host-config <path>] [--target-profile <name>] [--host <id>] [--host-lock-wait <duration>|--host-lock-fail-fast] [--keep-on-failure|--stop-after <success|failure|always|never>] <scenario>
   maya-stall screenshot [--host-config <path>] [--target-profile <name>] [--host <id>]
   maya-stall record [--host-config <path>] [--target-profile <name>] [--host <id>]
+  maya-stall control click --x <pixels> --y <pixels> [--host-config <path>] [--target-profile <name>] [--host <id>] [--dry-run]
   maya-stall evidence collect [--host-config <path>] [--target-profile <name>] [--host <id>] <scenario>
   maya-stall evidence publish --destination <path> --base-url <url> <evidence-bundle-dir>
   maya-stall review-comment github --repo <owner/name> --pr <number> [--token-env <name>] [--api-url <url>] [--dry-run] <published-evidence-dir>
@@ -301,6 +320,7 @@ Usage:
 
 Commands:
   attach   print kept run events and logs
+  control click   send an explicit desktop click through the Session Broker
   doctor   check local config, Target Profile, and Host Health layers
   evidence collect   run a Scenario and write a complete Evidence Bundle
   evidence publish   copy an Evidence Bundle to a filesystem Evidence Store

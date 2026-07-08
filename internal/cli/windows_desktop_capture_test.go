@@ -74,6 +74,40 @@ func TestWindowsDesktopCapturePreservesPowerShellPrerequisiteErrors(t *testing.T
 	}
 }
 
+func TestWindowsDesktopClickUsesInteractiveScheduledTaskAndUser32(t *testing.T) {
+	transport := &fakeWindowsDesktopTransport{}
+
+	if err := clickWindowsDesktop(transport, "C:/maya-stall/artifacts/control", 12, 34); err != nil {
+		t.Fatalf("clickWindowsDesktop returned error: %v", err)
+	}
+
+	combined := strings.Join(transport.scripts, "\n")
+	for _, want := range []string{
+		"schtasks.exe",
+		"/IT",
+		"user32.dll",
+		"SetCursorPos(12, 34)",
+		"mouse_event",
+		"Remove-Item -Recurse -Force",
+		"interactive desktop session is logged in",
+	} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("desktop click command missing %q:\n%s", want, combined)
+		}
+	}
+}
+
+func TestWindowsDesktopClickRejectsNegativeCoordinates(t *testing.T) {
+	transport := &fakeWindowsDesktopTransport{}
+	err := clickWindowsDesktop(transport, "C:/maya-stall/artifacts/control", -1, 34)
+	if err == nil || !strings.Contains(err.Error(), "desktop click coordinates must be non-negative") {
+		t.Fatalf("click error = %v, want coordinate validation", err)
+	}
+	if len(transport.scripts) != 0 {
+		t.Fatalf("click should not run PowerShell for invalid coordinates: %+v", transport.scripts)
+	}
+}
+
 type fakeWindowsDesktopTransport struct {
 	scripts []string
 	writes  []string

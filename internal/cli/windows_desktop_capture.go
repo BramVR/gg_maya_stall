@@ -35,6 +35,14 @@ func captureWindowsDesktopScreenshot(transport windowsDesktopTransport, remoteRo
 	return transport.RunPowerShell(windowsDesktopScreenshotPowerShell(remoteRoot), sessiondCommandTimeout)
 }
 
+func clickWindowsDesktop(transport windowsDesktopTransport, remoteRoot string, x int, y int) error {
+	if x < 0 || y < 0 {
+		return fmt.Errorf("desktop click coordinates must be non-negative")
+	}
+	_, err := transport.RunPowerShell(windowsDesktopClickPowerShell(remoteRoot, x, y), sessiondCommandTimeout)
+	return err
+}
+
 func captureWindowsDesktopRecording(transport windowsDesktopTransport, remoteRoot string, duration time.Duration, fps int, ffmpegPath string) ([]byte, error) {
 	if strings.TrimSpace(ffmpegPath) == "" {
 		found, err := lookPath("ffmpeg")
@@ -190,6 +198,55 @@ try {
   schtasks.exe /Delete /TN $taskName /F | Out-Null
   Remove-Item -Recurse -Force -LiteralPath $root -ErrorAction SilentlyContinue
 }`, powerShellSingleQuoted(remoteRoot))
+}
+
+func windowsDesktopClickPowerShell(remoteRoot string, x int, y int) string {
+	return fmt.Sprintf(`$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+$root = %s
+New-Item -ItemType Directory -Force -Path $root | Out-Null
+if (-not (Get-Command schtasks.exe -ErrorAction SilentlyContinue)) { throw "schtasks.exe is required for interactive desktop control" }
+$taskName = "MayaStallDesktopClick-" + [Guid]::NewGuid().ToString("N")
+$done = Join-Path $root "desktop-click.done"
+$script = Join-Path $root ($taskName + ".ps1")
+$template = @'
+$ErrorActionPreference = "Stop"
+$source = @"
+using System;
+using System.Runtime.InteropServices;
+public static class MouseInput {
+  [DllImport("user32.dll", SetLastError = true)]
+  public static extern bool SetCursorPos(int X, int Y);
+  [DllImport("user32.dll", SetLastError = true)]
+  public static extern void mouse_event(int dwFlags, int dx, int dy, int dwData, UIntPtr dwExtraInfo);
+}
+"@
+Add-Type -TypeDefinition $source
+if (-not [MouseInput]::SetCursorPos(%d, %d)) { throw "SetCursorPos failed; interactive desktop session is unavailable for desktop control" }
+Start-Sleep -Milliseconds 50
+[MouseInput]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+Start-Sleep -Milliseconds 50
+[MouseInput]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+Set-Content -LiteralPath "__MAYA_STALL_CLICK_DONE__" -Value "ok"
+'@
+try {
+  $template.Replace("__MAYA_STALL_CLICK_DONE__", $done.Replace("\", "\\")) | Set-Content -Encoding ASCII -LiteralPath $script
+  cmd.exe /c "schtasks.exe /Delete /TN $taskName /F 2>NUL" | Out-Null
+  $startTime = (Get-Date).AddMinutes(1).ToString("HH:mm")
+  $taskRun = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $script + '"'
+  $createArgs = @("/Create", "/TN", $taskName, "/SC", "ONCE", "/ST", $startTime, "/TR", $taskRun, "/RL", "HIGHEST", "/IT", "/F")
+  & schtasks.exe @createArgs | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "failed to create interactive desktop click task with schtasks.exe /IT; ensure an interactive desktop session is logged in" }
+  schtasks.exe /Run /TN $taskName | Out-Null
+  for ($i = 0; $i -lt 20; $i++) {
+    if (Test-Path -LiteralPath $done) { exit 0 }
+    Start-Sleep -Milliseconds 250
+  }
+  throw "scheduled interactive desktop click did not complete; ensure an interactive desktop session is logged in"
+} finally {
+  schtasks.exe /Delete /TN $taskName /F | Out-Null
+  Remove-Item -Recurse -Force -LiteralPath $root -ErrorAction SilentlyContinue
+}`, powerShellSingleQuoted(remoteRoot), x, y)
 }
 
 func windowsDesktopRecordingPowerShell(remoteRoot string, frames int, intervalMS int) string {

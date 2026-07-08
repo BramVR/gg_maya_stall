@@ -13,6 +13,7 @@ same order as the CLI help.
 - [run](run.md)
 - [screenshot](screenshot.md)
 - [record](record.md)
+- [control](control.md)
 - [evidence](evidence.md)
 - [review-comment](review-comment.md)
 - [status](status.md)

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -310,6 +311,59 @@ func TestRecordCapturesVisualEvidenceArtifactWithCrabboxDefaults(t *testing.T) {
 	}
 	if got.TargetProfile != "default" || got.Host != defaultFakeHostID {
 		t.Fatalf("visual evidence target metadata = %+v", got)
+	}
+}
+
+func TestControlClickRunsDesktopClick(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"control", "click", "--x", "12", "--y", "34"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("control click exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"action: click",
+		"targetProfile: default",
+		"host: " + defaultFakeHostID,
+		"x: 12",
+		"y: 34",
+		"dryRun: false",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("control click output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestControlClickDryRunDoesNotRequireDesktopControlSupport(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+	runtime := defaultRunRuntime()
+	runtime.Broker = invalidSessionBroker{err: errors.New("control unavailable")}
+
+	code := RunWithRuntime([]string{"control", "click", "--x", "12", "--y", "34", "--dry-run"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 0 {
+		t.Fatalf("control click dry-run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "control unavailable") {
+		t.Fatalf("dry-run should not execute desktop control: %s", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "dryRun: true") {
+		t.Fatalf("dry-run output missing flag:\n%s", stdout.String())
+	}
+}
+
+func TestControlClickReturnsUsageCodeForInvalidCoordinates(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"control", "click", "--x", "-1", "--y", "34"}, &stdout, &stderr, dir, "test-version")
+	if code != 2 {
+		t.Fatalf("control click exit code = %d, want 2; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "coordinates must be non-negative") {
+		t.Fatalf("control click error missing coordinate detail: %s", stderr.String())
 	}
 }
 
@@ -1276,6 +1330,7 @@ func TestDoctorReportsHostSpecificHealthLayers(t *testing.T) {
 		"session-broker: ok - reachable",
 		"maya-version: ok - 2025",
 		"visual-evidence: ok - available",
+		"desktop-control: ok - available",
 		"host-lock: ok - unlocked",
 	} {
 		if !strings.Contains(stdout.String(), want) {
@@ -1315,6 +1370,7 @@ func TestDoctorReturnsStableHostHealthReportBeforeRendering(t *testing.T) {
 		{id: "session-broker", status: "ok", source: "fake"},
 		{id: "maya-version", status: "ok"},
 		{id: "visual-evidence", status: "ok", source: "fake"},
+		{id: "desktop-control", status: "ok", source: "fake"},
 		{id: "host-lock", status: "ok", state: "unlocked"},
 	} {
 		check := requireHostHealthLayer(t, report, want.id)
@@ -1470,6 +1526,13 @@ hostPools:
 		if !strings.Contains(visual.Detail, want) {
 			t.Fatalf("visual-evidence detail = %q, want %s proof", visual.Detail, want)
 		}
+	}
+	control := requireHostHealthLayer(t, report, "desktop-control")
+	if control.Status != "ok" || control.Source != "session-broker" || control.BlockedBy != "" {
+		t.Fatalf("desktop-control Host Health = %+v, want broker-backed ok", control)
+	}
+	if !strings.Contains(control.Detail, "desktop click") {
+		t.Fatalf("desktop-control detail = %q, want desktop click support", control.Detail)
 	}
 }
 

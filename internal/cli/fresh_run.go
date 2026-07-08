@@ -130,6 +130,9 @@ func (run *freshRunLifecycle) setup() error {
 			scenarioResultEnvVar: workspace.LocalScenarioResultPath(),
 		},
 	}
+	if root := trustedPluginArtifactsRoot(host.Config); root != "" {
+		run.context.Environment[trustedPluginArtifactsRootEnvVar] = root
+	}
 	if err := createCleanRunDirs(run.context); err != nil {
 		return err
 	}

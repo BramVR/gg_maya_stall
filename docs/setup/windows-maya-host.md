@@ -114,6 +114,7 @@ hostPools:
           identityFile: ~/.ssh/maya-stall-ci
           sftpTimeout: 30m
         workRoot: C:/maya-stall
+        trustedPluginArtifactsRoot: C:/maya-stall/trusted-plugin-artifacts
         broker: ok
         mayaVersions: ["2025"]
         visualEvidence: true
@@ -167,10 +168,52 @@ Doctor layer:
 - Make the Maya executable path available to the Session Broker through host-managed config.
 - Ensure licensing is valid for the Windows user that owns the interactive desktop.
 - Verify Plugin Artifacts from consuming repos can load in that Maya version; Maya Stall does not build Plugin Artifacts.
+- If Maya's secure plug-in loading prompts for staged Plugin Artifacts, configure
+  a host-managed `trustedPluginArtifactsRoot` outside `workRoot/runs` and add
+  that exact directory to Maya's trusted plug-in locations for the interactive
+  Windows user. Do not trust `workRoot`, `workRoot/runs`, or every fresh run
+  workspace.
 
 Doctor layer:
 
 - `maya-version`: selected Scenario has a Maya Version Requirement that the Maya Host does not satisfy.
+
+### Trusted Plugin Artifacts
+
+Maya's plug-in security prompt is location-based. A Fresh Run gets a new
+`workRoot/runs/<run-id>` workspace, so checking "apply to all plug-ins in this
+location" for one run workspace does not cover the next run. The host-owned
+strategy is a narrow stable root:
+
+```yaml
+trustedPluginArtifactsRoot: C:/maya-stall/trusted-plugin-artifacts
+```
+
+Host-admin steps:
+
+- Create or allow Maya Stall to create the stable directory.
+- In Maya security preferences for the interactive Windows account, add that
+  exact directory as a trusted plug-in location.
+- Keep the value in host config, CI secret material, or runner-owned config,
+  not in `.maya-stall.yaml`.
+- Keep the root separate from the run workspace tree; Maya Stall rejects roots
+  that are `workRoot`, under `workRoot/runs`, or broad enough to contain
+  `workRoot/runs`.
+
+Run behavior:
+
+- The normal clean per-run payload is still staged under
+  `workRoot/runs/<run-id>/payload/`.
+- Only declared `payload.pluginArtifacts` entries are also copied to
+  `trustedPluginArtifactsRoot/<repo-relative-path>`.
+- Each declared trusted destination is removed before upload, so directory
+  Plugin Artifacts do not retain stale files.
+- Scenario scripts receive `MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT` and can
+  load the declared Plugin Artifact from that stable root.
+
+This is a host policy, not repo-owned Scenario setup. The consuming repo owns
+which Plugin Artifacts are declared and how its Scenario loads/asserts them; the
+operator owns which Maya Host locations are trusted.
 
 ### Session Broker
 

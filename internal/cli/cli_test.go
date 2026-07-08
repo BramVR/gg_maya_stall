@@ -2908,6 +2908,218 @@ hostPools:
 	}
 }
 
+func TestRunScenarioRealSSHUploadsPluginArtifactsToTrustedRoot(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sftpLog := filepath.Join(dir, "sftp.log")
+	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		`{"ok":true,"tool":"trusted-plugin-cleanup"}`,
+		`{"ok":true,"tool":"script.execute"}`,
+		sessiondStatusFixture("session-alpha"),
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        trustedPluginArtifactsRoot: C:/maya-stall/trusted-plugin-artifacts
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	logBytes, err := os.ReadFile(sftpLog)
+	if err != nil {
+		t.Fatalf("read sftp log: %v", err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{
+		`put -r `,
+		`build/demo.mll`,
+		`"/C:/maya-stall/trusted-plugin-artifacts/build/demo.mll"`,
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("trusted Plugin Artifact upload missing %q:\n%s", want, log)
+		}
+	}
+	for _, forbidden := range []string{
+		`"/C:/maya-stall/trusted-plugin-artifacts/maya/smoke.py"`,
+		`"/C:/maya-stall/trusted-plugin-artifacts/scenes/start.ma"`,
+	} {
+		if strings.Contains(log, forbidden) {
+			t.Fatalf("trusted root upload included non-plugin payload %q:\n%s", forbidden, log)
+		}
+	}
+}
+
+func TestRunScenarioRejectsTrustedPluginRootUnderRunWorkspaces(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+        workRoot: C:/maya-stall
+        trustedPluginArtifactsRoot: C:/maya-stall/runs/trusted-plugin-artifacts
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "trustedPluginArtifactsRoot must be outside workRoot/runs") {
+		t.Fatalf("run stderr missing trusted root rejection:\n%s", stderr.String())
+	}
+}
+
+func TestRunScenarioRejectsTrustedPluginRootThatNormalizesUnderRunWorkspaces(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+        workRoot: C:/maya-stall
+        trustedPluginArtifactsRoot: C:/maya-stall/runs2/../runs/trusted-plugin-artifacts
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "trustedPluginArtifactsRoot must be outside workRoot/runs") {
+		t.Fatalf("run stderr missing trusted root rejection:\n%s", stderr.String())
+	}
+}
+
+func TestRunScenarioRejectsTrustedPluginRootThatContainsRunWorkspaces(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+        workRoot: C:/maya-stall/work
+        trustedPluginArtifactsRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "trustedPluginArtifactsRoot must not contain workRoot/runs") {
+		t.Fatalf("run stderr missing broad trusted root rejection:\n%s", stderr.String())
+	}
+}
+
+func TestRunScenarioDoesNotCleanTrustedPluginRootWhenPayloadIsInvalid(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	configPath := filepath.Join(dir, ".maya-stall.yaml")
+	contentBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config fixture: %v", err)
+	}
+	content := strings.Replace(string(contentBytes), `      scenes:
+        - "scenes/start.ma"`, `      scenes:
+        - "scenes/missing.ma"`, 1)
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config fixture: %v", err)
+	}
+	sshLog := filepath.Join(dir, "ssh.log")
+	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
+		`{"ok":true,"tool":"trusted-plugin-cleanup"}`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+        workRoot: C:/maya-stall
+        trustedPluginArtifactsRoot: C:/maya-stall/trusted-plugin-artifacts
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "scenes/missing.ma") {
+		t.Fatalf("run stderr missing invalid payload path:\n%s", stderr.String())
+	}
+	if _, err := os.Stat(sshLog); !os.IsNotExist(err) {
+		t.Fatalf("trusted Plugin Artifact cleanup ran before payload validation; ssh log stat = %v", err)
+	}
+}
+
 func TestSFTPBatchUsesWindowsAbsoluteDrivePaths(t *testing.T) {
 	batch := newSFTPBatch()
 
@@ -4007,7 +4219,8 @@ func TestGGMayaSessiondScenarioWrapperPreservesFailingScenarioResult(t *testing.
 		"previous_sys_path = list(sys.path)",
 		"def _maya_stall_clear_run_modules():",
 		"class _MayaStallStopScenario(Exception):",
-		"try:\n    os.environ[",
+		"maya_stall_environment = ",
+		"previous_environment = {}",
 		"for include_path in reversed(",
 		"Scenario exited before running all scripts",
 		"sys.path[:] = previous_sys_path",
@@ -4023,6 +4236,48 @@ func TestGGMayaSessiondScenarioWrapperPreservesFailingScenarioResult(t *testing.
 	}
 	if strings.Contains(wrapper, "\n    raise\n") {
 		t.Fatalf("wrapper re-raises after writing failed Scenario Result:\n%s", wrapper)
+	}
+	assertPythonParses(t, wrapper)
+}
+
+func TestGGMayaSessiondScenarioWrapperProvidesTrustedPluginRoot(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	broker := ggMayaSessiondBroker{host: mayaHostConfig{
+		WorkRoot: "C:/maya-stall",
+		Broker: brokerConfig{
+			Type:     "gg-mayasessiond",
+			StateDir: "C:/maya-stall/sessiond-ui",
+			Python:   "C:/maya-stall/sessiond-venv311/Scripts/python.exe",
+			Repo:     "C:/maya-stall/tools/GG_MayaSessiond",
+		},
+	}}
+	config, _, err := loadRepoRunConfig(dir)
+	if err != nil {
+		t.Fatalf("load fixture config: %v", err)
+	}
+	context := runContext{
+		RunWorkspace: mustRunWorkspace(t, dir, "run-1", "C:/maya-stall", config.Scenarios["smoke"].ExpectedOutputs.ScenarioResult),
+		Environment: map[string]string{
+			scenarioResultEnvVar:             "C:/maya-stall/runs/run-1/workspace/outputs/smoke-result.json",
+			trustedPluginArtifactsRootEnvVar: "C:/maya-stall/trusted-plugin-artifacts",
+		},
+	}
+
+	wrapper, err := broker.scenarioWrapper(context, config.Scenarios["smoke"])
+	if err != nil {
+		t.Fatalf("build wrapper: %v", err)
+	}
+	for _, want := range []string{
+		trustedPluginArtifactsRootEnvVar,
+		"C:/maya-stall/trusted-plugin-artifacts",
+		"previous_environment = {}",
+		"for key, value in maya_stall_environment.items():",
+		"os.environ[key] = value",
+		"for key, value in previous_environment.items():",
+	} {
+		if !strings.Contains(wrapper, want) {
+			t.Fatalf("wrapper missing trusted Plugin Artifact environment %q:\n%s", want, wrapper)
+		}
 	}
 	assertPythonParses(t, wrapper)
 }

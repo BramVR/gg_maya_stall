@@ -147,11 +147,11 @@ func runDesktopControl(repoDir string, options desktopControlOptions, runtime ru
 }
 
 func printDesktopControlOutcome(stdout io.Writer, outcome desktopControlOutcome) {
-	fmt.Fprintf(stdout, "action: %s\n", outcome.Action)
-	fmt.Fprintf(stdout, "targetProfile: %s\n", outcome.TargetProfile)
-	fmt.Fprintf(stdout, "host: %s\n", outcome.Host)
-	fmt.Fprintf(stdout, "runtime: %s\n", outcome.Runtime.Profile)
-	fmt.Fprintf(stdout, "x: %d\n", outcome.X)
-	fmt.Fprintf(stdout, "y: %d\n", outcome.Y)
-	fmt.Fprintf(stdout, "dryRun: %t\n", outcome.DryRun)
+	_, _ = fmt.Fprintf(stdout, "action: %s\n", outcome.Action)
+	_, _ = fmt.Fprintf(stdout, "targetProfile: %s\n", outcome.TargetProfile)
+	_, _ = fmt.Fprintf(stdout, "host: %s\n", outcome.Host)
+	_, _ = fmt.Fprintf(stdout, "runtime: %s\n", outcome.Runtime.Profile)
+	_, _ = fmt.Fprintf(stdout, "x: %d\n", outcome.X)
+	_, _ = fmt.Fprintf(stdout, "y: %d\n", outcome.Y)
+	_, _ = fmt.Fprintf(stdout, "dryRun: %t\n", outcome.DryRun)
 }

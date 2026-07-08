@@ -48,6 +48,10 @@ With `broker.type: gg-mayasessiond`, `run` stages declared payloads under
 workspace, executes it through `gg_maya_sessiond.cli call ... script.execute`,
 downloads declared outputs, and captures configured Visual Evidence from the
 interactive Windows desktop session.
+If the selected Maya Host config sets `trustedPluginArtifactsRoot`, `run` also
+copies declared `pluginArtifacts` to that stable host-managed root and exposes
+it to Scenario scripts as `MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT`.
+The normal per-run payload copy still happens.
 Remote Scenario execution through `script.execute` is capped at 10 minutes.
 If `script.execute` or equivalent broker execution fails after the remote
 workspace exists, `run` still fails but first attempts best-effort collection of
@@ -76,6 +80,43 @@ For each run, Maya Stall derives local and remote paths from one Run Workspace:
 - remote staged payloads: `workRoot/runs/<run-id>/payload/`
 - remote workspace: `workRoot/runs/<run-id>/workspace/`
 - remote Scenario Result: `workRoot/runs/<run-id>/workspace/<expectedOutputs.scenarioResult>`
+- optional trusted Plugin Artifact root: `trustedPluginArtifactsRoot/<repo-relative-plugin-path>`
+
+## Trusted Plugin Artifacts
+
+Autodesk Maya secure plug-in loading is location-based. Trusting each fresh
+`workRoot/runs/<run-id>` path can trigger a new prompt every run, while trusting
+all of `workRoot` or `workRoot/runs` would also trust arbitrary run payloads.
+
+Use this split instead:
+
+- Consuming repo: declare Plugin Artifacts in `payload.pluginArtifacts` and
+  keep Scenario scripts responsible for loading and asserting the plug-in.
+- Operator/host config: set `trustedPluginArtifactsRoot` to a stable directory
+  that is not inside or above `workRoot/runs`, then add that exact directory to
+  Maya's trusted plug-in locations for the Windows account that runs the
+  interactive Maya UI.
+- Scenario script: when `MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT` is present,
+  load the declared plug-in from that root using the same repo-relative path;
+  otherwise load from the per-run `payload/pluginArtifacts` path.
+
+Example Scenario-side path selection:
+
+```python
+import os
+from pathlib import Path
+
+trusted_root = os.environ.get("MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT")
+if trusted_root:
+    plugin_path = Path(trusted_root) / "build" / "demo.mll"
+else:
+    plugin_path = Path.cwd().parent / "payload" / "pluginArtifacts" / "build" / "demo.mll"
+```
+
+Maya Stall removes each declared destination in the trusted root before copying
+the current Plugin Artifact, so directory artifacts do not retain stale files.
+It does not add trusted locations to Maya preferences; that remains a host
+policy choice.
 
 Default output:
 

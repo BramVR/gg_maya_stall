@@ -19,6 +19,7 @@ import (
 const resultStatusPassed = "passed"
 const resultStatusFailed = "failed"
 const scenarioResultEnvVar = "MAYA_STALL_SCENARIO_RESULT"
+const trustedPluginArtifactsRootEnvVar = "MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT"
 const stopAfterSuccess = "success"
 const stopAfterFailure = "failure"
 const stopAfterAlways = "always"

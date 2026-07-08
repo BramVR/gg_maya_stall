@@ -119,7 +119,29 @@ maya_stall.write_result(
 The helper writes JSON and creates parent directories as needed. Scenario
 authors may also write the protocol directly.
 
-## Step 5. Add Validators
+## Step 5. Load Trusted Plugin Artifacts When Configured
+
+For real Maya UI runs, Maya may warn when a plug-in loads from a fresh
+per-run workspace. Consuming repos should still declare Plugin Artifacts in
+Repo Run Config, but Scenario scripts can prefer the host-managed trusted root
+when operators configure one:
+
+```python
+import os
+from pathlib import Path
+
+trusted_root = os.environ.get("MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT")
+if trusted_root:
+    plugin_path = Path(trusted_root) / "build" / "demo.mll"
+else:
+    plugin_path = Path.cwd().parent / "payload" / "pluginArtifacts" / "build" / "demo.mll"
+```
+
+Operators configure and trust that stable location on the Maya Host with
+`trustedPluginArtifactsRoot`; consuming repos should not commit host-specific
+trusted paths or ask Maya Stall to disable plug-in security.
+
+## Step 6. Add Validators
 
 Validators compare Evidence Bundle outputs against Expected Outputs:
 
@@ -147,7 +169,7 @@ validators:
 
 Validator failures mark the run failed and are recorded in `evidence.json`.
 
-## Step 6. Collect And Publish Evidence
+## Step 7. Collect And Publish Evidence
 
 Collect a full Evidence Bundle:
 

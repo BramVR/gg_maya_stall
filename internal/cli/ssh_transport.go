@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -72,6 +73,9 @@ func validateRealSSHConfig(host mayaHostConfig) error {
 		return fmt.Errorf("workRoot %w", err)
 	}
 	if _, err := sftpBatchTimeout(host); err != nil {
+		return err
+	}
+	if err := validateTrustedPluginArtifactsRoot(host); err != nil {
 		return err
 	}
 	return nil
@@ -159,9 +163,32 @@ func (host realSSHHost) StagePayload(context runContext, payload []manifestPaylo
 	if err := validateRealSSHConfig(host.host); err != nil {
 		return err
 	}
+	if err := validatePayloadForStage(context, payload); err != nil {
+		return err
+	}
+	if err := host.prepareTrustedPluginArtifactDestinations(payload); err != nil {
+		return err
+	}
 	batch := newSFTPBatch()
 	batch.mkdirAll(context.RunWorkspace.RemoteRunRoot())
 	batch.mkdirAll(context.RunWorkspace.RemoteWorkspace())
+	for _, item := range payload {
+		source := filepath.Join(context.RepoDir, item.Source)
+		destination := context.RunWorkspace.RemotePayloadPath(item)
+		batch.mkdirAll(remoteDir(destination))
+		batch.put(source, destination)
+		if trustedDestination := trustedPluginArtifactPath(host.host, item); trustedDestination != "" {
+			batch.mkdirAll(remoteDir(trustedDestination))
+			batch.put(source, trustedDestination)
+		}
+	}
+	if err := runSFTPBatch(host.host, batch.String()); err != nil {
+		return fmt.Errorf("upload Run Payload: %w", err)
+	}
+	return nil
+}
+
+func validatePayloadForStage(context runContext, payload []manifestPayload) error {
 	for _, item := range payload {
 		if err := rejectSFTPRepoPath(item.Source); err != nil {
 			return fmt.Errorf("stage %s payload: %w", item.Kind, err)
@@ -169,15 +196,87 @@ func (host realSSHHost) StagePayload(context runContext, payload []manifestPaylo
 		if err := validatePayloadPathForTransport(context.RepoDir, item.Source); err != nil {
 			return fmt.Errorf("stage %s payload %s: %w", item.Kind, item.Source, err)
 		}
-		source := filepath.Join(context.RepoDir, item.Source)
-		destination := context.RunWorkspace.RemotePayloadPath(item)
-		batch.mkdirAll(remoteDir(destination))
-		batch.put(source, destination)
-	}
-	if err := runSFTPBatch(host.host, batch.String()); err != nil {
-		return fmt.Errorf("upload Run Payload: %w", err)
 	}
 	return nil
+}
+
+func (host realSSHHost) prepareTrustedPluginArtifactDestinations(payload []manifestPayload) error {
+	var paths []string
+	for _, item := range payload {
+		destination := trustedPluginArtifactPath(host.host, item)
+		if destination == "" {
+			continue
+		}
+		if err := rejectSFTPBatchUnsafePath(destination); err != nil {
+			return err
+		}
+		paths = append(paths, destination)
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	var builder strings.Builder
+	builder.WriteString("$ErrorActionPreference = 'Stop'\n")
+	builder.WriteString("foreach ($path in @(")
+	for index, path := range paths {
+		if index > 0 {
+			builder.WriteString(",")
+		}
+		builder.WriteString(powerShellSingleQuoted(path))
+	}
+	builder.WriteString(")) {\n")
+	builder.WriteString("  Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue\n")
+	builder.WriteString("}\n")
+	if err := runSSHCommand(host.host, encodedPowerShellCommand(builder.String())); err != nil {
+		return fmt.Errorf("prepare trusted Plugin Artifact destination: %w", err)
+	}
+	return nil
+}
+
+func trustedPluginArtifactPath(host mayaHostConfig, item manifestPayload) string {
+	if item.Kind != "pluginArtifacts" {
+		return ""
+	}
+	root := trustedPluginArtifactsRoot(host)
+	if root == "" {
+		return ""
+	}
+	return remoteJoin(root, item.Source)
+}
+
+func trustedPluginArtifactsRoot(host mayaHostConfig) string {
+	return strings.TrimSpace(remotePath(host.TrustedPluginArtifactsRoot))
+}
+
+func validateTrustedPluginArtifactsRoot(host mayaHostConfig) error {
+	root := trustedPluginArtifactsRoot(host)
+	if root == "" {
+		return nil
+	}
+	if err := rejectSFTPBatchUnsafePath(root); err != nil {
+		return fmt.Errorf("trustedPluginArtifactsRoot %w", err)
+	}
+	workRoot := cleanRemotePathForComparison(host.WorkRoot)
+	trustedRoot := cleanRemotePathForComparison(root)
+	if workRoot == "" {
+		return nil
+	}
+	runsRoot := cleanRemotePathForComparison(remoteJoin(workRoot, "runs"))
+	if trustedRoot == workRoot || trustedRoot == runsRoot || strings.HasPrefix(trustedRoot, runsRoot+"/") {
+		return fmt.Errorf("trustedPluginArtifactsRoot must be outside workRoot/runs and separate from workRoot")
+	}
+	if strings.HasPrefix(runsRoot, trustedRoot+"/") {
+		return fmt.Errorf("trustedPluginArtifactsRoot must not contain workRoot/runs")
+	}
+	return nil
+}
+
+func cleanRemotePathForComparison(value string) string {
+	clean := path.Clean(strings.ReplaceAll(remotePath(value), `\`, "/"))
+	if clean == "." {
+		return ""
+	}
+	return strings.TrimRight(strings.ToLower(clean), "/")
 }
 
 func (host realSSHHost) CollectArtifacts(context runContext, scenario scenarioContract) error {

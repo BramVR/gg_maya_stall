@@ -383,6 +383,13 @@ func (broker ggMayaSessiondBroker) scenarioWrapper(context runContext, scenario 
 	if err != nil {
 		return "", err
 	}
+	environment := map[string]string{scenarioResultEnvVar: resultPath}
+	for key, value := range context.Environment {
+		if key == "" || key == scenarioResultEnvVar || value == "" {
+			continue
+		}
+		environment[key] = value
+	}
 	var builder strings.Builder
 	builder.WriteString("import json, os, runpy, sys, traceback\n")
 	builder.WriteString("result_path = ")
@@ -391,11 +398,12 @@ func (broker ggMayaSessiondBroker) scenarioWrapper(context runContext, scenario 
 	builder.WriteString("run_modules_root = ")
 	builder.WriteString(pythonString(context.RunWorkspace.RemoteRunModulesRoot()))
 	builder.WriteString("\n")
+	builder.WriteString("maya_stall_environment = ")
+	builder.WriteString(pythonStringMap(environment))
+	builder.WriteString("\n")
 	builder.WriteString("previous_cwd = os.getcwd()\n")
 	builder.WriteString("previous_sys_path = list(sys.path)\n")
-	builder.WriteString("previous_result_env = os.environ.get(")
-	builder.WriteString(pythonString(scenarioResultEnvVar))
-	builder.WriteString(")\n")
+	builder.WriteString("previous_environment = {}\n")
 	builder.WriteString("def _maya_stall_write_result(status, summary, traceback_text=None, overwrite=False):\n")
 	builder.WriteString("    if os.path.exists(result_path) and not overwrite:\n")
 	builder.WriteString("        return\n")
@@ -429,9 +437,10 @@ func (broker ggMayaSessiondBroker) scenarioWrapper(context runContext, scenario 
 	builder.WriteString("class _MayaStallStopScenario(Exception):\n")
 	builder.WriteString("    pass\n")
 	builder.WriteString("try:\n")
-	builder.WriteString("    os.environ[")
-	builder.WriteString(pythonString(scenarioResultEnvVar))
-	builder.WriteString("] = result_path\n")
+	builder.WriteString("    for key in maya_stall_environment:\n")
+	builder.WriteString("        previous_environment[key] = os.environ.get(key)\n")
+	builder.WriteString("    for key, value in maya_stall_environment.items():\n")
+	builder.WriteString("        os.environ[key] = value\n")
 	builder.WriteString("    os.makedirs(os.path.dirname(result_path), exist_ok=True)\n")
 	builder.WriteString("    os.chdir(")
 	builder.WriteString(pythonString(context.RunWorkspace.RemoteWorkspace()))
@@ -464,14 +473,11 @@ func (broker ggMayaSessiondBroker) scenarioWrapper(context runContext, scenario 
 	builder.WriteString("finally:\n")
 	builder.WriteString("    sys.path[:] = previous_sys_path\n")
 	builder.WriteString("    os.chdir(previous_cwd)\n")
-	builder.WriteString("    if previous_result_env is None:\n")
-	builder.WriteString("        os.environ.pop(")
-	builder.WriteString(pythonString(scenarioResultEnvVar))
-	builder.WriteString(", None)\n")
-	builder.WriteString("    else:\n")
-	builder.WriteString("        os.environ[")
-	builder.WriteString(pythonString(scenarioResultEnvVar))
-	builder.WriteString("] = previous_result_env\n")
+	builder.WriteString("    for key, value in previous_environment.items():\n")
+	builder.WriteString("        if value is None:\n")
+	builder.WriteString("            os.environ.pop(key, None)\n")
+	builder.WriteString("        else:\n")
+	builder.WriteString("            os.environ[key] = value\n")
 	builder.WriteString("    _maya_stall_clear_run_modules()\n")
 	return builder.String(), nil
 }
@@ -694,6 +700,11 @@ func pythonString(value string) string {
 }
 
 func pythonStringList(values []string) string {
+	content, _ := json.Marshal(values)
+	return string(content)
+}
+
+func pythonStringMap(values map[string]string) string {
 	content, _ := json.Marshal(values)
 	return string(content)
 }

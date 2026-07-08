@@ -27,7 +27,7 @@ const manifest = {
     artifacts: { status: "pending", required: true },
     live_maya: {
       status: liveRequired ? "required" : "not_required",
-      command: "go test ./internal/cli -run TestOptInRealVisualEvidenceSmoke -count=1 && go test ./internal/cli -run TestOptInRealDesktopControlModalSmoke -count=1 && go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke' -count=1",
+      command: "go test ./internal/cli -run TestOptInRealVisualEvidenceSmoke -count=1 && go test ./internal/cli -run TestOptInRealDesktopControlModalSmoke -count=1 && go test ./internal/cli -run TestOptInRealSSHDoctorSmoke -count=1 && go test ./internal/cli -run TestOptInRealSSHConsumingRepoSmoke -count=1 && go test ./internal/cli -run TestOptInRealSSHRunSmoke -count=1 && go test ./internal/cli -run TestOptInRealRunScopedDesktopOpsSmoke -count=1",
       fail_closed: liveRequired,
     },
   },

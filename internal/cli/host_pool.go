@@ -364,6 +364,20 @@ func markHostLockKept(repoDir string, hostID string, runID string) error {
 	if err := validateHostID(hostID); err != nil {
 		return err
 	}
+	return replaceHostLockOwner(repoDir, hostID, fmt.Sprintf("host: %s\nkeptRun: %s\n", hostID, runID))
+}
+
+func markHostLockActive(repoDir string, hostID string, runID string) error {
+	if err := validateHostID(hostID); err != nil {
+		return err
+	}
+	if err := validateRunID(runID); err != nil {
+		return err
+	}
+	return replaceHostLockOwner(repoDir, hostID, fmt.Sprintf("host: %s\npid: %d\nactiveRun: %s\n", hostID, os.Getpid(), runID))
+}
+
+func replaceHostLockOwner(repoDir string, hostID string, content string) error {
 	lockDir := filepath.Join(repoDir, ".maya-stall", "state", "locks", "hosts")
 	if err := ensureOutputPathHasNoSymlinkParent(repoDir, filepath.Join(".maya-stall", "state", "locks", "hosts")); err != nil {
 		return err
@@ -374,7 +388,6 @@ func markHostLockKept(repoDir string, hostID string, runID string) error {
 	} else if info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("Host Lock %s must not be a symlink", lockPath)
 	}
-	content := fmt.Sprintf("host: %s\nkeptRun: %s\n", hostID, runID)
 	tempFile, err := os.CreateTemp(lockDir, hostID+".kept.*.tmp")
 	if err != nil {
 		return err

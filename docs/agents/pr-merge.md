@@ -27,12 +27,20 @@ real-product proof. For `live_maya_required=true`, the live Maya gate must pass
 against a configured real Windows Maya Host. Skipped, missing, or fake-only live
 proof is a failure.
 
-The live gate runs the desktop Visual Evidence proof first, then the older SSH
-smokes:
+The live gate runs desktop Visual Evidence and desktop control proof first,
+then the older SSH smokes, then the retained run-scoped desktop ops smoke last
+because stopping a retained `gg_mayasessiond` run can tear down the broker
+session. Live smokes restore the documented interactive sessiond UI scheduled
+task before proof starts and retained-stop smokes restore it again before the
+next proof step:
 
 ```sh
 go test ./internal/cli -run TestOptInRealVisualEvidenceSmoke -count=1
-go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke' -count=1
+go test ./internal/cli -run TestOptInRealDesktopControlModalSmoke -count=1
+go test ./internal/cli -run TestOptInRealSSHDoctorSmoke -count=1
+go test ./internal/cli -run TestOptInRealSSHConsumingRepoSmoke -count=1
+go test ./internal/cli -run TestOptInRealSSHRunSmoke -count=1
+go test ./internal/cli -run TestOptInRealRunScopedDesktopOpsSmoke -count=1
 ```
 
 That opt-in smoke runs `maya-stall doctor --scenario smoke`, then one real
@@ -46,7 +54,10 @@ MP4 recording with duration/FPS and selected-host metadata. The live Visual
 Evidence smoke additionally invokes the standalone `maya-stall record` command,
 asserts `maya.exe` is in the interactive Windows `Console` session, and
 validates the command's MP4 Evidence Bundle before publishing sanitized review
-proof.
+proof. The run-scoped desktop ops smoke keeps a failed run locked, proves
+standalone screenshot fails closed while the Host Lock is held, captures a
+run-scoped desktop screenshot, and clears a controlled modal with
+`attach <run-id> control click`.
 
 Non-live-only changes may merge with local gates plus a manifest saying
 `live_maya_required=false`.

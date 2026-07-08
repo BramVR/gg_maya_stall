@@ -367,6 +367,300 @@ func TestControlClickReturnsUsageCodeForInvalidCoordinates(t *testing.T) {
 	}
 }
 
+func TestAttachRunScreenshotCapturesThroughOwnedHostLock(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := outputValue(t, stdout.String(), "run")
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"attach", runID, "screenshot"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("attach screenshot exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "artifact: screenshots/run-scoped-screenshot.png") {
+		t.Fatalf("attach screenshot output missing artifact path:\n%s", stdout.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "artifacts", "maya-stall", runID, "screenshots", "run-scoped-screenshot.png")); err != nil {
+		t.Fatalf("expected run-scoped screenshot artifact: %v", err)
+	}
+	bundle := readEvidenceBundle(t, filepath.Join(dir, "artifacts", "maya-stall", runID))
+	found := false
+	for _, artifact := range bundle.VisualEvidence {
+		if artifact.Kind == "screenshot" && artifact.Path == "screenshots/run-scoped-screenshot.png" && artifact.TargetProfile == "default" && artifact.Host == defaultFakeHostID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Evidence Bundle missing run-scoped screenshot metadata: %+v", bundle.VisualEvidence)
+	}
+}
+
+func TestAttachRunControlClickRequiresOwnedHostLock(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := outputValue(t, stdout.String(), "run")
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"attach", runID, "control", "click", "--x", "12", "--y", "34"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("attach control click exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"run: " + runID,
+		"action: click",
+		"host: " + defaultFakeHostID,
+		"x: 12",
+		"y: 34",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("attach control click output missing %q:\n%s", want, stdout.String())
+		}
+	}
+
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock"), "host: "+defaultFakeHostID+"\nkeptRun: other-run\n")
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"attach", runID, "control", "click", "--x", "12", "--y", "34"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("wrong-owner attach control click exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "belongs to kept run other-run, not "+runID) {
+		t.Fatalf("wrong-owner error missing Host Lock owner detail: %s", stderr.String())
+	}
+}
+
+func TestActiveRunRecordsRunScopedHostLockOwner(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	broker := newBlockingBroker(ScenarioResult{Status: resultStatusPassed, Summary: "active run completed"})
+	runtimeConfig := defaultRunRuntime()
+	runtimeConfig.Broker = broker
+	var runOut, runErr bytes.Buffer
+	done := make(chan runResult, 1)
+
+	go func() {
+		code := RunWithRuntime([]string{"run", "smoke"}, &runOut, &runErr, dir, "test-version", runtimeConfig)
+		done <- runResult{code: code, stdout: runOut.String(), stderr: runErr.String()}
+	}()
+	<-broker.started
+	runState := onlyRunDir(t, filepath.Join(dir, ".maya-stall", "state", "runs"))
+	runID := filepath.Base(runState)
+	lockBytes, err := os.ReadFile(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock"))
+	if err != nil {
+		t.Fatalf("read active Host Lock: %v", err)
+	}
+	if !strings.Contains(string(lockBytes), "activeRun: "+runID) {
+		t.Fatalf("active Fresh Run Host Lock content = %q, want activeRun owner", string(lockBytes))
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"attach", runID, "screenshot"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("active attach screenshot exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "artifacts", "maya-stall", runID, "screenshots", "run-scoped-screenshot.png")); err != nil {
+		t.Fatalf("expected active run-scoped screenshot artifact: %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"attach", runID, "control", "click", "--x", "56", "--y", "78"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("active attach control click exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "x: 56") || !strings.Contains(stdout.String(), "y: 78") {
+		t.Fatalf("active attach control click output missing coordinates:\n%s", stdout.String())
+	}
+	close(broker.release)
+	result := <-done
+	if result.code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", result.code, result.stdout, result.stderr)
+	}
+	bundle := readEvidenceBundle(t, filepath.Join(dir, "artifacts", "maya-stall", runID))
+	found := false
+	for _, artifact := range bundle.VisualEvidence {
+		if artifact.Kind == "screenshot" && artifact.Path == "screenshots/run-scoped-screenshot.png" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("completed active run Evidence Bundle missing run-scoped screenshot: %+v", bundle.VisualEvidence)
+	}
+}
+
+func TestAttachRunScreenshotFailsClosedForWrongActiveOwner(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := outputValue(t, stdout.String(), "run")
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock"), fmt.Sprintf("host: %s\npid: %d\nactiveRun: other-run\n", defaultFakeHostID, os.Getpid()))
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"attach", runID, "screenshot"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("wrong-active-owner attach screenshot exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "belongs to active run other-run, not "+runID) {
+		t.Fatalf("wrong-active-owner error missing Host Lock owner detail: %s", stderr.String())
+	}
+}
+
+func TestAttachRunScreenshotRejectsSymlinkArtifactLeaf(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not consistently available on Windows test runners")
+	}
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := outputValue(t, stdout.String(), "run")
+	screenshotDir := filepath.Join(dir, "artifacts", "maya-stall", runID, "screenshots")
+	if err := os.MkdirAll(screenshotDir, 0o755); err != nil {
+		t.Fatalf("create screenshot dir: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.png")
+	mustWriteFile(t, outside, "outside\n")
+	if err := os.Symlink(outside, filepath.Join(screenshotDir, "run-scoped-screenshot.png")); err != nil {
+		t.Skipf("create symlink fixture: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"attach", runID, "screenshot"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("symlink leaf attach screenshot exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "must not be a symlink") {
+		t.Fatalf("symlink leaf error missing detail: %s", stderr.String())
+	}
+	content, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatalf("read outside target: %v", err)
+	}
+	if string(content) != "outside\n" {
+		t.Fatalf("outside symlink target was overwritten: %q", string(content))
+	}
+}
+
+func TestAttachRunScreenshotRejectsSymlinkStateLeavesBeforeCapture(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not consistently available on Windows test runners")
+	}
+	for _, leaf := range []string{"events.jsonl", "run-scoped-visual-evidence.json"} {
+		t.Run(leaf, func(t *testing.T) {
+			dir := writeRunConfigFixture(t)
+			var stdout, stderr bytes.Buffer
+
+			code := Run([]string{"run", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+			if code != 0 {
+				t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+			}
+			runID := outputValue(t, stdout.String(), "run")
+			outside := filepath.Join(t.TempDir(), "outside-state")
+			mustWriteFile(t, outside, "outside\n")
+			stateLeaf := filepath.Join(dir, ".maya-stall", "state", "runs", runID, leaf)
+			if err := os.Remove(stateLeaf); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("remove state leaf: %v", err)
+			}
+			if err := os.Symlink(outside, stateLeaf); err != nil {
+				t.Skipf("create symlink fixture: %v", err)
+			}
+
+			stdout.Reset()
+			stderr.Reset()
+			code = Run([]string{"attach", runID, "screenshot"}, &stdout, &stderr, dir, "test-version")
+			if code != 1 {
+				t.Fatalf("symlink state leaf attach screenshot exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "must not be a symlink") {
+				t.Fatalf("symlink state leaf error missing detail: %s", stderr.String())
+			}
+			if _, err := os.Stat(filepath.Join(dir, "artifacts", "maya-stall", runID, "screenshots", "run-scoped-screenshot.png")); !os.IsNotExist(err) {
+				t.Fatalf("run-scoped screenshot should not be captured before state leaf validation, stat err = %v", err)
+			}
+		})
+	}
+}
+
+func TestAttachRunControlValidatesRetainedRemoteRunRoot(t *testing.T) {
+	dir := t.TempDir()
+	runID := "20260708T000000.000000000Z"
+	stateDir := filepath.Join(dir, ".maya-stall", "state", "runs", runID)
+	mustWriteFile(t, filepath.Join(stateDir, "manifest.json"), `{
+  "runId": "20260708T000000.000000000Z",
+  "scenario": "smoke",
+  "targetProfile": "ci",
+  "host": "alpha",
+  "runtime": {
+    "profile": "ssh-sessiond",
+    "hostAdapter": "ssh",
+    "brokerAdapter": "gg-mayasessiond",
+    "liveProofEligible": true
+  }
+}
+`)
+	mustWriteFile(t, filepath.Join(stateDir, "run-record.json"), `{
+  "runId": "20260708T000000.000000000Z",
+  "scenario": "smoke",
+  "targetProfile": "ci",
+  "host": "alpha",
+  "runtime": {
+    "profile": "ssh-sessiond",
+    "hostAdapter": "ssh",
+    "brokerAdapter": "gg-mayasessiond",
+    "liveProofEligible": true
+  },
+  "status": "kept",
+  "localStateDir": "",
+  "localEvidenceDir": "",
+  "localWorkspace": "",
+  "remoteRunRoot": "C:/unexpected/runs/20260708T000000.000000000Z",
+  "hostConfig": {
+    "id": "alpha",
+    "transport": "ssh",
+    "ssh": {
+      "host": "maya-win-01"
+    },
+    "workRoot": "C:/maya-stall",
+    "broker": {
+      "type": "gg-mayasessiond",
+      "stateDir": "C:/maya-stall/sessiond-ui",
+      "python": "C:/maya-stall/sessiond-venv311/Scripts/python.exe",
+      "repo": "C:/maya-stall/tools/GG_MayaSessiond"
+    }
+  }
+}
+`)
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock"), "host: alpha\nkeptRun: "+runID+"\n")
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"attach", runID, "control", "click", "--x", "12", "--y", "34"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("tampered remote root attach control exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "remote cleanup path") || !strings.Contains(stderr.String(), "does not match expected") {
+		t.Fatalf("tampered remote root error missing validation detail: %s", stderr.String())
+	}
+}
+
 func TestStandaloneVisualEvidenceCommandsReturnUsageCodeForUnknownTargetProfile(t *testing.T) {
 	for _, command := range []string{"screenshot", "record"} {
 		t.Run(command, func(t *testing.T) {
@@ -5520,6 +5814,19 @@ scenarios:
         enabled: false
 `)
 	return dir
+}
+
+func outputValue(t *testing.T, output string, key string) string {
+	t.Helper()
+	prefix := key + ": "
+	for _, line := range strings.Split(output, "\n") {
+		value, ok := strings.CutPrefix(line, prefix)
+		if ok {
+			return strings.TrimSpace(value)
+		}
+	}
+	t.Fatalf("output missing %q line:\n%s", key, output)
+	return ""
 }
 
 func writeSingleHealthyHostConfig(t *testing.T, dir string) string {

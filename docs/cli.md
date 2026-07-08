@@ -42,6 +42,8 @@ See [version](commands/version.md), [init](commands/init.md), and
 maya-stall run [host flags] [lock flags] [stop flags] <scenario>
 maya-stall status [--run <run-id>]
 maya-stall attach <run-id>
+maya-stall attach <run-id> screenshot
+maya-stall attach <run-id> control click --x <pixels> --y <pixels>
 maya-stall stop <run-id>
 ```
 
@@ -78,6 +80,10 @@ See [screenshot](commands/screenshot.md), [record](commands/record.md), and
 Scenarios can also enable screenshot and recording Visual Evidence in repo
 config; `maya-stall run` and `maya-stall evidence collect` write those artifacts
 into the Scenario Evidence Bundle.
+
+When a Fresh Run or Kept Session already owns a Host Lock, use the run-scoped
+`attach <run-id> screenshot` and `attach <run-id> control click` forms. They
+verify the current Host Lock owner before touching the desktop.
 
 ### Evidence And Review Publishing
 

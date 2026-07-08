@@ -20,3 +20,8 @@ config is missing or malformed.
 The command writes a local Evidence Bundle under `artifacts/maya-stall/` with
 the resolved runtime metadata. `evidence.json` records the artifact kind,
 relative path, media type, selected Target Profile, and selected Maya Host.
+
+When a retained or active run already owns the Host Lock, this standalone
+command still fails closed for unrelated callers. Use
+`maya-stall attach <run-id> screenshot` to capture a full-desktop screenshot
+through the run-scoped Session Broker path.

@@ -92,6 +92,8 @@ Keep failed sessions around for local debugging:
 maya-stall run --keep-on-failure smoke
 maya-stall status
 maya-stall attach <run-id>
+maya-stall attach <run-id> screenshot
+maya-stall attach <run-id> control click --x 960 --y 540
 maya-stall stop <run-id>
 ```
 
@@ -158,6 +160,14 @@ Capture standalone visual evidence when debugging:
 ```sh
 maya-stall screenshot
 maya-stall record
+```
+
+If the run already owns the Host Lock, use the run-scoped attach commands
+instead:
+
+```sh
+maya-stall attach <run-id> screenshot
+maya-stall attach <run-id> control click --x 960 --y 540
 ```
 
 Publish the bundle to a filesystem Evidence Store:

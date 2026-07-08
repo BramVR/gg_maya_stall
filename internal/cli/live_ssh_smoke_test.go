@@ -21,6 +21,7 @@ func TestOptInRealSSHDoctorSmoke(t *testing.T) {
 		return
 	}
 	dir := writeRunConfigFixture(t)
+	restoreLiveSessionBrokerFixtures(t, options)
 	report := runDoctor(dir, options.doctorOptions())
 	assertLiveHostHealthProof(t, report)
 	t.Logf("Host Health: %s", formatHostHealthReport(report))
@@ -37,6 +38,7 @@ func TestOptInRealSSHConsumingRepoSmoke(t *testing.T) {
 	if !ok {
 		return
 	}
+	restoreLiveSessionBrokerFixtures(t, options)
 	runKLVPushConsumingRepoSmoke(t, options)
 }
 
@@ -46,6 +48,7 @@ func TestOptInRealSSHRunSmoke(t *testing.T) {
 		return
 	}
 	dir := writeLiveRunConfigFixture(t)
+	restoreLiveSessionBrokerFixtures(t, options)
 
 	doctorOptions := options.doctorOptions()
 	doctorOptions.ScenarioName = "smoke"
@@ -66,6 +69,8 @@ func TestOptInRealSSHRunSmoke(t *testing.T) {
 	if bundle.Scenario != "smoke" {
 		t.Fatalf("Evidence Bundle scenario = %q, want smoke", bundle.Scenario)
 	}
+	options.Host = bundle.Host
+	host := liveSmokeHostConfigByID(t, options, bundle.Host)
 	requireLiveScenarioRecordingArtifact(t, evidenceDir, bundle)
 
 	var keptStdout, keptStderr bytes.Buffer
@@ -104,6 +109,7 @@ func TestOptInRealSSHRunSmoke(t *testing.T) {
 	if !strings.Contains(stopStdout.String(), "stopped: "+runID) {
 		t.Fatalf("real SSH retention stop missing run id:\n%s", stopStdout.String())
 	}
+	restoreLiveSessionBrokerFixture(t, host)
 }
 
 func runKLVPushConsumingRepoSmoke(t *testing.T, options realSSHSmokeOptions) {

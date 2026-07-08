@@ -6,6 +6,7 @@ Release history starts with `v0.1.0`.
 
 ## Unreleased
 
+- Added run-scoped `maya-stall attach <run-id> screenshot` and `maya-stall attach <run-id> control click` commands for modal debugging while the active or kept run owns the Host Lock.
 - Added failure-time full-desktop screenshot capture for Fresh Runs that fail before Scenario Result collection when Scenario screenshot evidence is enabled and the selected Session Broker supports screenshot Visual Evidence.
 - Added live proof coverage for full-desktop screenshot plus `maya-stall control click` against a controlled blocking desktop prompt on the Windows Maya Host.
 - Added `maya-stall control click` for explicit full-desktop coordinate clicks through the selected Session Broker, using the same interactive Windows scheduled-task path as desktop Visual Evidence on real SSH hosts.

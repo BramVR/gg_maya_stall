@@ -9,6 +9,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ func TestOptInRealVisualEvidenceSmoke(t *testing.T) {
 		return
 	}
 	dir := writeLiveRunConfigFixture(t)
+	restoreLiveSessionBrokerFixtures(t, options)
 
 	doctorOptions := options.doctorOptions()
 	doctorOptions.ScenarioName = "smoke"
@@ -55,6 +57,7 @@ func TestOptInRealDesktopControlModalSmoke(t *testing.T) {
 		return
 	}
 	dir := writeLiveRunConfigFixture(t)
+	restoreLiveSessionBrokerFixtures(t, options)
 
 	hostID := selectLiveDesktopControlSmokeHost(t, dir, options)
 	options.Host = hostID
@@ -91,6 +94,88 @@ func TestOptInRealDesktopControlModalSmoke(t *testing.T) {
 	waitForLiveSessionBrokerCallReady(t, host)
 	t.Logf("Live desktop control modal proof: screenshotRun=%s screenshot=%s bytes=%d click=(%d,%d)",
 		bundle.RunID,
+		screenshot.Path,
+		artifactSize(t, evidenceDir, screenshot),
+		fixture.ClickX,
+		fixture.ClickY,
+	)
+}
+
+func TestOptInRealRunScopedDesktopOpsSmoke(t *testing.T) {
+	options, ok := realSSHSmokeOptionsFromEnv(t)
+	if !ok {
+		return
+	}
+	dir := writeLiveRunConfigFixture(t)
+	restoreLiveSessionBrokerFixtures(t, options)
+
+	hostID := selectLiveDesktopControlSmokeHost(t, dir, options)
+	options.Host = hostID
+	host := liveSmokeHostConfigByID(t, options, hostID)
+	processes, err := mayaTasklistSessions(host)
+	if err != nil {
+		t.Fatalf("query maya.exe tasklist sessions: %v", err)
+	}
+	if err := requireConsoleMayaProcess(processes); err != nil {
+		t.Fatal(err)
+	}
+
+	var keptStdout, keptStderr bytes.Buffer
+	keptCode := Run(options.runArgs("retention-failure", "--keep-on-failure"), &keptStdout, &keptStderr, dir, "test-version")
+	if keptCode != 1 {
+		t.Fatalf("live run-scoped retained run exit code = %d, want 1; stdout: %s stderr: %s", keptCode, keptStdout.String(), keptStderr.String())
+	}
+	runID := smokeOutputValue(keptStdout.String(), "run")
+	if runID == "" || !strings.Contains(keptStdout.String(), "stopPolicy: kept") {
+		t.Fatalf("live run-scoped proof did not keep failed run:\nstdout: %s\nstderr: %s", keptStdout.String(), keptStderr.String())
+	}
+	defer func() {
+		var stdout, stderr bytes.Buffer
+		code := Run([]string{"stop", runID}, &stdout, &stderr, dir, "test-version")
+		if code != 0 && !strings.Contains(stderr.String(), "not found") {
+			t.Fatalf("cleanup retained run exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+		}
+		restoreLiveSessionBrokerFixture(t, host)
+	}()
+
+	var standaloneStdout, standaloneStderr bytes.Buffer
+	standaloneCode := Run(options.screenshotArgs(), &standaloneStdout, &standaloneStderr, dir, "test-version")
+	if standaloneCode != 1 || !strings.Contains(standaloneStderr.String(), "no healthy unlocked Maya Host") {
+		t.Fatalf("standalone screenshot while Host Lock held exit code = %d, want fail-closed locked host; stdout: %s stderr: %s", standaloneCode, standaloneStdout.String(), standaloneStderr.String())
+	}
+
+	fixture := launchLiveDesktopControlModalFixture(t, host)
+	defer func() {
+		cleanupLiveDesktopControlModalFixture(t, host, fixture)
+	}()
+
+	var screenshotStdout, screenshotStderr bytes.Buffer
+	screenshotCode := Run([]string{"attach", runID, "screenshot"}, &screenshotStdout, &screenshotStderr, dir, "test-version")
+	if screenshotCode != 0 {
+		t.Fatalf("live run-scoped screenshot exit code = %d, want 0; stdout: %s stderr: %s", screenshotCode, screenshotStdout.String(), screenshotStderr.String())
+	}
+	evidenceDir := smokeOutputValue(screenshotStdout.String(), "evidence")
+	if evidenceDir == "" {
+		t.Fatalf("live run-scoped screenshot did not print Evidence Bundle path:\n%s", screenshotStdout.String())
+	}
+	bundle := readEvidenceBundle(t, evidenceDir)
+	screenshot := requireLiveRunScopedScreenshotArtifact(t, evidenceDir, bundle)
+	assertLiveDesktopControlScreenshotShowsModal(t, evidenceDir, screenshot)
+
+	var controlStdout, controlStderr bytes.Buffer
+	controlCode := Run([]string{"attach", runID, "control", "click", "--x", strconv.Itoa(fixture.ClickX), "--y", strconv.Itoa(fixture.ClickY)}, &controlStdout, &controlStderr, dir, "test-version")
+	if controlCode != 0 {
+		t.Fatalf("live run-scoped control click exit code = %d, want 0; stdout: %s stderr: %s", controlCode, controlStdout.String(), controlStderr.String())
+	}
+	if !strings.Contains(controlStdout.String(), "run: "+runID) || !strings.Contains(controlStdout.String(), "dryRun: false") {
+		t.Fatalf("live run-scoped control output missing execution detail:\n%s", controlStdout.String())
+	}
+	waitForLiveDesktopControlModalClosed(t, host, fixture)
+	cleanupLiveDesktopControlModalFixture(t, host, fixture)
+	fixture.RemoteRoot = ""
+	waitForLiveSessionBrokerCallReady(t, host)
+	t.Logf("Live run-scoped desktop ops proof: run=%s screenshot=%s bytes=%d click=(%d,%d)",
+		runID,
 		screenshot.Path,
 		artifactSize(t, evidenceDir, screenshot),
 		fixture.ClickX,
@@ -209,7 +294,10 @@ func TestLiveVisualEvidenceProofWorkflowRequiresSmokePass(t *testing.T) {
 		"TestOptInRealDesktopControlModalSmoke",
 		"run TestOptInRealVisualEvidenceSmoke -count=1",
 		"run TestOptInRealDesktopControlModalSmoke -count=1",
-		"run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke' -count=1",
+		"run TestOptInRealSSHDoctorSmoke -count=1",
+		"run TestOptInRealSSHConsumingRepoSmoke -count=1",
+		"run TestOptInRealSSHRunSmoke -count=1",
+		"run TestOptInRealRunScopedDesktopOpsSmoke -count=1",
 		"MAYA_STALL_LIVE_PROOF_ARTIFACT_ENABLED",
 		"MAYA_STALL_LIVE_PROOF_MEDIA_REVIEWED",
 		"live-visual-evidence-proof",
@@ -580,6 +668,23 @@ func requireLiveDesktopControlScreenshotArtifact(t *testing.T, evidenceDir strin
 	return screenshot
 }
 
+func requireLiveRunScopedScreenshotArtifact(t *testing.T, evidenceDir string, bundle evidenceBundle) visualEvidenceArtifact {
+	t.Helper()
+	for _, artifact := range bundle.VisualEvidence {
+		if artifact.Kind == "screenshot" && artifact.MediaType == "image/png" && artifact.Path == "screenshots/"+runScopedScreenshotName {
+			if _, err := os.Stat(filepath.Join(evidenceDir, filepath.FromSlash(artifact.Path))); err != nil {
+				t.Fatalf("missing run-scoped Visual Evidence artifact %s: %v", artifact.Path, err)
+			}
+			if artifact.TargetProfile != bundle.TargetProfile || artifact.Host != bundle.Host {
+				t.Fatalf("run-scoped screenshot target metadata = %+v, want bundle target %q host %q", artifact, bundle.TargetProfile, bundle.Host)
+			}
+			return artifact
+		}
+	}
+	t.Fatalf("live run-scoped proof requires run-scoped screenshot artifact, got %+v", bundle.VisualEvidence)
+	return visualEvidenceArtifact{}
+}
+
 func assertLiveDesktopControlScreenshotShowsModal(t *testing.T, evidenceDir string, screenshot visualEvidenceArtifact) {
 	t.Helper()
 	path := filepath.Join(evidenceDir, filepath.FromSlash(screenshot.Path))
@@ -647,6 +752,8 @@ const (
 	liveDesktopControlModalButton = 130
 	liveDesktopControlModalClickX = 300
 	liveDesktopControlModalClickY = 251
+	defaultLiveSessiondUITaskName = "MayaStallSessiondUI"
+	smokeSessiondUITaskEnv        = "MAYA_STALL_SMOKE_SESSIOND_UI_TASK"
 )
 
 type liveDesktopControlModalFixture struct {
@@ -706,6 +813,19 @@ func cleanupLiveDesktopControlModalFixture(t *testing.T, host mayaHostConfig, fi
 
 func waitForLiveSessionBrokerCallReady(t *testing.T, host mayaHostConfig) {
 	t.Helper()
+	var lastErr error
+	for i := 0; i < 10; i++ {
+		if err := liveSessionBrokerCallReady(host); err == nil {
+			return
+		} else {
+			lastErr = err
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("session broker call server did not settle after desktop control modal proof: %v", lastErr)
+}
+
+func liveSessionBrokerCallReady(host mayaHostConfig) error {
 	stateDir := strings.TrimSpace(host.Broker.StateDir)
 	if stateDir == "" {
 		stateDir = "C:/maya-stall/sessiond-ui"
@@ -725,18 +845,100 @@ cd %s
 		powerShellSingleQuoted(python),
 		powerShellSingleQuoted(stateDir),
 	)
-	var lastErr error
-	var lastRaw []byte
-	for i := 0; i < 10; i++ {
-		raw, err := runSSHCommandOutput(host, encodedPowerShellCommand(script), 10*time.Second)
-		if err == nil && strings.Contains(string(raw), `"ok": true`) {
-			return
-		}
-		lastErr = err
-		lastRaw = raw
-		time.Sleep(500 * time.Millisecond)
+	raw, err := runSSHCommandOutput(host, encodedPowerShellCommand(script), 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(raw)))
 	}
-	t.Fatalf("session broker call server did not settle after desktop control modal proof: %v: %s", lastErr, strings.TrimSpace(string(lastRaw)))
+	if !strings.Contains(string(raw), `"ok": true`) {
+		return fmt.Errorf("session broker call list did not report ok: %s", strings.TrimSpace(string(raw)))
+	}
+	return nil
+}
+
+func liveSessionBrokerFixtureReady(host mayaHostConfig) error {
+	status, err := ggMayaSessiondBroker{host: host}.status()
+	if err != nil {
+		return err
+	}
+	effectiveStatus := status.DerivedStatus
+	if effectiveStatus == "" {
+		effectiveStatus = status.State.Status
+	}
+	if effectiveStatus != "running" {
+		return fmt.Errorf("gg_mayasessiond status = %q, want running", effectiveStatus)
+	}
+	if !status.State.CallServerReady {
+		return fmt.Errorf("gg_mayasessiond call server is not ready")
+	}
+	processes, err := mayaTasklistSessions(host)
+	if err != nil {
+		return err
+	}
+	if err := requireConsoleMayaProcess(processes); err != nil {
+		return err
+	}
+	return nil
+}
+
+func restoreLiveSessionBrokerFixtures(t *testing.T, options realSSHSmokeOptions) {
+	t.Helper()
+	config, err := loadUserHostConfig(options.HostConfig)
+	if err != nil {
+		t.Fatalf("load live host config for session broker restore: %v", err)
+	}
+	candidates, err := hostCandidates(config, options.TargetProfile, options.Host)
+	if err != nil {
+		t.Fatalf("select live hosts for session broker restore: %v", err)
+	}
+	if len(candidates) == 0 {
+		t.Fatalf("no live hosts available for target profile %q", options.TargetProfile)
+	}
+	restored := false
+	for _, host := range candidates {
+		if isHealthyHost(host) && host.Broker.isGGMayaSessiond() {
+			restoreLiveSessionBrokerFixture(t, host)
+			restored = true
+		}
+	}
+	if !restored {
+		t.Fatalf("no healthy gg_mayasessiond live hosts available for target profile %q", options.TargetProfile)
+	}
+}
+
+func restoreLiveSessionBrokerFixture(t *testing.T, host mayaHostConfig) {
+	t.Helper()
+	if err := liveSessionBrokerFixtureReady(host); err == nil {
+		return
+	}
+	taskName := strings.TrimSpace(os.Getenv(smokeSessiondUITaskEnv))
+	if taskName == "" {
+		taskName = defaultLiveSessiondUITaskName
+	}
+	script := fmt.Sprintf(`$ErrorActionPreference = "Stop"
+$taskName = %s
+$task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+if ($task.State -eq "Running") {
+  Write-Output "running"
+} else {
+  Start-ScheduledTask -InputObject $task
+  Write-Output "started"
+}`,
+		powerShellSingleQuoted(taskName),
+	)
+	if raw, err := runSSHCommandOutput(host, encodedPowerShellCommand(script), sessiondCommandTimeout); err != nil {
+		t.Fatalf("restore live session broker fixture with scheduled task %q: %v: %s", taskName, err, strings.TrimSpace(string(raw)))
+	}
+	var lastErr error
+	deadline := time.Now().Add(3 * time.Minute)
+	for time.Now().Before(deadline) {
+		if err := liveSessionBrokerFixtureReady(host); err == nil {
+			return
+		} else {
+			lastErr = err
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatalf("restore live session broker fixture did not return Maya and session broker to the interactive Console session: %v", lastErr)
 }
 
 func liveDesktopControlModalFixturePowerShell(fixture liveDesktopControlModalFixture) string {

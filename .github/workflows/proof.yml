@@ -258,7 +258,10 @@ jobs:
           set -euo pipefail
           go test -json ./internal/cli -run TestOptInRealVisualEvidenceSmoke -count=1 | tee artifacts/proof/live-smoke.jsonl
           go test -json ./internal/cli -run TestOptInRealDesktopControlModalSmoke -count=1 | tee -a artifacts/proof/live-smoke.jsonl
-          go test -json ./internal/cli -run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke' -count=1 | tee -a artifacts/proof/live-smoke.jsonl
+          go test -json ./internal/cli -run TestOptInRealSSHDoctorSmoke -count=1 | tee -a artifacts/proof/live-smoke.jsonl
+          go test -json ./internal/cli -run TestOptInRealSSHConsumingRepoSmoke -count=1 | tee -a artifacts/proof/live-smoke.jsonl
+          go test -json ./internal/cli -run TestOptInRealSSHRunSmoke -count=1 | tee -a artifacts/proof/live-smoke.jsonl
+          go test -json ./internal/cli -run TestOptInRealRunScopedDesktopOpsSmoke -count=1 | tee -a artifacts/proof/live-smoke.jsonl
 
       - name: Public Artifact Confidentiality Gate
         id: public-artifact-confidentiality
@@ -297,7 +300,7 @@ jobs:
           const fs = require("node:fs");
           const [manifestPath, hostConfigState, liveStatus, smokePath, proofArtifactManifestPath] = process.argv.slice(2);
           const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-          const expected = new Set(["TestOptInRealSSHDoctorSmoke", "TestOptInRealSSHRunSmoke", "TestOptInRealSSHConsumingRepoSmoke", "TestOptInRealVisualEvidenceSmoke", "TestOptInRealDesktopControlModalSmoke"]);
+          const expected = new Set(["TestOptInRealSSHDoctorSmoke", "TestOptInRealSSHRunSmoke", "TestOptInRealSSHConsumingRepoSmoke", "TestOptInRealVisualEvidenceSmoke", "TestOptInRealDesktopControlModalSmoke", "TestOptInRealRunScopedDesktopOpsSmoke"]);
           const passed = new Set();
           const skipped = new Set();
           if (fs.existsSync(smokePath)) {

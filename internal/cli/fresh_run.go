@@ -152,6 +152,9 @@ func (run *freshRunLifecycle) setup() error {
 	if err := writeRunRetentionRecord(run.context, newRunRetentionRecord(run.context, run.manifest, host.Config, "running", "")); err != nil {
 		return err
 	}
+	if err := markHostLockActive(run.repoDir, run.host.HostID, run.manifest.RunID); err != nil {
+		return err
+	}
 	return appendEvent(run.context.EventsPath, "run.started", scenario.Name)
 }
 
@@ -250,6 +253,11 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 		return runOutcome{}, err
 	}
 	annotateVisualEvidenceTarget(run.visualEvidence, run.manifest.TargetProfile, run.manifest.Host)
+	runScopedVisualEvidence, err := readRunScopedVisualEvidence(run.context)
+	if err != nil {
+		return runOutcome{}, err
+	}
+	run.visualEvidence = mergeVisualEvidence(run.visualEvidence, runScopedVisualEvidence)
 	resultDocument.setResult(run.result)
 	if err := writeScenarioResult(run.context, run.scenario.ScenarioResultPath, resultDocument); err != nil {
 		return runOutcome{}, err

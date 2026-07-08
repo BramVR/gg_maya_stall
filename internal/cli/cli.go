@@ -235,12 +235,12 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 		}
 		return 0
 	case "attach":
-		runID, err := parseRunIDArg("attach", args[1:])
+		options, err := parseAttachArgs(args[1:])
 		if err != nil {
 			fmt.Fprintf(stderr, "maya-stall attach: %v\n", err)
 			return 2
 		}
-		if err := attachRun(workDir, runID, stdout); err != nil {
+		if err := runAttachAction(workDir, options, stdout); err != nil {
 			var userErr *usageError
 			if errors.As(err, &userErr) {
 				fmt.Fprintf(stderr, "maya-stall attach: %v\n", err)
@@ -316,10 +316,12 @@ Usage:
   maya-stall review-comment gitlab --project <path-or-id> --merge-request <iid> [--token-env <name>] [--base-url <url>] [--dry-run] <published-evidence-dir>
   maya-stall status [--run <run-id>]
   maya-stall attach <run-id>
+  maya-stall attach <run-id> screenshot
+  maya-stall attach <run-id> control click --x <pixels> --y <pixels>
   maya-stall stop <run-id>
 
 Commands:
-  attach   print kept run events and logs
+  attach   observe a run or perform run-scoped screenshot/control
   control click   send an explicit desktop click through the Session Broker
   doctor   check local config, Target Profile, and Host Health layers
   evidence collect   run a Scenario and write a complete Evidence Bundle

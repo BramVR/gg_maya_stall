@@ -256,6 +256,9 @@ func registerVisualEvidenceBytes(context runContext, kind string, name string, m
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return visualEvidenceArtifact{}, err
 	}
+	if err := rejectExistingFileLeaf(path); err != nil {
+		return visualEvidenceArtifact{}, err
+	}
 	if err := os.WriteFile(path, content, 0o644); err != nil {
 		return visualEvidenceArtifact{}, err
 	}

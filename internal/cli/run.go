@@ -936,6 +936,9 @@ func appendEvent(path string, event string, detail string) error {
 	if err != nil {
 		return err
 	}
+	if err := rejectExistingFileLeaf(path); err != nil {
+		return err
+	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
@@ -953,7 +956,27 @@ func writeJSONFile(path string, value any) error {
 	if err != nil {
 		return err
 	}
+	if err := rejectExistingFileLeaf(path); err != nil {
+		return err
+	}
 	return os.WriteFile(path, append(content, '\n'), 0o644)
+}
+
+func rejectExistingFileLeaf(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s must not be a symlink", path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s must be a regular file", path)
+	}
+	return nil
 }
 
 func decodeJSONUseNumber(content []byte, value any) error {

@@ -22,6 +22,11 @@ in desktop session that owns Maya, not the raw SSH session.
 Only non-negative pixel coordinates are accepted. Use `--dry-run` to verify the
 selected host and coordinates without sending input.
 
+When a retained or active run already owns the Host Lock, this standalone
+command still fails closed for unrelated callers. Use
+`maya-stall attach <run-id> control click --x <pixels> --y <pixels>` to send
+one explicit click through the owning run's Session Broker path.
+
 The live proof gate includes a controlled blocking desktop prompt fixture: it
 captures a full-desktop screenshot while the prompt is visible, then clears it
 with `maya-stall control click`. Named or located UI-element clicks are not part

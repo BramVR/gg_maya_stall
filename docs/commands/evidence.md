@@ -27,8 +27,10 @@ Validator failures are recorded in `evidence.json` and mark the run failed.
 The fake broker supports configured Visual Evidence. With
 `broker.type: gg-mayasessiond`, screenshot and recording Visual Evidence use an
 interactive Windows scheduled task to capture the visible desktop session that
-owns Maya. Recording uses 10 seconds at 15 fps by default and is encoded locally
-with `ffmpeg`.
+owns Maya. On real Windows Maya Hosts, both screenshots and recording frames
+cover the full Windows virtual desktop across attached monitors rather than
+only the primary screen. Recording uses 10 seconds at 15 fps by default and is
+encoded locally with `ffmpeg`.
 
 ## publish
 

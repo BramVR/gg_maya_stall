@@ -57,6 +57,25 @@ func TestWindowsDesktopCaptureUsesInteractiveScheduledTasksAndCleansUp(t *testin
 	}
 }
 
+func TestWindowsDesktopCaptureUsesFullVirtualDesktopBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		script string
+	}{
+		{name: "screenshot", script: windowsDesktopScreenshotPowerShell("C:/maya-stall/artifacts/proof")},
+		{name: "recording", script: windowsDesktopRecordingPowerShell("C:/maya-stall/artifacts/proof", 3, 500)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if strings.Contains(tc.script, "PrimaryScreen") {
+				t.Fatalf("%s capture must not use primary-screen-only bounds:\n%s", tc.name, tc.script)
+			}
+			if !strings.Contains(tc.script, "[System.Windows.Forms.SystemInformation]::VirtualScreen") {
+				t.Fatalf("%s capture must use full virtual desktop bounds:\n%s", tc.name, tc.script)
+			}
+		})
+	}
+}
+
 func TestWindowsDesktopRecordingFailsClearlyWithoutLocalFFmpeg(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	transport := &fakeWindowsDesktopTransport{}

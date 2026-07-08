@@ -221,6 +221,8 @@ Doctor layer:
   `user32.dll` desktop APIs for explicit coordinate clicks.
 - Store screenshots, recordings, logs, Scenario Results, and declared outputs
   in each Evidence Bundle.
+- Treat real desktop screenshot and recording evidence as full Windows virtual
+  desktop proof across attached monitors, not primary-screen-only proof.
 - When broker execution fails before Scenario Result collection, Maya Stall
   writes a failed Evidence Bundle and best-effort captures
   `screenshots/failure-desktop.png` through the configured screenshot path when

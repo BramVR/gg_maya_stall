@@ -13,7 +13,9 @@ Default commands use the fake Session Broker. Real SSH hosts use an interactive
 Windows scheduled task to capture desktop frames from the same visible desktop
 that owns Maya, download the frame archive, and encode `recordings/recording.mp4`
 locally with `ffmpeg`. The default recording duration is 10 seconds at 15 fps.
-This is desktop Visual Evidence, distinct from broker viewport capture.
+Recording frames cover the full Windows virtual desktop across attached
+monitors, matching screenshot coverage. This is desktop Visual Evidence,
+distinct from broker viewport capture.
 
 The command writes a local Evidence Bundle under `artifacts/maya-stall/`.
 `evidence.json` records the artifact kind, relative path, media type, duration,

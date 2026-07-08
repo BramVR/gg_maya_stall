@@ -156,7 +156,7 @@ try {
 } catch {
   throw "Windows PowerShell desktop assemblies System.Windows.Forms and System.Drawing are required for desktop screenshot capture: $($_.Exception.Message)"
 }
-$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+$bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
 if ($bounds.Width -le 0 -or $bounds.Height -le 0) { throw "interactive desktop session is unavailable for screenshot capture" }
 $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
 $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
@@ -274,7 +274,7 @@ try {
   throw "Windows PowerShell desktop assemblies System.Windows.Forms and System.Drawing are required for desktop recording capture: $($_.Exception.Message)"
 }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+$bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
 if ($bounds.Width -le 0 -or $bounds.Height -le 0) { throw "interactive desktop session is unavailable for recording capture" }
 $start = [DateTime]::UtcNow
 for ($i = 0; $i -lt $Frames; $i++) {

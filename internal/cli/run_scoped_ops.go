@@ -102,7 +102,7 @@ func runAttachAction(repoDir string, options attachOptions, stdout io.Writer) er
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "run: %s\n", options.RunID)
+		_, _ = fmt.Fprintf(stdout, "run: %s\n", options.RunID)
 		printDesktopControlOutcome(stdout, outcome)
 		return nil
 	default:
@@ -117,7 +117,7 @@ func captureRunScopedScreenshot(repoDir string, runID string) (runOutcome, visua
 	}
 	capturer, ok := broker.(screenshotCapturer)
 	if !ok {
-		return runOutcome{}, visualEvidenceArtifact{}, fmt.Errorf("Session Broker does not support screenshot capture")
+		return runOutcome{}, visualEvidenceArtifact{}, fmt.Errorf("session broker does not support screenshot capture")
 	}
 	if err := rejectRunScopedStateWriteLeaves(context, true); err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
@@ -337,13 +337,13 @@ func ensureRunHasScopedHostLock(repoDir string, manifest runManifest, runID stri
 		return err
 	}
 	if !found {
-		return fmt.Errorf("Host Lock for %s is not owned by an active or kept run", manifest.Host)
+		return fmt.Errorf("host lock for %s is not owned by an active or kept run", manifest.Host)
 	}
 	if owner != runID {
-		return fmt.Errorf("Host Lock for %s belongs to %s run %s, not %s", manifest.Host, kind, owner, runID)
+		return fmt.Errorf("host lock for %s belongs to %s run %s, not %s", manifest.Host, kind, owner, runID)
 	}
 	if stale {
-		return fmt.Errorf("Host Lock for %s belongs to stale active run %s", manifest.Host, runID)
+		return fmt.Errorf("host lock for %s belongs to stale active run %s", manifest.Host, runID)
 	}
 	return nil
 }

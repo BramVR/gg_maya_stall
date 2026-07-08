@@ -179,9 +179,25 @@ func (run *freshRunLifecycle) collectPreResultFailureEvidence(runErr error) erro
 	if err := appendEvent(run.context.EventsPath, "run.failed-before-result-collection", summary); err != nil {
 		return err
 	}
+	if collector, ok := run.runtime.Host.(failureArtifactCollector); ok {
+		if err := collector.CollectFailureArtifacts(run.context, run.scenario); err != nil {
+			if eventErr := appendEvent(run.context.EventsPath, "run.failed-before-result-collection.artifact-collection-failed", err.Error()); eventErr != nil {
+				return eventErr
+			}
+		} else if err := appendEvent(run.context.EventsPath, "run.failed-before-result-collection.artifacts-collected", "best-effort"); err != nil {
+			return err
+		}
+	} else if collector, ok := run.runtime.Host.(artifactCollector); ok {
+		if err := collector.CollectArtifacts(run.context, run.scenario); err != nil {
+			if eventErr := appendEvent(run.context.EventsPath, "run.failed-before-result-collection.artifact-collection-failed", err.Error()); eventErr != nil {
+				return eventErr
+			}
+		} else if err := appendEvent(run.context.EventsPath, "run.failed-before-result-collection.artifacts-collected", "best-effort"); err != nil {
+			return err
+		}
+	}
 	result := ScenarioResult{Status: resultStatusFailed, Summary: summary}
-	document := newScenarioResultDocument(result)
-	if err := writeScenarioResult(run.context, run.scenario.ScenarioResultPath, document); err != nil {
+	if err := preserveCollectedScenarioResultOrWriteFailure(run.context, run.scenario.ScenarioResultPath, result); err != nil {
 		return err
 	}
 	var artifacts []visualEvidenceArtifact
@@ -198,6 +214,23 @@ func (run *freshRunLifecycle) collectPreResultFailureEvidence(runErr error) erro
 		}
 	}
 	return writeEvidenceBundle(run.context, run.manifest, run.scenario, result, artifacts, nil)
+}
+
+func preserveCollectedScenarioResultOrWriteFailure(context runContext, resultPath string, result ScenarioResult) error {
+	if err := validateScenarioResultPath(context, resultPath); err != nil {
+		return err
+	}
+	_, found, err := readScenarioResultDocument(context.ScenarioResultPath)
+	if err != nil {
+		if eventErr := appendEvent(context.EventsPath, "run.failed-before-result-collection.scenario-result-unreadable", err.Error()); eventErr != nil {
+			return eventErr
+		}
+		found = false
+	}
+	if found {
+		return copyFile(context.ScenarioResultPath, filepath.Join(context.EvidenceDir, evidenceScenarioResultFileName))
+	}
+	return writeScenarioResult(context, resultPath, newScenarioResultDocument(result))
 }
 
 func ensureFailureLog(context runContext, runErr error) error {

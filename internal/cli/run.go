@@ -38,6 +38,10 @@ type artifactCollector interface {
 	CollectArtifacts(runContext, scenarioContract) error
 }
 
+type failureArtifactCollector interface {
+	CollectFailureArtifacts(runContext, scenarioContract) error
+}
+
 type sessionBroker interface {
 	RunScenario(runContext, scenarioConfig) (ScenarioResult, error)
 }

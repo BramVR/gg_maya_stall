@@ -49,10 +49,15 @@ workspace, executes it through `gg_maya_sessiond.cli call ... script.execute`,
 downloads declared outputs, and captures configured Visual Evidence from the
 interactive Windows desktop session.
 Remote Scenario execution through `script.execute` is capped at 10 minutes.
-If `script.execute` or equivalent broker execution fails before Scenario Result
-collection, `run` writes a failed Evidence Bundle and best-effort captures
-`screenshots/failure-desktop.png` when Scenario screenshot evidence is enabled
-and the selected broker supports screenshot Visual Evidence.
+If `script.execute` or equivalent broker execution fails after the remote
+workspace exists, `run` still fails but first attempts best-effort collection of
+declared outputs, logs, screenshots, and any available Scenario Result JSON into
+the local Evidence Bundle. A collected Scenario Result may show that the
+Scenario passed before the broker disconnected; the Evidence Bundle status and
+events still record the broker failure as the run result.
+When Scenario screenshot evidence is enabled and the selected broker supports
+screenshot Visual Evidence, `run` also best-effort captures
+`screenshots/failure-desktop.png`.
 `manifest.json` and `evidence.json` record the resolved runtime profile, host
 adapter, broker adapter, broker config source, and live-proof eligibility.
 Scenario normalization owns Run Payload paths, Expected Outputs, evidence

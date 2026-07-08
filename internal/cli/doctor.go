@@ -257,6 +257,24 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 	} else {
 		add(withSource(okCheck("visual-evidence", "available"), "fake"))
 	}
+	if brokerInvalidReason != "" {
+		add(withBlockedBy(failedCheck("desktop-control", "unavailable: "+brokerInvalidReason, "Use a valid Session Broker before checking desktop control. See docs/setup/windows-maya-host.md#desktop-control."), "session-broker"))
+	} else if runtimeErr == nil && host.Broker.isGGMayaSessiond() {
+		broker := resolved.Broker.(ggMayaSessiondBroker)
+		if err := broker.validate(); err != nil {
+			add(withBlockedBy(failedCheck("desktop-control", "unavailable: "+err.Error(), "Configure gg_mayasessiond paths before checking desktop control. See docs/setup/windows-maya-host.md#desktop-control."), "session-broker"))
+		} else if probeLockDetail != "" {
+			add(withBlockedBy(failedCheck("desktop-control", "skipped because Host Lock is not clear: "+probeLockDetail, "Wait for the active Fresh Run or clear the stale Host Lock before using desktop control. See docs/setup/windows-maya-host.md#host-lock-and-retention."), "host-lock"))
+		} else if lockCheck.Status != "ok" {
+			add(withBlockedBy(failedCheck("desktop-control", "skipped because Host Lock is not clear", "Wait for the active Fresh Run or clear the stale Host Lock before using desktop control. See docs/setup/windows-maya-host.md#host-lock-and-retention."), "host-lock"))
+		} else if !sessionBrokerOK {
+			add(withBlockedBy(failedCheck("desktop-control", "skipped because session-broker is not healthy", "Repair the gg_mayasessiond session-broker layer before using desktop control. See docs/setup/windows-maya-host.md#desktop-control."), "session-broker"))
+		} else {
+			add(realSessionBrokerDesktopControlLayer(resolved.Broker))
+		}
+	} else if runtimeErr == nil {
+		add(fakeDesktopControlLayer(resolved.Broker))
+	}
 }
 
 type sessiondDoctorOutput struct {
@@ -369,6 +387,20 @@ func realSessionBrokerVisualEvidenceLayer(host mayaHostConfig) doctorCheck {
 		return withSource(failedCheck("visual-evidence", "viewport.capture available; desktop recording unavailable: "+err.Error(), "Install ffmpeg locally and repair Windows desktop recording prerequisites. See docs/setup/windows-maya-host.md#visual-evidence."), "session-broker")
 	}
 	return withSource(okCheck("visual-evidence", "viewport.capture available; desktop recording available"), "session-broker")
+}
+
+func realSessionBrokerDesktopControlLayer(broker sessionBroker) doctorCheck {
+	if _, ok := broker.(desktopClicker); !ok {
+		return withSource(failedCheck("desktop-control", "desktop click unavailable", "Use a Session Broker adapter that supports explicit desktop control. See docs/setup/windows-maya-host.md#desktop-control."), "session-broker")
+	}
+	return withSource(okCheck("desktop-control", "desktop click available"), "session-broker")
+}
+
+func fakeDesktopControlLayer(broker sessionBroker) doctorCheck {
+	if _, ok := broker.(desktopClicker); !ok {
+		return withSource(failedCheck("desktop-control", "desktop click unavailable", "Use a Session Broker adapter that supports explicit desktop control. See docs/setup/windows-maya-host.md#desktop-control."), "fake")
+	}
+	return withSource(okCheck("desktop-control", "available"), "fake")
 }
 
 func sessiondDoctorArgs(host mayaHostConfig) []string {

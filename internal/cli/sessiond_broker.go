@@ -153,6 +153,20 @@ func (broker ggMayaSessiondBroker) CaptureRecording(context runContext, request 
 	return artifact, nil
 }
 
+func (broker ggMayaSessiondBroker) ClickDesktop(request desktopClickRequest) error {
+	if err := broker.validate(); err != nil {
+		return err
+	}
+	remoteRoot := strings.TrimSpace(request.RemoteRoot)
+	if remoteRoot == "" {
+		return fmt.Errorf("desktop click requires remote root")
+	}
+	defer func() {
+		_ = broker.removeRemotePath(remoteRoot)
+	}()
+	return clickWindowsDesktop(sshWindowsDesktopTransport(broker.host), remoteRoot, request.X, request.Y)
+}
+
 func (broker ggMayaSessiondBroker) RetentionCapabilities() brokerCapabilities {
 	return brokerCapabilities{
 		RetainOnFailure:          true,

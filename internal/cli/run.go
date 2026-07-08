@@ -59,6 +59,10 @@ type recordingCapturer interface {
 	CaptureRecording(runContext, recordingRequest) (visualEvidenceArtifact, error)
 }
 
+type desktopClicker interface {
+	ClickDesktop(desktopClickRequest) error
+}
+
 type screenshotRequest struct {
 	Name string
 }
@@ -67,6 +71,12 @@ type recordingRequest struct {
 	Name     string
 	Duration time.Duration
 	FPS      int
+}
+
+type desktopClickRequest struct {
+	RemoteRoot string
+	X          int
+	Y          int
 }
 
 type runContext struct {
@@ -1076,6 +1086,10 @@ func (fakeSessionBroker) CaptureRecording(context runContext, request recordingR
 	return registerVisualEvidenceBytes(context, "recording", name, "video/mp4", content)
 }
 
+func (fakeSessionBroker) ClickDesktop(desktopClickRequest) error {
+	return nil
+}
+
 type invalidSessionBroker struct {
 	err error
 }
@@ -1090,6 +1104,10 @@ func (broker invalidSessionBroker) CaptureScreenshot(runContext, screenshotReque
 
 func (broker invalidSessionBroker) CaptureRecording(runContext, recordingRequest) (visualEvidenceArtifact, error) {
 	return visualEvidenceArtifact{}, broker.err
+}
+
+func (broker invalidSessionBroker) ClickDesktop(desktopClickRequest) error {
+	return broker.err
 }
 
 func sessionBrokerDisplayName(broker sessionBroker) string {

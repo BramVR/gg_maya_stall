@@ -70,9 +70,11 @@ See [run](commands/run.md), [status](commands/status.md),
 ```text
 maya-stall screenshot [host flags]
 maya-stall record [host flags]
+maya-stall control click --x <pixels> --y <pixels> [host flags] [--dry-run]
 ```
 
-See [screenshot](commands/screenshot.md) and [record](commands/record.md).
+See [screenshot](commands/screenshot.md), [record](commands/record.md), and
+[control](commands/control.md).
 Scenarios can also enable screenshot and recording Visual Evidence in repo
 config; `maya-stall run` and `maya-stall evidence collect` write those artifacts
 into the Scenario Evidence Bundle.

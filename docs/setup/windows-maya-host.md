@@ -217,6 +217,8 @@ Doctor layer:
   in the logged-in interactive desktop session instead of the raw SSH session.
 - Keep `Compress-Archive` available on the Windows host so recording frames can
   be zipped for transfer.
+- Desktop control uses the same short-lived `/IT` scheduled-task path and
+  `user32.dll` desktop APIs for explicit coordinate clicks.
 - Store screenshots, recordings, logs, Scenario Results, and declared outputs
   in each Evidence Bundle.
 - Treat viewport capture alone as insufficient if the Maya process is not in the interactive desktop.
@@ -228,6 +230,23 @@ Doctor layer:
 
 - `visual-evidence`: screenshot or recording capture is unavailable through the
   Session Broker or host prerequisites.
+
+### Desktop Control
+
+- `maya-stall control click` sends one explicit full-desktop coordinate click
+  through the selected Session Broker.
+- Use `--dry-run` to verify Host Config, Target Profile, Maya Host, runtime,
+  and coordinates without sending input.
+- Real SSH hosts with `broker.type: gg-mayasessiond` use the same short-lived
+  `/IT` scheduled-task path as desktop Visual Evidence, plus `user32.dll`
+  cursor and mouse APIs.
+- Host-specific details such as SSH, Windows desktop login, `workRoot`, and
+  broker paths stay in Host Config and Session Broker setup.
+
+Doctor layer:
+
+- `desktop-control`: explicit desktop click support is unavailable through the
+  selected Session Broker or blocked by Host Lock/session-broker health.
 
 ### Evidence Store
 
@@ -332,8 +351,9 @@ Optional:
 - Installing OpenSSH Server.
 - Installing or licensing Autodesk Maya.
 - Creating Windows users, auto-logon, or service wrappers.
-- Creating scheduled tasks other than the prepare script's interactive
-  `MayaStallSessiondUI` task.
+- Creating long-lived scheduled tasks other than the prepare script's
+  interactive `MayaStallSessiondUI` task. Visual Evidence and desktop control
+  commands may create short-lived `/IT` tasks and remove them after the action.
 - Storing host credentials, private hostnames, SSH identities, or license data.
 - Installing `gg_mayasessiond`.
 - Creating network shares or Evidence Store hosting.

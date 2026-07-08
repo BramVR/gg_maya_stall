@@ -30,8 +30,9 @@ proof is a failure.
 The live gate runs desktop Visual Evidence and desktop control proof first,
 then the older SSH smokes, then the retained run-scoped desktop ops smoke last
 because stopping a retained `gg_mayasessiond` run can tear down the broker
-session. Retained-stop smokes restart the documented interactive sessiond UI
-scheduled task before the next proof step:
+session. Live smokes restore the documented interactive sessiond UI scheduled
+task before proof starts and retained-stop smokes restore it again before the
+next proof step:
 
 ```sh
 go test ./internal/cli -run TestOptInRealVisualEvidenceSmoke -count=1

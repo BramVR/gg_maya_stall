@@ -21,6 +21,7 @@ func TestOptInRealVisualEvidenceSmoke(t *testing.T) {
 		return
 	}
 	dir := writeLiveRunConfigFixture(t)
+	restoreLiveSessionBrokerFixtures(t, options)
 
 	doctorOptions := options.doctorOptions()
 	doctorOptions.ScenarioName = "smoke"
@@ -56,6 +57,7 @@ func TestOptInRealDesktopControlModalSmoke(t *testing.T) {
 		return
 	}
 	dir := writeLiveRunConfigFixture(t)
+	restoreLiveSessionBrokerFixtures(t, options)
 
 	hostID := selectLiveDesktopControlSmokeHost(t, dir, options)
 	options.Host = hostID
@@ -105,6 +107,7 @@ func TestOptInRealRunScopedDesktopOpsSmoke(t *testing.T) {
 		return
 	}
 	dir := writeLiveRunConfigFixture(t)
+	restoreLiveSessionBrokerFixtures(t, options)
 
 	hostID := selectLiveDesktopControlSmokeHost(t, dir, options)
 	options.Host = hostID
@@ -861,6 +864,31 @@ func liveSessionBrokerFixtureReady(host mayaHostConfig) error {
 		return err
 	}
 	return liveSessionBrokerCallReady(host)
+}
+
+func restoreLiveSessionBrokerFixtures(t *testing.T, options realSSHSmokeOptions) {
+	t.Helper()
+	config, err := loadUserHostConfig(options.HostConfig)
+	if err != nil {
+		t.Fatalf("load live host config for session broker restore: %v", err)
+	}
+	candidates, err := hostCandidates(config, options.TargetProfile, options.Host)
+	if err != nil {
+		t.Fatalf("select live hosts for session broker restore: %v", err)
+	}
+	if len(candidates) == 0 {
+		t.Fatalf("no live hosts available for target profile %q", options.TargetProfile)
+	}
+	restored := false
+	for _, host := range candidates {
+		if isHealthyHost(host) && host.Broker.isGGMayaSessiond() {
+			restoreLiveSessionBrokerFixture(t, host)
+			restored = true
+		}
+	}
+	if !restored {
+		t.Fatalf("no healthy gg_mayasessiond live hosts available for target profile %q", options.TargetProfile)
+	}
 }
 
 func restoreLiveSessionBrokerFixture(t *testing.T, host mayaHostConfig) {

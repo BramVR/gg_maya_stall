@@ -13,9 +13,11 @@ Default commands use the fake Session Broker. Real capture depends on host
 config, an interactive desktop, and Session Broker support. With
 `broker.type: gg-mayasessiond`, screenshots are captured through
 an interactive Windows scheduled task using desktop APIs, not raw SSH desktop
-capture or `viewport.capture`. SSH Maya Hosts must use the `ssh-sessiond`
-runtime profile; they do not fall back to fake screenshot capture when broker
-config is missing or malformed.
+capture or `viewport.capture`. Real desktop screenshots cover the full Windows
+virtual desktop across attached monitors, so dialogs on secondary displays or
+partly off the primary monitor remain visible in proof. SSH Maya Hosts must use
+the `ssh-sessiond` runtime profile; they do not fall back to fake screenshot
+capture when broker config is missing or malformed.
 
 The command writes a local Evidence Bundle under `artifacts/maya-stall/` with
 the resolved runtime metadata. `evidence.json` records the artifact kind,

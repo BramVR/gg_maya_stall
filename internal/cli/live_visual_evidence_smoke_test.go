@@ -68,7 +68,9 @@ func TestOptInRealDesktopControlModalSmoke(t *testing.T) {
 	}
 
 	fixture := launchLiveDesktopControlModalFixture(t, host)
-	defer cleanupLiveDesktopControlModalFixture(t, host, fixture)
+	defer func() {
+		cleanupLiveDesktopControlModalFixture(t, host, fixture)
+	}()
 
 	evidenceDir := captureLiveScreenshotCommandProof(t, dir, options)
 	bundle := assertLiveDesktopControlScreenshotProofBundle(t, evidenceDir, options)
@@ -84,6 +86,9 @@ func TestOptInRealDesktopControlModalSmoke(t *testing.T) {
 		t.Fatalf("control click output missing execution detail:\n%s", stdout.String())
 	}
 	waitForLiveDesktopControlModalClosed(t, host, fixture)
+	cleanupLiveDesktopControlModalFixture(t, host, fixture)
+	fixture.RemoteRoot = ""
+	waitForLiveSessionBrokerCallReady(t, host)
 	t.Logf("Live desktop control modal proof: screenshotRun=%s screenshot=%s bytes=%d click=(%d,%d)",
 		bundle.RunID,
 		screenshot.Path,
@@ -691,9 +696,47 @@ func waitForLiveDesktopControlModalClosed(t *testing.T, host mayaHostConfig, fix
 
 func cleanupLiveDesktopControlModalFixture(t *testing.T, host mayaHostConfig, fixture liveDesktopControlModalFixture) {
 	t.Helper()
+	if fixture.RemoteRoot == "" {
+		return
+	}
 	if _, err := runSSHCommandOutput(host, encodedPowerShellCommand(liveDesktopControlModalCleanupPowerShell(fixture)), sessiondCommandTimeout); err != nil {
 		t.Fatalf("cleanup live desktop control modal fixture: %v", err)
 	}
+}
+
+func waitForLiveSessionBrokerCallReady(t *testing.T, host mayaHostConfig) {
+	t.Helper()
+	stateDir := strings.TrimSpace(host.Broker.StateDir)
+	if stateDir == "" {
+		stateDir = "C:/maya-stall/sessiond-ui"
+	}
+	python := strings.TrimSpace(host.Broker.Python)
+	if python == "" {
+		python = "python"
+	}
+	repo := strings.TrimSpace(host.Broker.Repo)
+	if repo == "" {
+		repo = "."
+	}
+	script := fmt.Sprintf(`$ErrorActionPreference = "Stop"
+cd %s
+& %s -m gg_maya_sessiond.cli call --state-dir %s --list --json`,
+		powerShellSingleQuoted(repo),
+		powerShellSingleQuoted(python),
+		powerShellSingleQuoted(stateDir),
+	)
+	var lastErr error
+	var lastRaw []byte
+	for i := 0; i < 10; i++ {
+		raw, err := runSSHCommandOutput(host, encodedPowerShellCommand(script), 10*time.Second)
+		if err == nil && strings.Contains(string(raw), `"ok": true`) {
+			return
+		}
+		lastErr = err
+		lastRaw = raw
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("session broker call server did not settle after desktop control modal proof: %v: %s", lastErr, strings.TrimSpace(string(lastRaw)))
 }
 
 func liveDesktopControlModalFixturePowerShell(fixture liveDesktopControlModalFixture) string {

@@ -297,7 +297,7 @@ jobs:
           const fs = require("node:fs");
           const [manifestPath, hostConfigState, liveStatus, smokePath, proofArtifactManifestPath] = process.argv.slice(2);
           const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-          const expected = new Set(["TestOptInRealSSHDoctorSmoke", "TestOptInRealSSHRunSmoke", "TestOptInRealSSHConsumingRepoSmoke", "TestOptInRealVisualEvidenceSmoke"]);
+          const expected = new Set(["TestOptInRealSSHDoctorSmoke", "TestOptInRealSSHRunSmoke", "TestOptInRealSSHConsumingRepoSmoke", "TestOptInRealVisualEvidenceSmoke", "TestOptInRealDesktopControlModalSmoke"]);
           const passed = new Set();
           const skipped = new Set();
           if (fs.existsSync(smokePath)) {

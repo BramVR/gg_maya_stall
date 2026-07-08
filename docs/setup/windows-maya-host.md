@@ -242,6 +242,11 @@ Doctor layer:
   cursor and mouse APIs.
 - Host-specific details such as SSH, Windows desktop login, `workRoot`, and
   broker paths stay in Host Config and Session Broker setup.
+- The protected live proof gate runs an opt-in controlled prompt fixture on the
+  interactive desktop, captures a full-desktop screenshot, and clears the prompt
+  with `maya-stall control click`. This proves the coordinate control path
+  without depending on a consuming repo, plugin dialog, or `gg_mayasessiond`
+  mutation.
 
 Doctor layer:
 

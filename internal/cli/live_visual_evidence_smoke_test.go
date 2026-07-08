@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOptInRealVisualEvidenceSmoke(t *testing.T) {
@@ -43,6 +47,55 @@ func TestOptInRealVisualEvidenceSmoke(t *testing.T) {
 		artifactSize(t, evidenceDir, recording),
 	)
 	publishOptionalLiveVisualEvidenceProofArtifact(t, evidenceDir)
+}
+
+func TestOptInRealDesktopControlModalSmoke(t *testing.T) {
+	options, ok := realSSHSmokeOptionsFromEnv(t)
+	if !ok {
+		return
+	}
+	dir := writeLiveRunConfigFixture(t)
+
+	hostID := selectLiveDesktopControlSmokeHost(t, dir, options)
+	options.Host = hostID
+	host := liveSmokeHostConfigByID(t, options, hostID)
+	processes, err := mayaTasklistSessions(host)
+	if err != nil {
+		t.Fatalf("query maya.exe tasklist sessions: %v", err)
+	}
+	if err := requireConsoleMayaProcess(processes); err != nil {
+		t.Fatal(err)
+	}
+
+	fixture := launchLiveDesktopControlModalFixture(t, host)
+	defer func() {
+		cleanupLiveDesktopControlModalFixture(t, host, fixture)
+	}()
+
+	evidenceDir := captureLiveScreenshotCommandProof(t, dir, options)
+	bundle := assertLiveDesktopControlScreenshotProofBundle(t, evidenceDir, options)
+	screenshot := requireLiveDesktopControlScreenshotArtifact(t, evidenceDir, bundle)
+	assertLiveDesktopControlScreenshotShowsModal(t, evidenceDir, screenshot)
+
+	var stdout, stderr bytes.Buffer
+	code := Run(options.controlClickArgs(fixture.ClickX, fixture.ClickY), &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("live desktop control click exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "dryRun: false") {
+		t.Fatalf("control click output missing execution detail:\n%s", stdout.String())
+	}
+	waitForLiveDesktopControlModalClosed(t, host, fixture)
+	cleanupLiveDesktopControlModalFixture(t, host, fixture)
+	fixture.RemoteRoot = ""
+	waitForLiveSessionBrokerCallReady(t, host)
+	t.Logf("Live desktop control modal proof: screenshotRun=%s screenshot=%s bytes=%d click=(%d,%d)",
+		bundle.RunID,
+		screenshot.Path,
+		artifactSize(t, evidenceDir, screenshot),
+		fixture.ClickX,
+		fixture.ClickY,
+	)
 }
 
 func TestLiveVisualEvidenceProofRejectsInvalidProofShapes(t *testing.T) {
@@ -153,7 +206,9 @@ func TestLiveVisualEvidenceProofWorkflowRequiresSmokePass(t *testing.T) {
 	text := string(content)
 	for _, want := range []string{
 		"TestOptInRealVisualEvidenceSmoke",
+		"TestOptInRealDesktopControlModalSmoke",
 		"run TestOptInRealVisualEvidenceSmoke -count=1",
+		"run TestOptInRealDesktopControlModalSmoke -count=1",
 		"run 'TestOptInRealSSH(Doctor|Run|ConsumingRepo)Smoke' -count=1",
 		"MAYA_STALL_LIVE_PROOF_ARTIFACT_ENABLED",
 		"MAYA_STALL_LIVE_PROOF_MEDIA_REVIEWED",
@@ -167,6 +222,26 @@ func TestLiveVisualEvidenceProofWorkflowRequiresSmokePass(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("proof workflow missing %q", want)
 		}
+	}
+}
+
+func TestRealSSHSmokeScreenshotAndControlArgs(t *testing.T) {
+	options := realSSHSmokeOptions{
+		HostConfig:    "/tmp/hosts.yaml",
+		TargetProfile: "ci",
+		Host:          "maya-win-01",
+	}
+
+	gotScreenshot := options.screenshotArgs()
+	wantScreenshot := []string{"screenshot", "--host-config", "/tmp/hosts.yaml", "--target-profile", "ci", "--host", "maya-win-01"}
+	if strings.Join(gotScreenshot, "\n") != strings.Join(wantScreenshot, "\n") {
+		t.Fatalf("screenshot args = %#v, want %#v", gotScreenshot, wantScreenshot)
+	}
+
+	gotControl := options.controlClickArgs(123, 456)
+	wantControl := []string{"control", "click", "--host-config", "/tmp/hosts.yaml", "--target-profile", "ci", "--host", "maya-win-01", "--x", "123", "--y", "456"}
+	if strings.Join(gotControl, "\n") != strings.Join(wantControl, "\n") {
+		t.Fatalf("control click args = %#v, want %#v", gotControl, wantControl)
 	}
 }
 
@@ -337,6 +412,78 @@ func TestWindowsDesktopCaptureCommandsUseInteractiveDesktop(t *testing.T) {
 	}
 }
 
+func TestLiveDesktopControlModalFixtureUsesInteractiveTask(t *testing.T) {
+	fixture := liveDesktopControlModalFixture{
+		RemoteRoot: "C:/maya-stall/artifacts/modal-proof",
+		TaskName:   "MayaStallDesktopControlModal-proof",
+		ClickX:     300,
+		ClickY:     251,
+	}
+	launch := liveDesktopControlModalFixturePowerShell(fixture)
+	for _, want := range []string{
+		"System.Windows.Forms",
+		"ShowDialog",
+		"schtasks.exe",
+		"/IT",
+		"desktop-control-modal.shown",
+		"desktop-control-modal.closed",
+		"FormBorderStyle = \"None\"",
+		"FromArgb(255, 0, 255)",
+	} {
+		if !strings.Contains(launch, want) {
+			t.Fatalf("modal fixture launch missing %q:\n%s", want, launch)
+		}
+	}
+
+	cleanup := liveDesktopControlModalCleanupPowerShell(fixture)
+	for _, want := range []string{"schtasks.exe /Delete", "Stop-Process", "Remove-Item -Recurse -Force"} {
+		if !strings.Contains(cleanup, want) {
+			t.Fatalf("modal fixture cleanup missing %q:\n%s", want, cleanup)
+		}
+	}
+}
+
+func TestLiveDesktopControlModalMarkerDetection(t *testing.T) {
+	dir := t.TempDir()
+	markerPath := filepath.Join(dir, "marker.png")
+	marker := image.NewRGBA(image.Rect(0, 0, 32, 32))
+	for y := 0; y < 32; y++ {
+		for x := 0; x < 32; x++ {
+			marker.Set(x, y, color.RGBA{R: 255, B: 255, A: 255})
+		}
+	}
+	writePNGForTest(t, markerPath, marker)
+	if err := validateLiveDesktopControlModalMarker(markerPath); err != nil {
+		t.Fatalf("validateLiveDesktopControlModalMarker returned error: %v", err)
+	}
+
+	plainPath := filepath.Join(dir, "plain.png")
+	plain := image.NewRGBA(image.Rect(0, 0, 32, 32))
+	for y := 0; y < 32; y++ {
+		for x := 0; x < 32; x++ {
+			plain.Set(x, y, color.RGBA{R: 255, G: 255, B: 255, A: 255})
+		}
+	}
+	writePNGForTest(t, plainPath, plain)
+	if err := validateLiveDesktopControlModalMarker(plainPath); err == nil || !strings.Contains(err.Error(), "modal marker") {
+		t.Fatalf("validateLiveDesktopControlModalMarker error = %v, want modal marker failure", err)
+	}
+}
+
+func captureLiveScreenshotCommandProof(t *testing.T, repoDir string, options realSSHSmokeOptions) string {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	code := Run(options.screenshotArgs(), &stdout, &stderr, repoDir, "test-version")
+	if code != 0 {
+		t.Fatalf("live screenshot command exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	evidenceDir := smokeOutputValue(stdout.String(), "evidence")
+	if evidenceDir == "" {
+		t.Fatalf("live screenshot command did not print Evidence Bundle path:\n%s", stdout.String())
+	}
+	return evidenceDir
+}
+
 func captureLiveRecordCommandProof(t *testing.T, repoDir string, options realSSHSmokeOptions) string {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
@@ -349,6 +496,354 @@ func captureLiveRecordCommandProof(t *testing.T, repoDir string, options realSSH
 		t.Fatalf("live record command did not print Evidence Bundle path:\n%s", stdout.String())
 	}
 	return evidenceDir
+}
+
+func selectLiveDesktopControlSmokeHost(t *testing.T, repoDir string, options realSSHSmokeOptions) string {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	code := Run(options.controlClickArgs(liveDesktopControlModalClickX, liveDesktopControlModalClickY, "--dry-run"), &stdout, &stderr, repoDir, "test-version")
+	if code != 0 {
+		t.Fatalf("live desktop control dry-run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	hostID := smokeOutputValue(stdout.String(), "host")
+	if hostID == "" {
+		t.Fatalf("live desktop control dry-run did not print selected host:\n%s", stdout.String())
+	}
+	return hostID
+}
+
+func assertLiveDesktopControlScreenshotProofBundle(t *testing.T, evidenceDir string, options realSSHSmokeOptions) evidenceBundle {
+	t.Helper()
+	selected := readEvidenceBundle(t, evidenceDir)
+	host := liveSmokeHostConfigByID(t, options, selected.Host)
+	processes, err := mayaTasklistSessions(host)
+	if err != nil {
+		t.Fatalf("query maya.exe tasklist sessions: %v", err)
+	}
+	bundle, err := validateLiveDesktopControlScreenshotProofBundle(evidenceDir, processes, options.TargetProfile, options.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bundle
+}
+
+func validateLiveDesktopControlScreenshotProofBundle(evidenceDir string, processes []windowsProcessSession, targetProfile string, hostPin string) (evidenceBundle, error) {
+	content, err := os.ReadFile(filepath.Join(evidenceDir, evidenceBundleFileName))
+	if err != nil {
+		return evidenceBundle{}, err
+	}
+	var bundle evidenceBundle
+	if err := json.Unmarshal(content, &bundle); err != nil {
+		return evidenceBundle{}, err
+	}
+	if err := requireLiveRuntime(bundle.Runtime); err != nil {
+		return evidenceBundle{}, err
+	}
+	if err := requireConsoleMayaProcess(processes); err != nil {
+		return evidenceBundle{}, err
+	}
+	if bundle.Scenario != evidenceStandaloneScenarioPrefix+"screenshot" {
+		return evidenceBundle{}, fmt.Errorf("Evidence Bundle scenario = %q, want standalone screenshot command scenario", bundle.Scenario)
+	}
+	if bundle.TargetProfile != targetProfile {
+		return evidenceBundle{}, fmt.Errorf("Evidence Bundle Target Profile = %q, want %q", bundle.TargetProfile, targetProfile)
+	}
+	if bundle.Host == "" {
+		return evidenceBundle{}, fmt.Errorf("Evidence Bundle missing selected Maya Host metadata")
+	}
+	if hostPin != "" && bundle.Host != hostPin {
+		return evidenceBundle{}, fmt.Errorf("Evidence Bundle selected Maya Host = %q, want pinned host %q", bundle.Host, hostPin)
+	}
+	screenshot, err := liveDesktopControlScreenshotArtifact(bundle)
+	if err != nil {
+		return evidenceBundle{}, err
+	}
+	screenshotBytes, err := os.ReadFile(filepath.Join(evidenceDir, filepath.FromSlash(screenshot.Path)))
+	if err != nil {
+		return evidenceBundle{}, err
+	}
+	if !looksLikeImageBytes("image/png", screenshotBytes) {
+		return evidenceBundle{}, fmt.Errorf("desktop control screenshot %s does not look like a PNG", screenshot.Path)
+	}
+	return bundle, nil
+}
+
+func requireLiveDesktopControlScreenshotArtifact(t *testing.T, evidenceDir string, bundle evidenceBundle) visualEvidenceArtifact {
+	t.Helper()
+	screenshot, err := liveDesktopControlScreenshotArtifact(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(evidenceDir, filepath.FromSlash(screenshot.Path))); err != nil {
+		t.Fatalf("missing Visual Evidence artifact %s: %v", screenshot.Path, err)
+	}
+	return screenshot
+}
+
+func assertLiveDesktopControlScreenshotShowsModal(t *testing.T, evidenceDir string, screenshot visualEvidenceArtifact) {
+	t.Helper()
+	path := filepath.Join(evidenceDir, filepath.FromSlash(screenshot.Path))
+	if err := validateLiveDesktopControlModalMarker(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func validateLiveDesktopControlModalMarker(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	img, err := png.Decode(file)
+	if err != nil {
+		return fmt.Errorf("decode desktop control screenshot PNG: %w", err)
+	}
+	markerPixels := 0
+	bounds := img.Bounds()
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			r, g, b, _ := img.At(x, y).RGBA()
+			if r>>8 >= 240 && g>>8 <= 20 && b>>8 >= 240 {
+				markerPixels++
+			}
+		}
+	}
+	if markerPixels < 500 {
+		return fmt.Errorf("desktop control screenshot is missing modal marker; found %d marker pixels", markerPixels)
+	}
+	return nil
+}
+
+func writePNGForTest(t *testing.T, path string, img image.Image) {
+	t.Helper()
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create png fixture: %v", err)
+	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			t.Fatalf("close png fixture: %v", err)
+		}
+	}()
+	if err := png.Encode(file, img); err != nil {
+		t.Fatalf("encode png fixture: %v", err)
+	}
+}
+
+func liveDesktopControlScreenshotArtifact(bundle evidenceBundle) (visualEvidenceArtifact, error) {
+	for _, artifact := range bundle.VisualEvidence {
+		if artifact.Kind == "screenshot" && artifact.MediaType == "image/png" && artifact.Path == "screenshots/screenshot.png" {
+			return artifact, nil
+		}
+	}
+	return visualEvidenceArtifact{}, fmt.Errorf("live desktop control proof requires standalone desktop screenshot artifact, got %+v", bundle.VisualEvidence)
+}
+
+const (
+	liveDesktopControlModalLeft   = 120
+	liveDesktopControlModalTop    = 120
+	liveDesktopControlModalButton = 130
+	liveDesktopControlModalClickX = 300
+	liveDesktopControlModalClickY = 251
+)
+
+type liveDesktopControlModalFixture struct {
+	RemoteRoot string
+	TaskName   string
+	ClickX     int
+	ClickY     int
+}
+
+func launchLiveDesktopControlModalFixture(t *testing.T, host mayaHostConfig) liveDesktopControlModalFixture {
+	t.Helper()
+	suffix := time.Now().UTC().Format("20060102T150405000000000")
+	fixture := liveDesktopControlModalFixture{
+		RemoteRoot: remoteJoin(host.WorkRoot, "artifacts", "desktop-control-modal-"+suffix),
+		TaskName:   "MayaStallDesktopControlModal-" + suffix,
+		ClickX:     liveDesktopControlModalClickX,
+		ClickY:     liveDesktopControlModalClickY,
+	}
+	transport := sshWindowsDesktopTransport(host)
+	if _, err := transport.RunPowerShell(fmt.Sprintf("New-Item -ItemType Directory -Force -Path %s | Out-Null", powerShellSingleQuoted(fixture.RemoteRoot)), sessiondCommandTimeout); err != nil {
+		t.Fatalf("create live desktop control modal fixture root: %v", err)
+	}
+	launchPath := remoteJoin(fixture.RemoteRoot, "launch-desktop-control-modal.ps1")
+	if err := transport.WritePowerShellScript(launchPath, liveDesktopControlModalFixturePowerShell(fixture), sessiondCommandTimeout); err != nil {
+		_, _ = runSSHCommandOutput(host, encodedPowerShellCommand(liveDesktopControlModalCleanupPowerShell(fixture)), sessiondCommandTimeout)
+		t.Fatalf("stage live desktop control modal fixture: %v", err)
+	}
+	raw, err := transport.RunPowerShell(fmt.Sprintf("Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; & %s", powerShellSingleQuoted(launchPath)), sessiondCommandTimeout)
+	if err != nil {
+		_, _ = runSSHCommandOutput(host, encodedPowerShellCommand(liveDesktopControlModalCleanupPowerShell(fixture)), sessiondCommandTimeout)
+		t.Fatalf("launch live desktop control modal fixture: %v: %s", err, strings.TrimSpace(string(raw)))
+	}
+	if !strings.Contains(string(raw), "shown") {
+		_, _ = runSSHCommandOutput(host, encodedPowerShellCommand(liveDesktopControlModalCleanupPowerShell(fixture)), sessiondCommandTimeout)
+		t.Fatalf("live desktop control modal fixture did not report shown: %s", strings.TrimSpace(string(raw)))
+	}
+	return fixture
+}
+
+func waitForLiveDesktopControlModalClosed(t *testing.T, host mayaHostConfig, fixture liveDesktopControlModalFixture) {
+	t.Helper()
+	raw, err := runSSHCommandOutput(host, encodedPowerShellCommand(liveDesktopControlModalClosedPowerShell(fixture)), 10*time.Second)
+	if err != nil {
+		t.Fatalf("wait for live desktop control modal fixture to close: %v: %s", err, strings.TrimSpace(string(raw)))
+	}
+}
+
+func cleanupLiveDesktopControlModalFixture(t *testing.T, host mayaHostConfig, fixture liveDesktopControlModalFixture) {
+	t.Helper()
+	if fixture.RemoteRoot == "" {
+		return
+	}
+	if _, err := runSSHCommandOutput(host, encodedPowerShellCommand(liveDesktopControlModalCleanupPowerShell(fixture)), sessiondCommandTimeout); err != nil {
+		t.Fatalf("cleanup live desktop control modal fixture: %v", err)
+	}
+}
+
+func waitForLiveSessionBrokerCallReady(t *testing.T, host mayaHostConfig) {
+	t.Helper()
+	stateDir := strings.TrimSpace(host.Broker.StateDir)
+	if stateDir == "" {
+		stateDir = "C:/maya-stall/sessiond-ui"
+	}
+	python := strings.TrimSpace(host.Broker.Python)
+	if python == "" {
+		python = "python"
+	}
+	repo := strings.TrimSpace(host.Broker.Repo)
+	if repo == "" {
+		repo = "."
+	}
+	script := fmt.Sprintf(`$ErrorActionPreference = "Stop"
+cd %s
+& %s -m gg_maya_sessiond.cli call --state-dir %s --list --json`,
+		powerShellSingleQuoted(repo),
+		powerShellSingleQuoted(python),
+		powerShellSingleQuoted(stateDir),
+	)
+	var lastErr error
+	var lastRaw []byte
+	for i := 0; i < 10; i++ {
+		raw, err := runSSHCommandOutput(host, encodedPowerShellCommand(script), 10*time.Second)
+		if err == nil && strings.Contains(string(raw), `"ok": true`) {
+			return
+		}
+		lastErr = err
+		lastRaw = raw
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("session broker call server did not settle after desktop control modal proof: %v: %s", lastErr, strings.TrimSpace(string(lastRaw)))
+}
+
+func liveDesktopControlModalFixturePowerShell(fixture liveDesktopControlModalFixture) string {
+	return fmt.Sprintf(`$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+$root = %s
+$taskName = %s
+New-Item -ItemType Directory -Force -Path $root | Out-Null
+if (-not (Get-Command schtasks.exe -ErrorAction SilentlyContinue)) { throw "schtasks.exe is required for interactive desktop control modal proof" }
+$shown = Join-Path $root "desktop-control-modal.shown"
+$closed = Join-Path $root "desktop-control-modal.closed"
+$pidPath = Join-Path $root "desktop-control-modal.pid"
+$script = Join-Path $root "desktop-control-modal.ps1"
+$template = @'
+$ErrorActionPreference = "Stop"
+Set-Content -LiteralPath "__MAYA_STALL_MODAL_PID__" -Value $PID
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
+$form = New-Object System.Windows.Forms.Form
+$form.FormBorderStyle = "None"
+$form.TopMost = $true
+$form.StartPosition = "Manual"
+$form.Location = New-Object System.Drawing.Point(%d, %d)
+$form.Size = New-Object System.Drawing.Size(420, 220)
+$form.BackColor = [System.Drawing.Color]::FromArgb(255, 0, 255)
+$label = New-Object System.Windows.Forms.Label
+$label.AutoSize = $false
+$label.Location = New-Object System.Drawing.Point(24, 26)
+$label.Size = New-Object System.Drawing.Size(372, 72)
+$label.BackColor = [System.Drawing.Color]::White
+$label.Text = "Maya Stall desktop control smoke prompt"
+$label.Font = New-Object System.Drawing.Font("Segoe UI", 14)
+$form.Controls.Add($label)
+$marker = New-Object System.Windows.Forms.Panel
+$marker.Location = New-Object System.Drawing.Point(300, 24)
+$marker.Size = New-Object System.Drawing.Size(80, 50)
+$marker.BackColor = [System.Drawing.Color]::FromArgb(255, 0, 255)
+$form.Controls.Add($marker)
+$button = New-Object System.Windows.Forms.Button
+$button.Text = "OK"
+$button.Location = New-Object System.Drawing.Point(%d, 110)
+$button.Size = New-Object System.Drawing.Size(100, 42)
+$button.Add_Click({
+  Set-Content -LiteralPath "__MAYA_STALL_MODAL_CLOSED__" -Value "clicked"
+  $form.Close()
+})
+$form.Controls.Add($button)
+$form.Add_Shown({
+  Set-Content -LiteralPath "__MAYA_STALL_MODAL_SHOWN__" -Value "shown"
+})
+[void]$form.ShowDialog()
+'@
+$content = $template.Replace("__MAYA_STALL_MODAL_PID__", $pidPath.Replace("\", "\\")).Replace("__MAYA_STALL_MODAL_SHOWN__", $shown.Replace("\", "\\")).Replace("__MAYA_STALL_MODAL_CLOSED__", $closed.Replace("\", "\\"))
+Set-Content -Encoding ASCII -LiteralPath $script -Value $content
+cmd.exe /c "schtasks.exe /Delete /TN $taskName /F 2>NUL" | Out-Null
+$startTime = (Get-Date).AddMinutes(1).ToString("HH:mm")
+$taskRun = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $script + '"'
+$createArgs = @("/Create", "/TN", $taskName, "/SC", "ONCE", "/ST", $startTime, "/TR", $taskRun, "/RL", "HIGHEST", "/IT", "/F")
+& schtasks.exe @createArgs | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "failed to create interactive desktop control modal task with schtasks.exe /IT; ensure an interactive desktop session is logged in" }
+schtasks.exe /Run /TN $taskName | Out-Null
+for ($i = 0; $i -lt 40; $i++) {
+  if (Test-Path -LiteralPath $shown) {
+    [pscustomobject]@{ status = "shown"; clickX = %d; clickY = %d } | ConvertTo-Json -Compress
+    exit 0
+  }
+  Start-Sleep -Milliseconds 250
+}
+throw "scheduled interactive desktop control modal did not appear; ensure an interactive desktop session is logged in"`,
+		powerShellSingleQuoted(fixture.RemoteRoot),
+		powerShellSingleQuoted(fixture.TaskName),
+		liveDesktopControlModalLeft,
+		liveDesktopControlModalTop,
+		liveDesktopControlModalButton,
+		fixture.ClickX,
+		fixture.ClickY,
+	)
+}
+
+func liveDesktopControlModalClosedPowerShell(fixture liveDesktopControlModalFixture) string {
+	return fmt.Sprintf(`$ErrorActionPreference = "Stop"
+$closed = Join-Path %s "desktop-control-modal.closed"
+for ($i = 0; $i -lt 40; $i++) {
+  if (Test-Path -LiteralPath $closed) {
+    Write-Output "closed"
+    exit 0
+  }
+  Start-Sleep -Milliseconds 250
+}
+throw "desktop control modal fixture did not close after click"`, powerShellSingleQuoted(fixture.RemoteRoot))
+}
+
+func liveDesktopControlModalCleanupPowerShell(fixture liveDesktopControlModalFixture) string {
+	return fmt.Sprintf(`$ErrorActionPreference = "Continue"
+$root = %s
+$taskName = %s
+schtasks.exe /Delete /TN $taskName /F 2>$null | Out-Null
+$pidPath = Join-Path $root "desktop-control-modal.pid"
+if (Test-Path -LiteralPath $pidPath) {
+  $processID = [int](Get-Content -LiteralPath $pidPath -Raw)
+  Stop-Process -Id $processID -Force -ErrorAction SilentlyContinue
+}
+Remove-Item -Recurse -Force -LiteralPath $root -ErrorAction SilentlyContinue`,
+		powerShellSingleQuoted(fixture.RemoteRoot),
+		powerShellSingleQuoted(fixture.TaskName),
+	)
 }
 
 func addLiveDesktopScreenshotForProofArtifact(t *testing.T, repoDir string, evidenceDir string, options realSSHSmokeOptions) {

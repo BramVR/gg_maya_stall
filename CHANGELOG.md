@@ -6,6 +6,7 @@ Release history starts with `v0.1.0`.
 
 ## Unreleased
 
+- Added live proof coverage for full-desktop screenshot plus `maya-stall control click` against a controlled blocking desktop prompt on the Windows Maya Host.
 - Added `maya-stall control click` for explicit full-desktop coordinate clicks through the selected Session Broker, using the same interactive Windows scheduled-task path as desktop Visual Evidence on real SSH hosts.
 - Changed recording docs to describe the supported `maya-stall record` desktop MP4 path, local `ffmpeg` encoding, and the distinction between viewport capture and desktop Visual Evidence proof.
 - Added Scenario-level recording Visual Evidence proof so `maya-stall run` captures MP4 recordings in the Evidence Bundle with duration/FPS, Target Profile, and selected Maya Host metadata, and the live proof gate validates a recording-enabled Scenario.

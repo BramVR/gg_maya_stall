@@ -181,6 +181,14 @@ func (host realSSHHost) StagePayload(context runContext, payload []manifestPaylo
 }
 
 func (host realSSHHost) CollectArtifacts(context runContext, scenario scenarioContract) error {
+	return host.collectArtifacts(context, scenario, false)
+}
+
+func (host realSSHHost) CollectFailureArtifacts(context runContext, scenario scenarioContract) error {
+	return host.collectArtifacts(context, scenario, true)
+}
+
+func (host realSSHHost) collectArtifacts(context runContext, scenario scenarioContract, optional bool) error {
 	batch := newSFTPBatch()
 	seen := make(map[string]bool)
 	for _, download := range scenario.Outputs {
@@ -199,7 +207,7 @@ func (host realSSHHost) CollectArtifacts(context runContext, scenario scenarioCo
 		if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
 			return err
 		}
-		batch.get(context.RunWorkspace.RemoteOutputPath(clean), local, download.Optional)
+		batch.get(context.RunWorkspace.RemoteOutputPath(clean), local, optional || download.Optional)
 	}
 	if batch.Empty() {
 		return nil

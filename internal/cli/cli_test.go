@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -4347,6 +4348,207 @@ hostPools:
 	}
 }
 
+func TestRunScenarioRealSSHCollectsOutputsAfterBrokerDisconnect(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	configPath := filepath.Join(dir, ".maya-stall.yaml")
+	contentBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config fixture: %v", err)
+	}
+	content := strings.Replace(string(contentBytes), "files: []", "files:\n        - \"outputs/product-ui-e2e-result.json\"\n        - \"outputs/parity.json\"", 1)
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config fixture: %v", err)
+	}
+	sftpLog := filepath.Join(dir, "sftp.log")
+	sftpPath := writeScenarioOutputSFTPCommand(t, dir, sftpLog, map[string]string{
+		"outputs/smoke-result.json":          `{"status":"passed","summary":"product Scenario passed","assertions":[{"name":"plugin loaded","passed":true}]}` + "\n",
+		"outputs/product-ui-e2e-result.json": `{"status":"passed","product":"ok"}` + "\n",
+		"outputs/parity.json":                `{"maxAbsDiff":3.55e-08,"mismatchCount":0}` + "\n",
+	})
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		`{"ok":false,"tool":"script.execute","error":"Cannot connect to Maya commandPort at localhost:7001"}`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Cannot connect to Maya commandPort") {
+		t.Fatalf("run error missing broker disconnect: %s", stderr.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	bundle := readEvidenceBundle(t, evidence)
+	if bundle.Status != resultStatusFailed {
+		t.Fatalf("Evidence Bundle status = %q, want failed", bundle.Status)
+	}
+	scenarioResultBytes, err := os.ReadFile(filepath.Join(evidence, "scenario-result.json"))
+	if err != nil {
+		t.Fatalf("read collected Scenario Result: %v", err)
+	}
+	if !strings.Contains(string(scenarioResultBytes), `"status":"passed"`) || !strings.Contains(string(scenarioResultBytes), "product Scenario passed") {
+		t.Fatalf("collected Scenario Result did not preserve product pass:\n%s", string(scenarioResultBytes))
+	}
+	for _, path := range []string{
+		filepath.Join(evidence, "outputs", "product-ui-e2e-result.json"),
+		filepath.Join(evidence, "outputs", "parity.json"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected collected output %s: %v", path, err)
+		}
+	}
+	eventsBytes, err := os.ReadFile(filepath.Join(evidence, "events.jsonl"))
+	if err != nil {
+		t.Fatalf("read failure events: %v", err)
+	}
+	if !strings.Contains(string(eventsBytes), "run.failed-before-result-collection") || !strings.Contains(string(eventsBytes), "Cannot connect to Maya commandPort") {
+		t.Fatalf("Evidence Bundle events missing broker failure:\n%s", string(eventsBytes))
+	}
+}
+
+func TestRunScenarioRealSSHCollectsDeclaredOutputsWhenBrokerDisconnectsBeforeResult(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	configPath := filepath.Join(dir, ".maya-stall.yaml")
+	contentBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config fixture: %v", err)
+	}
+	content := strings.Replace(string(contentBytes), "files: []", "files:\n        - \"outputs/product-ui-e2e-result.json\"", 1)
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config fixture: %v", err)
+	}
+	sftpLog := filepath.Join(dir, "sftp.log")
+	sftpPath := writeMissingScenarioResultSFTPCommand(t, dir, sftpLog, "outputs/product-ui-e2e-result.json", `{"status":"passed","product":"ok"}`+"\n")
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		`{"ok":false,"tool":"script.execute","error":"Cannot connect to Maya commandPort at localhost:7001"}`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	if _, err := os.Stat(filepath.Join(evidence, "outputs", "product-ui-e2e-result.json")); err != nil {
+		t.Fatalf("expected declared output despite missing Scenario Result: %v", err)
+	}
+	scenarioResultBytes, err := os.ReadFile(filepath.Join(evidence, "scenario-result.json"))
+	if err != nil {
+		t.Fatalf("read synthesized failure Scenario Result: %v", err)
+	}
+	if !strings.Contains(string(scenarioResultBytes), `"status": "failed"`) || !strings.Contains(string(scenarioResultBytes), "Cannot connect to Maya commandPort") {
+		t.Fatalf("synthesized failure Scenario Result missing broker failure:\n%s", string(scenarioResultBytes))
+	}
+}
+
+func TestRunScenarioRealSSHWritesFailureBundleWhenCollectedScenarioResultIsMalformed(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	configPath := filepath.Join(dir, ".maya-stall.yaml")
+	contentBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config fixture: %v", err)
+	}
+	content := strings.Replace(string(contentBytes), "files: []", "files:\n        - \"outputs/product-ui-e2e-result.json\"", 1)
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config fixture: %v", err)
+	}
+	sftpLog := filepath.Join(dir, "sftp.log")
+	sftpPath := writeScenarioOutputSFTPCommand(t, dir, sftpLog, map[string]string{
+		"outputs/smoke-result.json":          `{"status":`,
+		"outputs/product-ui-e2e-result.json": `{"status":"passed","product":"ok"}` + "\n",
+	})
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		`{"ok":false,"tool":"script.execute","error":"Cannot connect to Maya commandPort at localhost:7001"}`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	if _, err := os.Stat(filepath.Join(evidence, "outputs", "product-ui-e2e-result.json")); err != nil {
+		t.Fatalf("expected declared output despite malformed Scenario Result: %v", err)
+	}
+	scenarioResultBytes, err := os.ReadFile(filepath.Join(evidence, "scenario-result.json"))
+	if err != nil {
+		t.Fatalf("read synthesized failure Scenario Result: %v", err)
+	}
+	if !strings.Contains(string(scenarioResultBytes), `"status": "failed"`) || !strings.Contains(string(scenarioResultBytes), "Cannot connect to Maya commandPort") {
+		t.Fatalf("synthesized failure Scenario Result missing broker failure:\n%s", string(scenarioResultBytes))
+	}
+	eventsBytes, err := os.ReadFile(filepath.Join(evidence, "events.jsonl"))
+	if err != nil {
+		t.Fatalf("read failure events: %v", err)
+	}
+	if !strings.Contains(string(eventsBytes), "scenario-result-unreadable") {
+		t.Fatalf("failure events missing malformed Scenario Result note:\n%s", string(eventsBytes))
+	}
+}
+
 func TestRunScenarioRealSSHDownloadsValidatorOnlyOutputs(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	configPath := filepath.Join(dir, ".maya-stall.yaml")
@@ -6230,6 +6432,68 @@ exit 0
 `, shellQuote(logPath), shellQuote(result))
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("write scenario result fake sftp command: %v", err)
+	}
+	return path
+}
+
+func writeScenarioOutputSFTPCommand(t *testing.T, dir string, logPath string, outputs map[string]string) string {
+	t.Helper()
+	path := filepath.Join(dir, "fake-sftp-scenario-outputs")
+	var cases strings.Builder
+	keys := make([]string, 0, len(outputs))
+	for key := range outputs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		fmt.Fprintf(&cases, "        *%s) printf %%s %s > \"$local_path\" ;;\n", key, shellQuote(outputs[key]))
+	}
+	content := fmt.Sprintf(`#!/bin/sh
+while IFS= read -r line; do
+  printf '%%s\n' "$line" >> %s
+  case "$line" in
+    *get*)
+      local_path=${line##*\" \"}
+      local_path=${local_path%%\"}
+      local_path=${local_path##\"}
+      mkdir -p "$(dirname "$local_path")"
+      case "$local_path" in
+%s        *) printf '{"status":"passed","summary":"downloaded by fake sftp"}\n' > "$local_path" ;;
+      esac
+      ;;
+  esac
+done
+exit 0
+`, shellQuote(logPath), cases.String())
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write scenario output fake sftp command: %v", err)
+	}
+	return path
+}
+
+func writeMissingScenarioResultSFTPCommand(t *testing.T, dir string, logPath string, outputPath string, outputContent string) string {
+	t.Helper()
+	path := filepath.Join(dir, "fake-sftp-missing-scenario-result")
+	content := fmt.Sprintf(`#!/bin/sh
+while IFS= read -r line; do
+  printf '%%s\n' "$line" >> %s
+  case "$line" in
+    *get*)
+      local_path=${line##*\" \"}
+      local_path=${local_path%%\"}
+      local_path=${local_path##\"}
+      mkdir -p "$(dirname "$local_path")"
+      case "$line" in
+        *%s*) printf %%s %s > "$local_path" ;;
+        get*) printf 'missing scenario result\n' >&2; exit 1 ;;
+      esac
+      ;;
+  esac
+done
+exit 0
+`, shellQuote(logPath), outputPath, shellQuote(outputContent))
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write missing Scenario Result fake sftp command: %v", err)
 	}
 	return path
 }

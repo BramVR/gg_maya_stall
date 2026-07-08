@@ -54,14 +54,16 @@ it to Scenario scripts as `MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT`.
 The normal per-run payload copy still happens.
 Remote Scenario execution through `script.execute` is capped at 10 minutes.
 If `script.execute` or equivalent broker execution fails after the remote
-workspace exists, `run` still fails but first attempts best-effort collection of
-declared outputs, logs, screenshots, and any available Scenario Result JSON into
-the local Evidence Bundle. A collected Scenario Result may show that the
-Scenario passed before the broker disconnected; the Evidence Bundle status and
-events still record the broker failure as the run result.
+workspace exists, `run` first attempts best-effort collection of declared
+outputs, logs, screenshots, and any available Scenario Result JSON into the
+local Evidence Bundle. If the collected Scenario Result is valid, explicitly
+`passed`, and configured Validators pass against the collected outputs, `run`
+accepts the Scenario as completed and exits 0 even though the broker return path
+failed. Missing, malformed, failed, incomplete, or Validator-failing collected
+results remain failed and exit non-zero.
 When Scenario screenshot evidence is enabled and the selected broker supports
 screenshot Visual Evidence, `run` also best-effort captures
-`screenshots/failure-desktop.png`.
+`screenshots/failure-desktop.png` for unrecovered failures.
 `manifest.json` and `evidence.json` record the resolved runtime profile, host
 adapter, broker adapter, broker config source, and live-proof eligibility.
 Scenario normalization owns Run Payload paths, Expected Outputs, evidence

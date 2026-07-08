@@ -7,7 +7,7 @@ Release history starts with `v0.1.0`.
 ## Unreleased
 
 - Added host-config `trustedPluginArtifactsRoot` support so real SSH runs can copy declared Plugin Artifacts to a stable Maya trusted plug-in location while keeping clean per-run workspaces and repo-owned Scenario loading.
-- Changed `maya-stall run` broker-failure handling to best-effort collect declared remote outputs and any available Scenario Result JSON before returning failure, so Evidence Bundles keep product artifacts even when `script.execute` disconnects after the Scenario writes results.
+- Changed `maya-stall run` broker-failure handling to accept a collected passing Scenario Result only when configured Validators pass against collected outputs, while missing, malformed, failed, or Validator-failing results still fail non-zero.
 - Added run-scoped `maya-stall attach <run-id> screenshot` and `maya-stall attach <run-id> control click` commands for modal debugging while the active or kept run owns the Host Lock.
 - Added failure-time full-desktop screenshot capture for Fresh Runs that fail before Scenario Result collection when Scenario screenshot evidence is enabled and the selected Session Broker supports screenshot Visual Evidence.
 - Added live proof coverage for full-desktop screenshot plus `maya-stall control click` against a controlled blocking desktop prompt on the Windows Maya Host.

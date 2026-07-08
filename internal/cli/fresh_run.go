@@ -13,22 +13,24 @@ type freshRun interface {
 }
 
 type freshRunLifecycle struct {
-	repoDir         string
-	options         runOptions
-	runtime         runRuntime
-	configPath      string
-	scenario        scenarioContract
-	host            hostRuntime
-	resolvedRuntime resolvedRuntime
-	context         runContext
-	manifest        runManifest
-	brokerResult    ScenarioResult
-	result          ScenarioResult
-	visualEvidence  []visualEvidenceArtifact
-	validatorResult []validatorResult
-	stopPolicy      string
-	followUp        []string
-	releaseHostLock bool
+	repoDir                      string
+	options                      runOptions
+	runtime                      runRuntime
+	configPath                   string
+	scenario                     scenarioContract
+	host                         hostRuntime
+	resolvedRuntime              resolvedRuntime
+	context                      runContext
+	manifest                     runManifest
+	brokerResult                 ScenarioResult
+	result                       ScenarioResult
+	visualEvidence               []visualEvidenceArtifact
+	validatorResult              []validatorResult
+	stopPolicy                   string
+	followUp                     []string
+	releaseHostLock              bool
+	skipSettleArtifactCollection bool
+	skipSettleVisualEvidence     bool
 }
 
 func newFreshRun(repoDir string, options runOptions, runtime runRuntime) freshRun {
@@ -164,7 +166,17 @@ func (run *freshRunLifecycle) setup() error {
 func (run *freshRunLifecycle) execute() error {
 	result, err := run.runtime.Broker.RunScenario(run.context, run.scenario.Config)
 	if err != nil {
-		if evidenceErr := run.collectPreResultFailureEvidence(err); evidenceErr != nil {
+		if evidenceErr := run.collectBrokerFailureArtifacts(err); evidenceErr != nil {
+			return errors.Join(err, evidenceErr)
+		}
+		recovered, recoveryErr := run.recoverCompletedScenarioAfterBrokerFailure(err)
+		if recoveryErr != nil {
+			return errors.Join(err, recoveryErr)
+		}
+		if recovered {
+			return nil
+		}
+		if evidenceErr := run.writeBrokerFailureEvidence(err); evidenceErr != nil {
 			return errors.Join(err, evidenceErr)
 		}
 		return err
@@ -174,7 +186,7 @@ func (run *freshRunLifecycle) execute() error {
 	return nil
 }
 
-func (run *freshRunLifecycle) collectPreResultFailureEvidence(runErr error) error {
+func (run *freshRunLifecycle) collectBrokerFailureArtifacts(runErr error) error {
 	if err := ensureFailureLog(run.context, runErr); err != nil {
 		return err
 	}
@@ -199,10 +211,57 @@ func (run *freshRunLifecycle) collectPreResultFailureEvidence(runErr error) erro
 			return err
 		}
 	}
+	return nil
+}
+
+func (run *freshRunLifecycle) recoverCompletedScenarioAfterBrokerFailure(runErr error) (bool, error) {
+	if err := validateScenarioResultPath(run.context, run.scenario.ScenarioResultPath); err != nil {
+		return false, err
+	}
+	resultDocument, found, err := readScenarioResultDocument(run.context.ScenarioResultPath)
+	if err != nil {
+		if eventErr := appendEvent(run.context.EventsPath, "run.recovered-after-broker-failure.scenario-result-unreadable", err.Error()); eventErr != nil {
+			return false, eventErr
+		}
+		return false, nil
+	}
+	if !found {
+		if err := appendEvent(run.context.EventsPath, "run.recovered-after-broker-failure.scenario-result-missing", runErr.Error()); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	if resultDocument.Result.Status != resultStatusPassed {
+		detail := resultDocument.Result.Status
+		if detail == "" {
+			detail = "missing"
+		}
+		if err := appendEvent(run.context.EventsPath, "run.recovered-after-broker-failure.rejected", "Scenario Result status "+detail); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	run.result = resultDocument.Result
+	run.brokerResult = ScenarioResult{Status: resultStatusPassed, Summary: "Scenario completed before broker failure"}
+	run.skipSettleArtifactCollection = true
+	run.skipSettleVisualEvidence = true
+	return true, appendEvent(run.context.EventsPath, "run.recovered-after-broker-failure", runErr.Error())
+}
+
+func (run *freshRunLifecycle) writeBrokerFailureEvidence(runErr error) error {
+	summary := fmt.Sprintf("Scenario failed before result collection: %v", runErr)
 	result := ScenarioResult{Status: resultStatusFailed, Summary: summary}
 	if err := preserveCollectedScenarioResultOrWriteFailure(run.context, run.scenario.ScenarioResultPath, result); err != nil {
 		return err
 	}
+	artifacts, err := run.captureFailureScreenshot()
+	if err != nil {
+		return err
+	}
+	return writeEvidenceBundle(run.context, run.manifest, run.scenario, result, artifacts, nil)
+}
+
+func (run *freshRunLifecycle) captureFailureScreenshot() ([]visualEvidenceArtifact, error) {
 	var artifacts []visualEvidenceArtifact
 	if capturer, ok := run.runtime.Broker.(screenshotCapturer); ok && run.scenario.Config.Evidence.Screenshots.Enabled {
 		artifact, err := capturer.CaptureScreenshot(run.context, screenshotRequest{Name: "failure-desktop.png"})
@@ -210,13 +269,13 @@ func (run *freshRunLifecycle) collectPreResultFailureEvidence(runErr error) erro
 			artifacts = append(artifacts, artifact)
 			annotateVisualEvidenceTarget(artifacts, run.manifest.TargetProfile, run.manifest.Host)
 			if eventErr := appendEvent(run.context.EventsPath, "visual-evidence.failure-screenshot", artifact.Path); eventErr != nil {
-				return eventErr
+				return nil, eventErr
 			}
 		} else if eventErr := appendEvent(run.context.EventsPath, "visual-evidence.failure-screenshot.failed", err.Error()); eventErr != nil {
-			return eventErr
+			return nil, eventErr
 		}
 	}
-	return writeEvidenceBundle(run.context, run.manifest, run.scenario, result, artifacts, nil)
+	return artifacts, nil
 }
 
 func preserveCollectedScenarioResultOrWriteFailure(context runContext, resultPath string, result ScenarioResult) error {
@@ -258,7 +317,7 @@ func appendFile(path string, content string) error {
 }
 
 func (run *freshRunLifecycle) settle() (runOutcome, error) {
-	if collector, ok := run.runtime.Host.(artifactCollector); ok {
+	if collector, ok := run.runtime.Host.(artifactCollector); ok && !run.skipSettleArtifactCollection {
 		if err := collector.CollectArtifacts(run.context, run.scenario); err != nil {
 			return runOutcome{}, err
 		}
@@ -284,9 +343,11 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 	if run.result.Status == "" {
 		run.result.Status = resultStatusPassed
 	}
-	run.visualEvidence, err = collectScenarioVisualEvidence(run.runtime.Broker, run.context, run.scenario.Name, run.scenario.Config.Evidence)
-	if err != nil {
-		return runOutcome{}, err
+	if !run.skipSettleVisualEvidence {
+		run.visualEvidence, err = collectScenarioVisualEvidence(run.runtime.Broker, run.context, run.scenario.Name, run.scenario.Config.Evidence)
+		if err != nil {
+			return runOutcome{}, err
+		}
 	}
 	annotateVisualEvidenceTarget(run.visualEvidence, run.manifest.TargetProfile, run.manifest.Host)
 	runScopedVisualEvidence, err := readRunScopedVisualEvidence(run.context)
@@ -302,12 +363,20 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 	if err != nil {
 		return runOutcome{}, err
 	}
-	if hasValidatorFailure(run.validatorResult) {
+	validatorFailed := hasValidatorFailure(run.validatorResult)
+	if validatorFailed {
 		run.result.Status = resultStatusFailed
 	}
 	resultDocument.setResult(run.result)
 	if err := writeScenarioResult(run.context, run.scenario.ScenarioResultPath, resultDocument); err != nil {
 		return runOutcome{}, err
+	}
+	if validatorFailed && run.skipSettleVisualEvidence {
+		artifacts, err := run.captureFailureScreenshot()
+		if err != nil {
+			return runOutcome{}, err
+		}
+		run.visualEvidence = mergeVisualEvidence(run.visualEvidence, artifacts)
 	}
 	if !shouldStopAfter(run.options.StopAfter, run.result.Status) {
 		run.stopPolicy = "kept"

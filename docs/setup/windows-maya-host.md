@@ -246,6 +246,17 @@ Doctor layer:
   cursor and mouse APIs.
 - Host-specific details such as SSH, Windows desktop login, `workRoot`, and
   broker paths stay in Host Config and Session Broker setup.
+- When a Fresh Run or Kept Session already owns the Host Lock, use
+  `maya-stall attach <run-id> screenshot` and
+  `maya-stall attach <run-id> control click --x <pixels> --y <pixels>`.
+  These commands verify the Host Lock is owned by that run id before they touch
+  the desktop. Standalone `screenshot` and `control click` still fail closed
+  for unrelated callers while the host is locked.
+- Safe modal handling flow: keep the blocked run active or retained, capture a
+  run-scoped screenshot, inspect the current desktop evidence, send one
+  explicit coordinate click only when the target is clear, then capture another
+  run-scoped screenshot or check run status before allowing the Scenario to
+  continue. Do not use out-of-band scheduled tasks for normal modal handling.
 - The protected live proof gate runs an opt-in controlled prompt fixture on the
   interactive desktop, captures a full-desktop screenshot, and clears the prompt
   with `maya-stall control click`. This proves the coordinate control path
@@ -329,7 +340,7 @@ To run the full live smoke, use:
 MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run)Smoke' -count=1
 ```
 
-`TestOptInRealSSHRunSmoke` first runs `doctor --scenario smoke`, then runs one generated `smoke` Scenario through the configured `gg_mayasessiond` Session Broker, requires screenshot and recording Visual Evidence, and checks that the local Evidence Bundle contains `evidence.json`, events, logs, Scenario Result, the captured screenshot, and an MP4 recording with duration/FPS plus selected Target Profile and Maya Host metadata.
+`TestOptInRealSSHRunSmoke` first runs `doctor --scenario smoke`, then runs one generated `smoke` Scenario through the configured `gg_mayasessiond` Session Broker, requires screenshot and recording Visual Evidence, and checks that the local Evidence Bundle contains `evidence.json`, events, logs, Scenario Result, the captured screenshot, and an MP4 recording with duration/FPS plus selected Target Profile and Maya Host metadata. `TestOptInRealRunScopedDesktopOpsSmoke` keeps a failed run locked, proves standalone screenshot fails closed while the Host Lock is held, captures a run-scoped desktop screenshot, and clears a controlled modal through `attach <run-id> control click`.
 
 To include the canonical Consuming Repo smoke, add a checked-out consuming repo path and run:
 

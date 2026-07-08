@@ -9,6 +9,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -91,6 +92,86 @@ func TestOptInRealDesktopControlModalSmoke(t *testing.T) {
 	waitForLiveSessionBrokerCallReady(t, host)
 	t.Logf("Live desktop control modal proof: screenshotRun=%s screenshot=%s bytes=%d click=(%d,%d)",
 		bundle.RunID,
+		screenshot.Path,
+		artifactSize(t, evidenceDir, screenshot),
+		fixture.ClickX,
+		fixture.ClickY,
+	)
+}
+
+func TestOptInRealRunScopedDesktopOpsSmoke(t *testing.T) {
+	options, ok := realSSHSmokeOptionsFromEnv(t)
+	if !ok {
+		return
+	}
+	dir := writeLiveRunConfigFixture(t)
+
+	hostID := selectLiveDesktopControlSmokeHost(t, dir, options)
+	options.Host = hostID
+	host := liveSmokeHostConfigByID(t, options, hostID)
+	processes, err := mayaTasklistSessions(host)
+	if err != nil {
+		t.Fatalf("query maya.exe tasklist sessions: %v", err)
+	}
+	if err := requireConsoleMayaProcess(processes); err != nil {
+		t.Fatal(err)
+	}
+
+	var keptStdout, keptStderr bytes.Buffer
+	keptCode := Run(options.runArgs("retention-failure", "--keep-on-failure"), &keptStdout, &keptStderr, dir, "test-version")
+	if keptCode != 1 {
+		t.Fatalf("live run-scoped retained run exit code = %d, want 1; stdout: %s stderr: %s", keptCode, keptStdout.String(), keptStderr.String())
+	}
+	runID := smokeOutputValue(keptStdout.String(), "run")
+	if runID == "" || !strings.Contains(keptStdout.String(), "stopPolicy: kept") {
+		t.Fatalf("live run-scoped proof did not keep failed run:\nstdout: %s\nstderr: %s", keptStdout.String(), keptStderr.String())
+	}
+	defer func() {
+		var stdout, stderr bytes.Buffer
+		code := Run([]string{"stop", runID}, &stdout, &stderr, dir, "test-version")
+		if code != 0 && !strings.Contains(stderr.String(), "not found") {
+			t.Fatalf("cleanup retained run exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+		}
+	}()
+
+	var standaloneStdout, standaloneStderr bytes.Buffer
+	standaloneCode := Run(options.screenshotArgs(), &standaloneStdout, &standaloneStderr, dir, "test-version")
+	if standaloneCode != 1 || !strings.Contains(standaloneStderr.String(), "no healthy unlocked Maya Host") {
+		t.Fatalf("standalone screenshot while Host Lock held exit code = %d, want fail-closed locked host; stdout: %s stderr: %s", standaloneCode, standaloneStdout.String(), standaloneStderr.String())
+	}
+
+	fixture := launchLiveDesktopControlModalFixture(t, host)
+	defer func() {
+		cleanupLiveDesktopControlModalFixture(t, host, fixture)
+	}()
+
+	var screenshotStdout, screenshotStderr bytes.Buffer
+	screenshotCode := Run([]string{"attach", runID, "screenshot"}, &screenshotStdout, &screenshotStderr, dir, "test-version")
+	if screenshotCode != 0 {
+		t.Fatalf("live run-scoped screenshot exit code = %d, want 0; stdout: %s stderr: %s", screenshotCode, screenshotStdout.String(), screenshotStderr.String())
+	}
+	evidenceDir := smokeOutputValue(screenshotStdout.String(), "evidence")
+	if evidenceDir == "" {
+		t.Fatalf("live run-scoped screenshot did not print Evidence Bundle path:\n%s", screenshotStdout.String())
+	}
+	bundle := readEvidenceBundle(t, evidenceDir)
+	screenshot := requireLiveRunScopedScreenshotArtifact(t, evidenceDir, bundle)
+	assertLiveDesktopControlScreenshotShowsModal(t, evidenceDir, screenshot)
+
+	var controlStdout, controlStderr bytes.Buffer
+	controlCode := Run([]string{"attach", runID, "control", "click", "--x", strconv.Itoa(fixture.ClickX), "--y", strconv.Itoa(fixture.ClickY)}, &controlStdout, &controlStderr, dir, "test-version")
+	if controlCode != 0 {
+		t.Fatalf("live run-scoped control click exit code = %d, want 0; stdout: %s stderr: %s", controlCode, controlStdout.String(), controlStderr.String())
+	}
+	if !strings.Contains(controlStdout.String(), "run: "+runID) || !strings.Contains(controlStdout.String(), "dryRun: false") {
+		t.Fatalf("live run-scoped control output missing execution detail:\n%s", controlStdout.String())
+	}
+	waitForLiveDesktopControlModalClosed(t, host, fixture)
+	cleanupLiveDesktopControlModalFixture(t, host, fixture)
+	fixture.RemoteRoot = ""
+	waitForLiveSessionBrokerCallReady(t, host)
+	t.Logf("Live run-scoped desktop ops proof: run=%s screenshot=%s bytes=%d click=(%d,%d)",
+		runID,
 		screenshot.Path,
 		artifactSize(t, evidenceDir, screenshot),
 		fixture.ClickX,
@@ -578,6 +659,23 @@ func requireLiveDesktopControlScreenshotArtifact(t *testing.T, evidenceDir strin
 		t.Fatalf("missing Visual Evidence artifact %s: %v", screenshot.Path, err)
 	}
 	return screenshot
+}
+
+func requireLiveRunScopedScreenshotArtifact(t *testing.T, evidenceDir string, bundle evidenceBundle) visualEvidenceArtifact {
+	t.Helper()
+	for _, artifact := range bundle.VisualEvidence {
+		if artifact.Kind == "screenshot" && artifact.MediaType == "image/png" && artifact.Path == "screenshots/"+runScopedScreenshotName {
+			if _, err := os.Stat(filepath.Join(evidenceDir, filepath.FromSlash(artifact.Path))); err != nil {
+				t.Fatalf("missing run-scoped Visual Evidence artifact %s: %v", artifact.Path, err)
+			}
+			if artifact.TargetProfile != bundle.TargetProfile || artifact.Host != bundle.Host {
+				t.Fatalf("run-scoped screenshot target metadata = %+v, want bundle target %q host %q", artifact, bundle.TargetProfile, bundle.Host)
+			}
+			return artifact
+		}
+	}
+	t.Fatalf("live run-scoped proof requires run-scoped screenshot artifact, got %+v", bundle.VisualEvidence)
+	return visualEvidenceArtifact{}
 }
 
 func assertLiveDesktopControlScreenshotShowsModal(t *testing.T, evidenceDir string, screenshot visualEvidenceArtifact) {

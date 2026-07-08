@@ -221,6 +221,10 @@ Doctor layer:
   `user32.dll` desktop APIs for explicit coordinate clicks.
 - Store screenshots, recordings, logs, Scenario Results, and declared outputs
   in each Evidence Bundle.
+- When broker execution fails before Scenario Result collection, Maya Stall
+  writes a failed Evidence Bundle and best-effort captures
+  `screenshots/failure-desktop.png` through the configured screenshot path when
+  Scenario screenshot evidence is enabled.
 - Treat viewport capture alone as insufficient if the Maya process is not in the interactive desktop.
 - Keep Visual Evidence enabled for CI proof unless a Scenario explicitly does not require it.
 - Screenshot capture writes PNG artifacts. Recording capture writes MP4

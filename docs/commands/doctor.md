@@ -60,7 +60,8 @@ a layer-specific `session-broker` failure.
 When a real SSH Maya Host sets `trustedPluginArtifactsRoot`, doctor checks the
 interactive Windows account's durable Maya `SafeModeAllowedlistPaths` preference
 for the selected Maya version. When a Scenario is selected, doctor also checks
-the declared Plugin Artifact destination directories under that root. Set
+the declared Plugin Artifact destinations and parent directories for nested
+`.mll` and Python Maya plug-ins under directory artifacts. Set
 `mayaVersions` in host config or `mayaVersion` on the Scenario so Maya Stall can
 locate the right preferences directory. A missing entry reports
 `trusted-plugin-allowlist: fail` with a repair hint instead of leaving the next

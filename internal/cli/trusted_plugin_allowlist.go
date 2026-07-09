@@ -258,6 +258,9 @@ func trustedPluginAllowlistRequiredPaths(repoDir string, host mayaHostConfig, pa
 		if destination == "" {
 			continue
 		}
+		if err := validatePayloadPathForTransport(repoDir, item.Source); err != nil {
+			return nil, fmt.Errorf("inspect Plugin Artifact %s: %w", item.Source, err)
+		}
 		sourcePath := filepath.Join(repoDir, filepath.FromSlash(item.Source))
 		info, err := os.Stat(sourcePath)
 		if err != nil {
@@ -268,8 +271,34 @@ func trustedPluginAllowlistRequiredPaths(repoDir string, host mayaHostConfig, pa
 			continue
 		}
 		required = append(required, destination)
+		err = filepath.WalkDir(sourcePath, func(localPath string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if entry.IsDir() || !isMayaPluginFile(entry.Name()) {
+				return nil
+			}
+			relativeParent, err := filepath.Rel(sourcePath, filepath.Dir(localPath))
+			if err != nil || relativeParent == "." {
+				return err
+			}
+			required = append(required, remoteJoin(destination, filepath.ToSlash(relativeParent)))
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("inspect Plugin Artifact %s: %w", item.Source, err)
+		}
 	}
 	return compactTrustedPluginAllowlistPaths(required), nil
+}
+
+func isMayaPluginFile(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".mll", ".py":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseSafeModeAllowedlistPaths(content string) []string {

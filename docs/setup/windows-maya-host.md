@@ -217,9 +217,9 @@ Run behavior:
   `trustedPluginArtifactsRoot/<repo-relative-path>`.
 - Before staging Plugin Artifacts, `maya-stall run` validates that Maya's
   durable `SafeModeAllowedlistPaths` preference contains
-  `trustedPluginArtifactsRoot` and the concrete declared Plugin Artifact
-  destination directories under it; missing trust fails before Scenario
-  execution.
+  `trustedPluginArtifactsRoot`, declared Plugin Artifact destinations, and
+  parent directories for nested `.mll` and Python Maya plug-ins under directory
+  artifacts; missing trust fails before Scenario execution.
 - Each declared trusted destination is removed before upload, so directory
   Plugin Artifacts do not retain stale files.
 - Scenario scripts receive `MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT` and can

@@ -1880,7 +1880,7 @@ func TestTrustedPluginAllowlistRequiredPathsIncludeNestedPluginParent(t *testing
 	}
 }
 
-func TestTrustedPluginAllowlistRequiredPathsUseDeclaredDirectoryDestination(t *testing.T) {
+func TestTrustedPluginAllowlistRequiredPathsIncludeNestedPluginParents(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "build", "maya2025", "Release", "package", "scripts", "plugin", "tool.py"), "fake package file\n")
 	host := mayaHostConfig{
@@ -1895,6 +1895,7 @@ func TestTrustedPluginAllowlistRequiredPathsUseDeclaredDirectoryDestination(t *t
 	want := []string{
 		"C:/maya-stall/trusted-plugin-artifacts",
 		"C:/maya-stall/trusted-plugin-artifacts/build/maya2025/Release/package",
+		"C:/maya-stall/trusted-plugin-artifacts/build/maya2025/Release/package/scripts/plugin",
 	}
 	if !reflect.DeepEqual(paths, want) {
 		t.Fatalf("required allowlist paths = %#v, want %#v", paths, want)

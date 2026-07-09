@@ -6,7 +6,7 @@ Release history starts with `v0.1.0`.
 
 ## Unreleased
 
-- Added Maya TrustCenter allowlist validation for configured `trustedPluginArtifactsRoot` values, plus an explicit `doctor --repair-trusted-plugin-allowlist` path that backs up Maya preferences before preserving and appending trusted locations.
+- Added Maya TrustCenter allowlist validation for configured `trustedPluginArtifactsRoot` values and concrete declared Plugin Artifact destination directories, plus an explicit `doctor --repair-trusted-plugin-allowlist` path that backs up Maya preferences before preserving and appending trusted locations.
 - Added `gg_mayasessiond` commandPort health preflight and recovery so `maya-stall doctor` and live runs restart the configured interactive recovery task before starting a Scenario, or fail at the `session-broker` layer with an actionable reason.
 - Added host-config `trustedPluginArtifactsRoot` support so real SSH runs can copy declared Plugin Artifacts to a stable Maya trusted plug-in location while keeping clean per-run workspaces and repo-owned Scenario loading.
 - Changed `maya-stall run` broker-failure handling to accept a collected passing Scenario Result only when configured Validators pass against collected outputs, while missing, malformed, failed, or Validator-failing results still fail non-zero.

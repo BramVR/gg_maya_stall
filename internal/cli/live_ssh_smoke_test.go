@@ -176,13 +176,13 @@ func TestKLVPushConsumingRepoSmokeFixtureUsesBuiltPluginArtifact(t *testing.T) {
 		t.Fatalf("load generated Repo Run Config: %v", err)
 	}
 	scenario := config.Scenarios["klv-push-smoke"]
-	if len(scenario.Payload.PluginArtifacts) != 1 || scenario.Payload.PluginArtifacts[0] != "packages/klv_push" {
-		t.Fatalf("pluginArtifacts = %#v, want packages/klv_push", scenario.Payload.PluginArtifacts)
+	if len(scenario.Payload.PluginArtifacts) != 1 || scenario.Payload.PluginArtifacts[0] != "build/maya2025/Release/klv_push" {
+		t.Fatalf("pluginArtifacts = %#v, want nested klv_push artifact", scenario.Payload.PluginArtifacts)
 	}
-	if len(scenario.Payload.IncludePaths) != 1 || scenario.Payload.IncludePaths[0] != "packages/klv_push/scripts" {
+	if len(scenario.Payload.IncludePaths) != 1 || scenario.Payload.IncludePaths[0] != "build/maya2025/Release/klv_push/scripts" {
 		t.Fatalf("includePaths = %#v, want built package scripts", scenario.Payload.IncludePaths)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "packages", "klv_push", "scripts", "klv_push", "klvPush.py")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, "build", "maya2025", "Release", "klv_push", "scripts", "klv_push", "klvPush.py")); err != nil {
 		t.Fatalf("built Plugin Artifact missing klvPush.py: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "maya", "klv_push_smoke.py")); err != nil {
@@ -443,10 +443,11 @@ func writeKLVPushConsumingRepoSmokeFixture(t *testing.T, sourceRepoDir string) s
 	}
 
 	dir := t.TempDir()
-	if err := copyPath(filepath.Join(sourceRepoDir, "packages", "klv_push"), filepath.Join(dir, "packages", "klv_push")); err != nil {
+	artifactDir := filepath.Join(dir, "build", "maya2025", "Release", "klv_push")
+	if err := copyPath(filepath.Join(sourceRepoDir, "packages", "klv_push"), artifactDir); err != nil {
 		t.Fatalf("copy klv_push package artifact shell: %v", err)
 	}
-	if err := copyPath(filepath.Join(sourceRepoDir, "src", "klv_push"), filepath.Join(dir, "packages", "klv_push", "scripts", "klv_push")); err != nil {
+	if err := copyPath(filepath.Join(sourceRepoDir, "src", "klv_push"), filepath.Join(artifactDir, "scripts", "klv_push")); err != nil {
 		t.Fatalf("build klv_push Plugin Artifact: %v", err)
 	}
 	mustWriteFile(t, filepath.Join(dir, "pyproject.toml"), "[project]\nname = \"klv-push-consuming-smoke\"\n")
@@ -460,9 +461,9 @@ scenarios:
       scripts:
         - "maya/klv_push_smoke.py"
       pluginArtifacts:
-        - "packages/klv_push"
+        - "build/maya2025/Release/klv_push"
       includePaths:
-        - "packages/klv_push/scripts"
+        - "build/maya2025/Release/klv_push/scripts"
     expectedOutputs:
       files:
         - "outputs/klv-push-smoke-result.json"
@@ -499,7 +500,11 @@ import traceback
 import maya.cmds as cmds
 
 result_path = os.environ["MAYA_STALL_SCENARIO_RESULT"]
-artifact_root = os.path.abspath(os.path.join(os.getcwd(), "..", "payload", "pluginArtifacts", "packages", "klv_push"))
+trusted_root = os.environ.get("MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT")
+if trusted_root:
+    artifact_root = os.path.abspath(os.path.join(trusted_root, "build", "maya2025", "Release", "klv_push"))
+else:
+    artifact_root = os.path.abspath(os.path.join(os.getcwd(), "..", "payload", "pluginArtifacts", "build", "maya2025", "Release", "klv_push"))
 package_scripts = os.path.join(artifact_root, "scripts")
 
 def write_result(status, summary, **fields):
@@ -534,8 +539,8 @@ try:
         pluginName="klv_push",
         action={"ok": True, "createdNodes": [marker], "nodeType": getattr(klv_push_plugin, "NODE_NAME", "klvPush")},
         mayaVersion=str(cmds.about(version=True)),
-        artifact={"name": "packages/klv_push", "builtScriptsPackage": True},
-        **{"import": {"ok": True, "module": getattr(klv_push_plugin, "__name__", "klv_push.klvPush"), "fromStagedArtifact": True}},
+        artifact={"name": "build/maya2025/Release/klv_push", "builtScriptsPackage": True, "fromTrustedRoot": bool(trusted_root)},
+        **{"import": {"ok": True, "module": getattr(klv_push_plugin, "__name__", "klv_push.klvPush"), "fromStagedArtifact": True, "fromTrustedRoot": bool(trusted_root)}},
     )
 except Exception as exc:
     write_result(

@@ -127,7 +127,7 @@ func (run *freshRunLifecycle) setup() error {
 			return err
 		}
 	}
-	if err := ensureTrustedPluginArtifactsAllowlistedForRun(host.Config, scenario); err != nil {
+	if err := ensureTrustedPluginArtifactsAllowlistedForRun(run.repoDir, host.Config, scenario); err != nil {
 		return err
 	}
 

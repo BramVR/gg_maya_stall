@@ -57,11 +57,12 @@ preflight layer instead of starting a Scenario.
 If the selected Maya Host config sets `trustedPluginArtifactsRoot`, `run` also
 copies declared `pluginArtifacts` to that stable host-managed root and exposes
 it to Scenario scripts as `MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT`.
-Before staging Plugin Artifacts, `run` validates that the same root is present
-in Maya's durable `SafeModeAllowedlistPaths` preference for the selected Maya
-version. A missing baseline fails before upload or Scenario execution, with an
-actionable TrustCenter diagnostic instead of hanging behind Maya's untrusted
-plug-in modal.
+Before staging Plugin Artifacts, `run` validates that Maya's durable
+`SafeModeAllowedlistPaths` preference for the selected Maya version contains
+the configured root and the concrete declared Plugin Artifact destination
+directories under that root. A missing baseline fails before upload or Scenario
+execution, with an actionable TrustCenter diagnostic instead of hanging behind
+Maya's untrusted plug-in modal.
 The normal per-run payload copy still happens.
 Remote Scenario execution through `script.execute` is capped at 10 minutes.
 If `script.execute` or equivalent broker execution fails after the remote

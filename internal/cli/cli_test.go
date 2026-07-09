@@ -1815,7 +1815,8 @@ optionVar -cat "Security"
 		TrustedPluginArtifactsRoot: "C:/maya-stall/trusted-plugin-artifacts",
 	}
 
-	changed, err := ensureTrustedPluginAllowlist(host, []string{"2025"}, true)
+	requiredPaths := []string{"C:/maya-stall/trusted-plugin-artifacts"}
+	changed, err := ensureTrustedPluginAllowlist(host, []string{"2025"}, requiredPaths, true)
 	if err != nil {
 		t.Fatalf("repair allowlist error: %v", err)
 	}
@@ -1833,7 +1834,7 @@ func TestTrustedPluginAllowlistRejectsUnsafeMayaVersionPathSegment(t *testing.T)
 		TrustedPluginArtifactsRoot: "C:/maya-stall/trusted-plugin-artifacts",
 	}
 
-	_, err := ensureTrustedPluginAllowlist(host, []string{`..\outside`}, false)
+	_, err := ensureTrustedPluginAllowlist(host, []string{`..\outside`}, []string{"C:/maya-stall/trusted-plugin-artifacts"}, false)
 	if err == nil || !strings.Contains(err.Error(), "not a safe preferences path segment") {
 		t.Fatalf("unsafe Maya version error = %v", err)
 	}
@@ -1846,7 +1847,7 @@ func TestTrustedPluginAllowlistRequiresDeclaredMayaVersion(t *testing.T) {
 		MayaVersions:               []string{""},
 	}
 
-	_, err := ensureTrustedPluginAllowlist(host, trustedPluginAllowlistMayaVersions(host, scenarioConfig{}), false)
+	_, err := ensureTrustedPluginAllowlist(host, trustedPluginAllowlistMayaVersions(host, scenarioConfig{}), []string{"C:/maya-stall/trusted-plugin-artifacts"}, false)
 	if err == nil || !strings.Contains(err.Error(), "maya version is required") {
 		t.Fatalf("missing Maya version error = %v", err)
 	}
@@ -1858,18 +1859,63 @@ func TestTrustedPluginAllowlistAcceptsPointReleaseMayaVersion(t *testing.T) {
 	}
 }
 
+func TestTrustedPluginAllowlistRequiredPathsIncludeNestedPluginParent(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "build", "maya2025", "Release", "demo.mll"), "fake nested plugin artifact\n")
+	host := mayaHostConfig{
+		TrustedPluginArtifactsRoot: "C:/maya-stall/trusted-plugin-artifacts",
+	}
+	payload := []manifestPayload{{Kind: "pluginArtifacts", Source: "build/maya2025/Release/demo.mll"}}
+
+	paths, err := trustedPluginAllowlistRequiredPaths(dir, host, payload)
+	if err != nil {
+		t.Fatalf("required allowlist paths error: %v", err)
+	}
+	want := []string{
+		"C:/maya-stall/trusted-plugin-artifacts",
+		"C:/maya-stall/trusted-plugin-artifacts/build/maya2025/Release",
+	}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("required allowlist paths = %#v, want %#v", paths, want)
+	}
+}
+
+func TestTrustedPluginAllowlistRequiredPathsUseDeclaredDirectoryDestination(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "build", "maya2025", "Release", "package", "scripts", "plugin", "tool.py"), "fake package file\n")
+	host := mayaHostConfig{
+		TrustedPluginArtifactsRoot: "C:/maya-stall/trusted-plugin-artifacts",
+	}
+	payload := []manifestPayload{{Kind: "pluginArtifacts", Source: "build/maya2025/Release/package"}}
+
+	paths, err := trustedPluginAllowlistRequiredPaths(dir, host, payload)
+	if err != nil {
+		t.Fatalf("required allowlist paths error: %v", err)
+	}
+	want := []string{
+		"C:/maya-stall/trusted-plugin-artifacts",
+		"C:/maya-stall/trusted-plugin-artifacts/build/maya2025/Release/package",
+	}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("required allowlist paths = %#v, want %#v", paths, want)
+	}
+}
+
 func TestRunTrustedPluginAllowlistChecksAllHostMayaVersionsWhenScenarioUnpinned(t *testing.T) {
 	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "build", "demo.mll"), "fake plugin artifact\n")
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		trustedPluginPrefsProbeOutput(`// Security
 optionVar -cat "Security"
  -sa "SafeModeAllowedlistPaths"
- -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts";
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts/build";
 `),
 		trustedPluginPrefsProbeOutput(`// Security
 optionVar -cat "Security"
  -sa "SafeModeAllowedlistPaths"
- -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts";
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts/build";
 `),
 	})
 	host := mayaHostConfig{
@@ -1880,7 +1926,7 @@ optionVar -cat "Security"
 	}
 	scenario := scenarioContract{Config: scenarioConfig{}, Payload: []manifestPayload{{Kind: "pluginArtifacts", Source: "build/demo.mll"}}}
 
-	if err := ensureTrustedPluginArtifactsAllowlistedForRun(host, scenario); err != nil {
+	if err := ensureTrustedPluginArtifactsAllowlistedForRun(dir, host, scenario); err != nil {
 		t.Fatalf("run allowlist preflight error: %v", err)
 	}
 	countBytes, err := os.ReadFile(filepath.Join(dir, "fake-ssh-sequenced.count"))
@@ -1893,14 +1939,14 @@ optionVar -cat "Security"
 }
 
 func TestTrustedPluginPrefsRepairScriptDocumentsMutationSafety(t *testing.T) {
-	script := trustedPluginPrefsRepairScript("2025", "C:/maya-stall/trusted-plugin-artifacts")
+	script := trustedPluginPrefsRepairScript("2025", []string{"C:/maya-stall/trusted-plugin-artifacts", "C:/maya-stall/trusted-plugin-artifacts/build/maya2025/Release"})
 	for _, want := range []string{
 		"$env:MAYA_APP_DIR",
 		"[Environment]::GetFolderPath('MyDocuments')",
 		"[System.IO.Path]::GetFullPath",
 		"Copy-Item -LiteralPath $prefs",
 		"[regex]::Matches($content",
-		"$paths.Add($root)",
+		"$paths.Add($requiredPath)",
 		"Add-Content -LiteralPath $prefs",
 		"SafeModeAllowedlistPaths",
 	} {
@@ -3296,7 +3342,8 @@ func TestRunScenarioRealSSHUploadsPluginArtifactsToTrustedRoot(t *testing.T) {
 		trustedPluginPrefsProbeOutput(`// Security
 optionVar -cat "Security"
  -sa "SafeModeAllowedlistPaths"
- -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts";
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts/build";
 `),
 		`{"ok":true,"tool":"trusted-plugin-cleanup"}`,
 		`{"ok":true,"tool":"script.execute"}`,
@@ -4499,6 +4546,40 @@ optionVar -cat "Security"
 	}
 	if !strings.Contains(stderr.String(), "trusted Plugin Artifact allowlist preflight failed: maya 2025 SafeModeAllowedlistPaths does not contain trustedPluginArtifactsRoot") {
 		t.Fatalf("run stderr missing trusted allowlist preflight:\n%s", stderr.String())
+	}
+	if _, err := os.Stat(sftpLog); !os.IsNotExist(err) {
+		t.Fatalf("trusted allowlist preflight should happen before SFTP staging, stat err = %v", err)
+	}
+}
+
+func TestRunScenarioRealSSHFailsBeforeStagingWhenNestedTrustedPluginDestinationMissing(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	mustWriteFile(t, filepath.Join(dir, "build", "maya2025", "Release", "demo.mll"), "fake nested plugin artifact\n")
+	configPath := filepath.Join(dir, ".maya-stall.yaml")
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config fixture: %v", err)
+	}
+	mustWriteFile(t, configPath, strings.Replace(string(configBytes), "build/demo.mll", "build/maya2025/Release/demo.mll", 1))
+	sftpLog := filepath.Join(dir, "sftp.log")
+	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		sessiondStatusFixture("session-alpha"),
+		trustedPluginPrefsProbeOutput(`// Security
+optionVar -cat "Security"
+ -sa "SafeModeAllowedlistPaths"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts";
+`),
+	})
+	hostConfigPath := writeTrustedPluginHostConfig(t, dir, sshPath, sftpPath)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "trusted Plugin Artifact allowlist preflight failed: maya 2025 SafeModeAllowedlistPaths does not contain trusted Plugin Artifact destination directories") {
+		t.Fatalf("run stderr missing nested trusted allowlist preflight:\n%s", stderr.String())
 	}
 	if _, err := os.Stat(sftpLog); !os.IsNotExist(err) {
 		t.Fatalf("trusted allowlist preflight should happen before SFTP staging, stat err = %v", err)

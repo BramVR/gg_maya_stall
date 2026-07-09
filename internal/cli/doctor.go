@@ -189,9 +189,13 @@ func selectDoctorHost(hosts []mayaHostConfig, hostPin string) (mayaHostConfig, e
 }
 
 func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig, scenario scenarioConfig, report *hostHealthReport, add func(hostHealthLayer)) {
+	sshOK := true
 	if host.usesRealSSH() {
-		add(realSSHLayer(host))
-		add(realWorkRootLayer(host))
+		sshCheck := realSSHLayer(host)
+		add(sshCheck)
+		workRootCheck := realWorkRootLayer(host)
+		add(workRootCheck)
+		sshOK = sshCheck.Status == "ok" && workRootCheck.Status == "ok"
 	} else {
 		add(statusLayer("fake-ssh", host.SSH.FakeStatus, "reachable", []string{"", "ok", "healthy", "reachable"}, "Fix SSH reachability for this Maya Host. See docs/setup/windows-maya-host.md#openssh-reachability."))
 		add(statusLayer("work-root", host.WorkRoot, "writable", []string{"", "ok", "writable"}, "Fix the host work root path or permissions. See docs/setup/windows-maya-host.md#work-root."))
@@ -249,6 +253,7 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 		add(withSource(statusLayer("session-broker", host.Broker.fakeStatus(), "reachable", []string{"", "ok", "healthy", "reachable"}, "Start or repair the Session Broker on this Maya Host. See docs/setup/windows-maya-host.md#session-broker."), "fake"))
 	}
 	add(mayaVersionLayer(options, host, scenario))
+	add(trustedPluginAllowlistDoctorLayer(host, scenario, options.RepairTrustedPluginAllowlist, sshOK, lockCheck.Status == "ok"))
 	if host.VisualEvidence != nil && !*host.VisualEvidence {
 		add(withSource(failedCheck("visual-evidence", "unavailable", "Enable screenshot capture through the Session Broker. See docs/setup/windows-maya-host.md#visual-evidence."), "config"))
 	} else if brokerInvalidReason != "" {

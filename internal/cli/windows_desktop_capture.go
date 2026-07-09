@@ -238,7 +238,8 @@ try {
   & schtasks.exe @createArgs | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "failed to create interactive desktop click task with schtasks.exe /IT; ensure an interactive desktop session is logged in" }
   schtasks.exe /Run /TN $taskName | Out-Null
-  for ($i = 0; $i -lt 20; $i++) {
+  $deadline = (Get-Date).AddSeconds(30)
+  while ((Get-Date) -lt $deadline) {
     if (Test-Path -LiteralPath $done) { exit 0 }
     Start-Sleep -Milliseconds 250
   }

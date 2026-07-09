@@ -208,6 +208,139 @@ hostPools:
 	}
 }
 
+func TestLoadUserHostConfigAcceptsYAMLMergeKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, path, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: template
+        ssh: &sshDefaults
+          user: maya-runner
+          port: 2222
+        broker: &brokerDefaults
+          type: gg-mayasessiond
+          python: python
+      - id: alpha
+        transport: ssh
+        ssh:
+          <<: *sshDefaults
+          host: maya-win-01
+        broker:
+          <<: *brokerDefaults
+          stateDir: C:/maya-stall/sessiond-ui
+`)
+
+	config, err := loadUserHostConfig(path)
+	if err != nil {
+		t.Fatalf("loadUserHostConfig returned error: %v", err)
+	}
+	host := config.HostPools["windows-maya"].Hosts[1]
+	if host.SSH.Host != "maya-win-01" || host.SSH.User != "maya-runner" || host.SSH.Port != 2222 {
+		t.Fatalf("decoded merged ssh config = %+v, want inherited defaults and host override", host.SSH)
+	}
+	if !host.Broker.Structured || !host.Broker.isGGMayaSessiond() || host.Broker.Python != "python" {
+		t.Fatalf("decoded merged broker config = %+v, want inherited structured defaults", host.Broker)
+	}
+}
+
+func TestLoadUserHostConfigRejectsUnknownFieldsInYAMLMerge(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, path, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        ssh:
+          <<:
+            user: maya-runner
+            hostname: wrong
+          host: maya-win-01
+`)
+
+	_, err := loadUserHostConfig(path)
+	if err == nil {
+		t.Fatal("loadUserHostConfig returned nil error")
+	}
+	assertStrictYAMLError(t, err, "hostname")
+}
+
+func TestLoadUserHostConfigRejectsExplicitMergeTagOnUnknownField(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, path, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        ssh:
+          !!merge hostname: wrong
+          host: maya-win-01
+`)
+
+	_, err := loadUserHostConfig(path)
+	if err == nil {
+		t.Fatal("loadUserHostConfig returned nil error")
+	}
+	assertStrictYAMLError(t, err, "hostname")
+}
+
+func TestLoadUserHostConfigRejectsCyclicYAMLMerge(t *testing.T) {
+	tests := map[string]string{
+		"mapping": `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        ssh: &loop
+          <<: *loop
+          host: maya-win-01
+`,
+		"sequence": `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        ssh:
+          <<: &loop [*loop]
+          host: maya-win-01
+`,
+	}
+
+	for name, content := range tests {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "ci-hosts.yaml")
+			mustWriteFile(t, path, content)
+
+			_, err := loadUserHostConfig(path)
+			if err == nil {
+				t.Fatal("loadUserHostConfig returned nil error")
+			}
+			if !strings.Contains(err.Error(), "cyclic YAML merge") {
+				t.Fatalf("cyclic YAML merge error = %q, want cycle error", err)
+			}
+		})
+	}
+}
+
 func assertStrictYAMLError(t *testing.T, err error, field string) {
 	t.Helper()
 	message := err.Error()

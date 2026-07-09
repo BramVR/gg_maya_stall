@@ -202,16 +202,67 @@ var sshConfigYAMLFields = map[string]struct{}{
 }
 
 func rejectUnknownYAMLMappingFields(value *yaml.Node, known map[string]struct{}, typeName string) error {
+	return rejectUnknownYAMLMappingFieldsWithStack(value, known, typeName, make(map[*yaml.Node]bool), make(map[*yaml.Node]bool))
+}
+
+func rejectUnknownYAMLMappingFieldsWithStack(value *yaml.Node, known map[string]struct{}, typeName string, visiting, validated map[*yaml.Node]bool) error {
 	if value.Kind != yaml.MappingNode {
 		return nil
 	}
+	if validated[value] {
+		return nil
+	}
+	if visiting[value] {
+		return fmt.Errorf("line %d: cyclic YAML merge in type %s", value.Line, typeName)
+	}
+	visiting[value] = true
+	defer delete(visiting, value)
 	for i := 0; i < len(value.Content); i += 2 {
 		key := value.Content[i]
+		if isYAMLMergeKey(key) {
+			if err := rejectUnknownYAMLMergeFields(value.Content[i+1], known, typeName, visiting, validated); err != nil {
+				return err
+			}
+			continue
+		}
 		if _, ok := known[key.Value]; !ok {
 			return fmt.Errorf("line %d: field %s not found in type %s", key.Line, key.Value, typeName)
 		}
 	}
+	validated[value] = true
 	return nil
+}
+
+func isYAMLMergeKey(key *yaml.Node) bool {
+	return key.Kind == yaml.ScalarNode && key.Value == "<<" &&
+		(key.Tag == "" || key.Tag == "!" || key.ShortTag() == "!!merge")
+}
+
+func rejectUnknownYAMLMergeFields(value *yaml.Node, known map[string]struct{}, typeName string, visiting, validated map[*yaml.Node]bool) error {
+	if value.Kind == yaml.AliasNode {
+		value = value.Alias
+	}
+	if value == nil {
+		return nil
+	}
+	if value.Kind == yaml.SequenceNode {
+		if validated[value] {
+			return nil
+		}
+		if visiting[value] {
+			return fmt.Errorf("line %d: cyclic YAML merge in type %s", value.Line, typeName)
+		}
+		visiting[value] = true
+		defer delete(visiting, value)
+		for _, item := range value.Content {
+			if err := rejectUnknownYAMLMergeFields(item, known, typeName, visiting, validated); err != nil {
+				return err
+			}
+		}
+		validated[value] = true
+		return nil
+	}
+	return rejectUnknownYAMLMappingFieldsWithStack(value, known, typeName, visiting, validated)
 }
 
 func selectHostForRun(repoDir string, options runOptions) (hostRuntime, error) {

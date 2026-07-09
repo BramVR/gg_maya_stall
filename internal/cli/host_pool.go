@@ -76,16 +76,30 @@ type brokerConfig struct {
 
 func (config *brokerConfig) UnmarshalYAML(value *yaml.Node) error {
 	if value.Kind == yaml.ScalarNode {
-		config.FakeStatus = value.Value
+		*config = brokerConfig{FakeStatus: value.Value}
 		return nil
 	}
-	type brokerConfigAlias brokerConfig
-	var decoded brokerConfigAlias
+	if err := rejectUnknownYAMLMappingFields(value, brokerConfigYAMLFields, "cli.brokerConfig"); err != nil {
+		return err
+	}
+	var decoded struct {
+		Type      string `yaml:"type"`
+		StateDir  string `yaml:"stateDir"`
+		Python    string `yaml:"python"`
+		Repo      string `yaml:"repo"`
+		MCPSource string `yaml:"mcpSource"`
+	}
 	if err := value.Decode(&decoded); err != nil {
 		return err
 	}
-	*config = brokerConfig(decoded)
-	config.Structured = true
+	*config = brokerConfig{
+		Structured: true,
+		Type:       decoded.Type,
+		StateDir:   decoded.StateDir,
+		Python:     decoded.Python,
+		Repo:       decoded.Repo,
+		MCPSource:  decoded.MCPSource,
+	}
 	return nil
 }
 
@@ -139,15 +153,64 @@ type sshConfig struct {
 
 func (config *sshConfig) UnmarshalYAML(value *yaml.Node) error {
 	if value.Kind == yaml.ScalarNode {
-		config.FakeStatus = value.Value
+		*config = sshConfig{FakeStatus: value.Value}
 		return nil
 	}
-	type sshConfigAlias sshConfig
-	var decoded sshConfigAlias
+	if err := rejectUnknownYAMLMappingFields(value, sshConfigYAMLFields, "cli.sshConfig"); err != nil {
+		return err
+	}
+	var decoded struct {
+		Host         string `yaml:"host"`
+		User         string `yaml:"user"`
+		Port         int    `yaml:"port"`
+		IdentityFile string `yaml:"identityFile"`
+		Binary       string `yaml:"binary"`
+		SFTPBinary   string `yaml:"sftpBinary"`
+		SFTPTimeout  string `yaml:"sftpTimeout"`
+	}
 	if err := value.Decode(&decoded); err != nil {
 		return err
 	}
-	*config = sshConfig(decoded)
+	*config = sshConfig{
+		Host:         decoded.Host,
+		User:         decoded.User,
+		Port:         decoded.Port,
+		IdentityFile: decoded.IdentityFile,
+		Binary:       decoded.Binary,
+		SFTPBinary:   decoded.SFTPBinary,
+		SFTPTimeout:  decoded.SFTPTimeout,
+	}
+	return nil
+}
+
+var brokerConfigYAMLFields = map[string]struct{}{
+	"type":      {},
+	"stateDir":  {},
+	"python":    {},
+	"repo":      {},
+	"mcpSource": {},
+}
+
+var sshConfigYAMLFields = map[string]struct{}{
+	"host":         {},
+	"user":         {},
+	"port":         {},
+	"identityFile": {},
+	"binary":       {},
+	"sftpBinary":   {},
+	"sftpTimeout":  {},
+}
+
+func rejectUnknownYAMLMappingFields(value *yaml.Node, known map[string]struct{}, typeName string) error {
+	if value.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i < len(value.Content); i += 2 {
+		key := value.Content[i]
+		if _, ok := known[key.Value]; !ok {
+			return fmt.Errorf("line %d: field %s not found in type %s", key.Line, key.Value, typeName)
+		}
+	}
 	return nil
 }
 
@@ -212,7 +275,7 @@ func loadUserHostConfig(path string) (userHostConfig, error) {
 		return userHostConfig{}, err
 	}
 	var config userHostConfig
-	if err := yaml.Unmarshal(content, &config); err != nil {
+	if err := decodeKnownYAMLFields(content, &config); err != nil {
 		return userHostConfig{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if config.Version != 1 {

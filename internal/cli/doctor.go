@@ -125,8 +125,20 @@ func runDoctor(repoDir string, options doctorOptions) hostHealthReport {
 
 func validateScenarioInputs(repoDir string, scenario scenarioContract) error {
 	for _, item := range scenario.Payload {
-		if err := ensurePayloadPathHasNoSymlinkAncestor(repoDir, item.Source); err != nil {
+		if err := validatePayloadPathForTransport(repoDir, item.Source); err != nil {
 			return fmt.Errorf("stage %s payload %s: %w", item.Kind, item.Source, err)
+		}
+	}
+	return nil
+}
+
+func validateScenarioRemotePaths(scenario scenarioConfig) error {
+	if err := rejectSFTPRepoPath(scenario.ExpectedOutputs.ScenarioResult); err != nil {
+		return err
+	}
+	for _, path := range scenario.ExpectedOutputs.Files {
+		if err := rejectSFTPRepoPath(path); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -305,59 +317,23 @@ type windowsProcessSession struct {
 
 func realSessionBrokerLayer(host mayaHostConfig) doctorCheck {
 	broker := ggMayaSessiondBroker{host: host}
-	if err := broker.validate(); err != nil {
-		return withSource(failedCheck("session-broker", err.Error(), "Configure gg_mayasessiond paths in host config. See docs/setup/windows-maya-host.md#session-broker."), "gg-mayasessiond")
-	}
-	doctorRaw, err := broker.runSessiondCLI(sessiondDoctorArgs(host), sessiondCommandTimeout)
+	health, err := broker.ensureReady()
 	if err != nil {
 		return withSource(failedCheck("session-broker", err.Error(), "Start or repair gg_mayasessiond on this Maya Host. See docs/setup/windows-maya-host.md#session-broker."), "gg-mayasessiond")
 	}
-	var doctor sessiondDoctorOutput
-	if err := json.Unmarshal(doctorRaw, &doctor); err != nil {
-		return withSource(failedCheck("session-broker", "invalid doctor JSON", "Update gg_mayasessiond or fix its CLI JSON output. See docs/setup/windows-maya-host.md#session-broker."), "gg-mayasessiond")
+	if !health.OK {
+		check := withSource(withState(failedCheck("session-broker", health.Detail, health.Hint), health.Reason), "gg-mayasessiond")
+		return check
 	}
-	if !doctor.OK {
-		detail := "gg_mayasessiond doctor failed"
-		if failing := failingSessiondDoctorChecks(doctor); len(failing) > 0 {
-			detail += ": " + strings.Join(failing, ", ")
-		}
-		return withSource(failedCheck("session-broker", detail, "Repair the failing gg_mayasessiond doctor check. See docs/setup/windows-maya-host.md#session-broker."), "gg-mayasessiond")
+	detail := health.Detail
+	if health.Recovered {
+		detail = "recovered gg_mayasessiond commandPort health; Maya UI is interactive"
 	}
-	statusRaw, err := broker.runSessiondCLI([]string{"status", "--state-dir", host.Broker.StateDir, "--json"}, sessiondCommandTimeout)
-	if err != nil {
-		return withSource(failedCheck("session-broker", err.Error(), "Start or repair gg_mayasessiond on this Maya Host. See docs/setup/windows-maya-host.md#session-broker."), "gg-mayasessiond")
+	check := withSource(okCheck("session-broker", detail), "gg-mayasessiond")
+	if health.Recovered {
+		check = withState(check, "recovered")
 	}
-	var status sessiondStatusOutput
-	if err := json.Unmarshal(statusRaw, &status); err != nil {
-		return withSource(failedCheck("session-broker", "invalid status JSON", "Update gg_mayasessiond or fix its CLI JSON output. See docs/setup/windows-maya-host.md#session-broker."), "gg-mayasessiond")
-	}
-	effectiveStatus := status.DerivedStatus
-	if effectiveStatus == "" {
-		effectiveStatus = status.State.Status
-	}
-	if effectiveStatus != "running" {
-		return withSource(failedCheck("session-broker", "gg_mayasessiond is not running", "Start the interactive gg_mayasessiond broker. See docs/setup/windows-maya-host.md#session-broker."), "gg-mayasessiond")
-	}
-	if !status.State.CallServerReady {
-		return withSource(failedCheck("session-broker", "gg_mayasessiond call server is not ready", "Repair Maya MCP startup for gg_mayasessiond. See docs/setup/windows-maya-host.md#session-broker."), "gg-mayasessiond")
-	}
-	processes, err := mayaProcessSessions(host)
-	if err != nil {
-		return withSource(failedCheck("session-broker", err.Error(), "Check Maya process state from the Windows host. See docs/setup/windows-maya-host.md#interactive-desktop."), "gg-mayasessiond")
-	}
-	if len(processes) == 0 {
-		return withSource(failedCheck("session-broker", "maya.exe is not running", "Start gg_mayasessiond from the interactive Windows desktop. See docs/setup/windows-maya-host.md#interactive-desktop."), "gg-mayasessiond")
-	}
-	for _, process := range processes {
-		if process.SessionID == 0 {
-			return withSource(failedCheck("session-broker", "maya.exe is running in Windows Services session 0", "Restart gg_mayasessiond from the interactive Windows desktop. See docs/setup/windows-maya-host.md#interactive-desktop."), "gg-mayasessiond")
-		}
-	}
-	if err := broker.probeScriptExecute(); err != nil {
-		return withSource(failedCheck("session-broker", err.Error(), "Repair gg_mayasessiond script.execute access to the Maya Stall work root. See docs/setup/windows-maya-host.md#session-broker."), "gg-mayasessiond")
-	}
-	check := withSource(okCheck("session-broker", "gg_mayasessiond reachable; Maya UI is interactive"), "gg-mayasessiond")
-	check.InteractiveDesktop = true
+	check.InteractiveDesktop = health.InteractiveDesktop
 	return check
 }
 

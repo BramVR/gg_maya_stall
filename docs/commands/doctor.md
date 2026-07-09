@@ -49,6 +49,11 @@ Services session `0`. Visual Evidence readiness is reported from those same
 Session Broker and recording prerequisites, not from the static host config or
 viewport capture alone.
 
+If the broker reports a commandPort-unhealthy state, doctor restarts the
+configured interactive recovery task (`broker.recoveryTask`, default
+`MayaStallSessiondUI`) and re-runs the broker probes before reporting success or
+a layer-specific `session-broker` failure.
+
 ## When To Run
 
 Run doctor before a long workflow, after changing host config, before enabling a

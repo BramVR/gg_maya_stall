@@ -233,13 +233,23 @@ broker:
   python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
   repo: C:/maya-stall-src/GG_MayaSessiond
   mcpSource: C:/maya-stall-src/GG_MayaMCP
+  recoveryTask: MayaStallSessiondUI
 ```
 
 Maya Stall invokes `gg_maya_sessiond.cli` on the Windows host through the same SSH transport. Runs stage declared payloads under `workRoot/runs/<run-id>/`, execute a staged wrapper with `script.execute`, download declared outputs from the remote workspace, and capture configured Visual Evidence from the interactive Windows desktop. Remote Scenario execution through `script.execute` is capped at 10 minutes. The Session Broker launcher must allow the staged wrapper directory; otherwise doctor fails the `session-broker` layer with a `script.execute` repair hint.
 
+`recoveryTask` names the host-managed interactive scheduled task Maya Stall may
+restart when `gg_mayasessiond` reports a commandPort-unhealthy state before a
+live Scenario starts. If omitted, Maya Stall uses the documented prepare-script
+default `MayaStallSessiondUI`. Recovery is limited to commandPort health
+reasons such as `command-port-not-ready` and `command-port-unreachable`;
+unrelated broker, host, config, or desktop failures fail at the
+`session-broker` layer with their own reason instead of being hidden as Scenario
+or plugin failures.
+
 Each `manifest.json` and `evidence.json` records the resolved runtime profile, host adapter, broker adapter, redacted broker config source, and whether the run is eligible for live product proof.
 
-`maya-stall doctor` also performs live broker probes for `gg_mayasessiond`: it runs daemon `doctor` and `status`, checks the Windows `maya.exe` session, stages a tiny probe script under `workRoot/runs/doctor-*`, executes it with `script.execute`, removes that probe directory, and checks `viewport.capture`. The local Host Lock gates these probes for Maya Stall runs from the same checkout, but operators should still treat doctor as a live diagnostic that briefly executes code in the active Maya session.
+`maya-stall doctor` also performs live broker probes for `gg_mayasessiond`: it runs daemon `doctor` and `status`, checks the Windows `maya.exe` session, stages a tiny probe script under `workRoot/runs/doctor-*`, executes it with `script.execute`, removes that probe directory, and checks `viewport.capture`. If the commandPort layer is unhealthy and the configured recovery task is available, doctor restarts that task and re-runs the broker probes before reporting success. The local Host Lock gates these probes for Maya Stall runs from the same checkout, but operators should still treat doctor as a live diagnostic that briefly executes code in the active Maya session.
 
 The Doctor CLI renders a Host Health report rather than independent text-only checks. Tests and live proof use the same report fields for layer status, Host Lock state, interactive desktop proof, and broker-backed Visual Evidence readiness.
 

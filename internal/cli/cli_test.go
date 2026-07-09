@@ -1947,6 +1947,70 @@ hostPools:
 	}
 }
 
+func TestDoctorGGMayaSessiondRecoversCommandPortWithScheduledTask(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	useFakeFFmpegLookPath(t, dir)
+	sshLog := filepath.Join(dir, "ssh.log")
+	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
+		``,
+		``,
+		`{"ok":true,"checks":[{"id":"state_dir","ok":true}]}`,
+		`{"derived_status":"running","state":{"status":"running","call_server_ready":false,"maya_alive":true,"mcp_alive":true}}`,
+		`{"ok":true,"task":"MayaStallSessiondUI","reason":"command-port-not-ready"}`,
+		`{"ok":true,"checks":[{"id":"state_dir","ok":true}]}`,
+		`{"derived_status":"running","state":{"status":"running","call_server_ready":true,"maya_alive":true,"mcp_alive":true}}`,
+		`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
+		`{"ok":true,"tool":"script.execute"}`,
+		`removed`,
+		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
+		``,
+		``,
+		writeFakeSSHBinaryOutput(t, dir, "recording-frames.zip", zipFrameArchive(t)),
+		`removed`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+          recoveryTask: MayaStallSessiondUI
+        visualEvidence: true
+`)
+
+	report := runDoctor(dir, doctorOptions{HostConfig: hostConfigPath, TargetProfile: "ci", HostPin: "alpha"})
+
+	if !report.Healthy {
+		t.Fatalf("Host Health healthy = false, checks: %+v", report.Layers)
+	}
+	broker := requireHostHealthLayer(t, report, "session-broker")
+	if broker.Status != "ok" || broker.State != "recovered" || !broker.InteractiveDesktop {
+		t.Fatalf("session-broker Host Health = %+v, want recovered interactive broker", broker)
+	}
+	logBytes, err := os.ReadFile(sshLog)
+	if err != nil {
+		t.Fatalf("read ssh log: %v", err)
+	}
+	if strings.Count(string(logBytes), "CALL ") < 10 {
+		t.Fatalf("doctor did not run scheduled task recovery and re-probe:\n%s", string(logBytes))
+	}
+}
+
 func TestDoctorGGMayaSessiondReportsDaemonDoctorCheckIDs(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
@@ -2850,6 +2914,7 @@ func TestRunScenarioRealSSHUploadsPayloadAndDownloadsDeclaredOutputs(t *testing.
 	sftpLog := filepath.Join(dir, "sftp.log")
 	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
 		sessiondStatusFixture("session-alpha"),
 	})
@@ -2913,6 +2978,7 @@ func TestRunScenarioRealSSHUploadsPluginArtifactsToTrustedRoot(t *testing.T) {
 	sftpLog := filepath.Join(dir, "sftp.log")
 	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"trusted-plugin-cleanup"}`,
 		`{"ok":true,"tool":"script.execute"}`,
 		sessiondStatusFixture("session-alpha"),
@@ -3177,6 +3243,7 @@ func TestRunScenarioGGMayaSessiondBrokerExecutesRemoteScenarioAndCapturesScreens
 	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
 	sshLog := filepath.Join(dir, "ssh.log")
 	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
+		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
 		`png proof`,
 		``,
@@ -3250,6 +3317,7 @@ func TestRunScenarioGGMayaSessiondDownloadedFailedResultFailsRun(t *testing.T) {
 	sftpLog := filepath.Join(dir, "sftp.log")
 	sftpPath := writeScenarioResultSFTPCommand(t, dir, sftpLog, resultStatusFailed, "remote script failed")
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
 		sessiondStatusFixture("session-alpha"),
 	})
@@ -3300,6 +3368,7 @@ func TestRunRetentionCommandsUseSessiondBrokerForStatusAttachAndStop(t *testing.
 	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
 	sshLog := filepath.Join(dir, "ssh.log")
 	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
+		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
 		sessiondStatusFixture("session-alpha"),
 		sessiondStatusFixture("session-alpha"),
@@ -3387,6 +3456,7 @@ func TestRunRetentionFailureKeepsHostLock(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
 		`{"ok":false,"error":"status unavailable"}`,
 	})
@@ -3434,6 +3504,7 @@ func TestRunRetentionStopWithMissingRecordedSessionIDCleansWithoutStoppingCurren
 	dir := writeRunConfigFixture(t)
 	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
 		`{"ok":false,"error":"retain status unavailable"}`,
 		sessiondStatusFixture("session-beta"),
@@ -3481,7 +3552,7 @@ hostPools:
 	if err != nil {
 		t.Fatalf("read ssh log: %v", err)
 	}
-	if got := strings.Count(string(sshBytes), "CALL "); got != 4 {
+	if got := strings.Count(string(sshBytes), "CALL "); got != 5 {
 		t.Fatalf("missing-session-id stop made %d SSH calls, want status plus cleanup but no broker stop:\n%s", got, string(sshBytes))
 	}
 }
@@ -3490,6 +3561,7 @@ func TestRunRetentionStatusReportsStaleWhenSessiondSessionChanged(t *testing.T) 
 	dir := writeRunConfigFixture(t)
 	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
 		sessiondStatusFixture("session-alpha"),
 		sessiondStatusFixture("session-beta"),
@@ -3540,6 +3612,7 @@ func TestRunRetentionStopFailureKeepsRunStateAndHostLock(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
 		sessiondStatusFixture("session-alpha"),
 		sessiondStatusFixture("session-alpha"),
@@ -3595,6 +3668,7 @@ func TestRunRetentionStopStatusFailureKeepsRunStateAndHostLock(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
 		sessiondStatusFixture("session-alpha"),
 		`{"ok":false,"error":"status unavailable"}`,
@@ -3648,7 +3722,7 @@ hostPools:
 	if err != nil {
 		t.Fatalf("read ssh log: %v", err)
 	}
-	if got := strings.Count(string(sshBytes), "CALL "); got != 3 {
+	if got := strings.Count(string(sshBytes), "CALL "); got != 4 {
 		t.Fatalf("status-failed stop made %d SSH calls, want no stop call after failed status:\n%s", got, string(sshBytes))
 	}
 }
@@ -3657,6 +3731,7 @@ func TestRunRetentionStopRequiresConfirmedBrokerStop(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
 		sessiondStatusFixture("session-alpha"),
 		sessiondStatusFixture("session-alpha"),
@@ -3709,6 +3784,7 @@ func TestRunRetentionStopRejectsTamperedRemoteCleanupPath(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
 		sessiondStatusFixture("session-alpha"),
 		sessiondStatusFixture("session-alpha"),
@@ -3772,7 +3848,7 @@ hostPools:
 	if err != nil {
 		t.Fatalf("read ssh log: %v", err)
 	}
-	if got := strings.Count(string(sshBytes), "CALL "); got != 2 {
+	if got := strings.Count(string(sshBytes), "CALL "); got != 3 {
 		t.Fatalf("tampered cleanup made %d SSH calls, want no stop/cleanup after run retention:\n%s", got, string(sshBytes))
 	}
 }
@@ -3781,6 +3857,7 @@ func TestRunRetentionStopRefusesStaleSessiondSession(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
 		sessiondStatusFixture("session-alpha"),
 		sessiondStatusFixture("session-beta"),
@@ -3828,7 +3905,7 @@ hostPools:
 	if err != nil {
 		t.Fatalf("read ssh log: %v", err)
 	}
-	if got := strings.Count(string(sshBytes), "CALL "); got != 4 {
+	if got := strings.Count(string(sshBytes), "CALL "); got != 5 {
 		t.Fatalf("stale stop made %d SSH calls, want status plus cleanup but no stop call:\n%s", got, string(sshBytes))
 	}
 }
@@ -3837,6 +3914,7 @@ func TestRunRetentionStopTreatsMissingCurrentSessionIDAsStale(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
 		sessiondStatusFixture("session-alpha"),
 		`{"has_state":true,"derived_status":"running","state":{"status":"running","maya_alive":true,"mcp_alive":true,"call_server_ready":true}}`,
@@ -3881,7 +3959,7 @@ hostPools:
 	if err != nil {
 		t.Fatalf("read ssh log: %v", err)
 	}
-	if got := strings.Count(string(sshBytes), "CALL "); got != 4 {
+	if got := strings.Count(string(sshBytes), "CALL "); got != 5 {
 		t.Fatalf("missing-current-session stop made %d SSH calls, want status plus cleanup but no broker stop:\n%s", got, string(sshBytes))
 	}
 }
@@ -4031,6 +4109,55 @@ hostPools:
 	}
 }
 
+func TestRunScenarioRealSSHPreflightFailsBeforeStagingWhenCommandPortRecoveryUnavailable(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sftpLog := filepath.Join(dir, "sftp.log")
+	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		`{"derived_status":"running","state":{"status":"running","call_server_ready":false,"maya_alive":true,"mcp_alive":true}}`,
+		`@fail:Cannot find scheduled task MayaStallSessiondUI`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"session-broker preflight failed (command-port-not-ready)",
+		"automatic recovery failed",
+		"MayaStallSessiondUI",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("run preflight error missing %q: %s", want, stderr.String())
+		}
+	}
+	if _, err := os.Stat(sftpLog); !os.IsNotExist(err) {
+		t.Fatalf("commandPort preflight failure should happen before SFTP staging, stat err = %v", err)
+	}
+}
+
 func TestRunScenarioRejectsUnknownScalarBrokerStatus(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -4177,6 +4304,28 @@ func TestGGMayaSessiondCaptureImageDataRequiresImageContent(t *testing.T) {
 	}
 	if string(data) != "image bytes" || mediaType != "image/png" {
 		t.Fatalf("captureImageData = %q/%q, want image bytes/image/png", string(data), mediaType)
+	}
+}
+
+func TestGGMayaSessiondRecoveryScriptWaitsForRunningTaskToStop(t *testing.T) {
+	script := sessiondRecoveryScript(mayaHostConfig{Broker: brokerConfig{
+		StateDir: "C:/maya-stall/sessiond-ui",
+		Python:   "C:/maya-stall/sessiond-venv311/Scripts/python.exe",
+		Repo:     "C:/maya-stall/tools/GG_MayaSessiond",
+	}}, "MayaStallSessiondUI", "command-port-not-ready")
+
+	for _, want := range []string{
+		"gg_maya_sessiond.cli @('stop','--state-dir'",
+		"'--wait-timeout-seconds','120'",
+		"Stop-ScheduledTask",
+		"for ($attempt = 0; $attempt -lt 90; $attempt++)",
+		`if ($task.State -ne "Running")`,
+		`throw "scheduled task $taskName did not stop before restart"`,
+		"Start-ScheduledTask",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("recovery script missing %q:\n%s", want, script)
+		}
 	}
 }
 
@@ -4569,6 +4718,7 @@ func TestRunScenarioRealSSHRequiresDownloadedScenarioResult(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	sftpPath := writeFailingGetSFTPCommand(t, dir)
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -4634,6 +4784,7 @@ func TestRunScenarioRealSSHAcceptsCollectedCompletionAfterBrokerDisconnect(t *te
 		"outputs/parity.json":                `{"maxAbsDiff":3.55e-08,"mismatchCount":0}` + "\n",
 	})
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		sessiondStatusFixture("session-alpha"),
 		`{"ok":false,"tool":"script.execute","error":"Cannot connect to Maya commandPort at localhost:7001"}`,
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -4721,6 +4872,7 @@ func TestRunScenarioRealSSHCollectsDeclaredOutputsWhenBrokerDisconnectsBeforeRes
 	sftpLog := filepath.Join(dir, "sftp.log")
 	sftpPath := writeMissingScenarioResultSFTPCommand(t, dir, sftpLog, "outputs/product-ui-e2e-result.json", `{"status":"passed","product":"ok"}`+"\n")
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		sessiondStatusFixture("session-alpha"),
 		`{"ok":false,"tool":"script.execute","error":"Cannot connect to Maya commandPort at localhost:7001"}`,
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -4780,6 +4932,7 @@ func TestRunScenarioRealSSHWritesFailureBundleWhenCollectedScenarioResultIsMalfo
 		"outputs/product-ui-e2e-result.json": `{"status":"passed","product":"ok"}` + "\n",
 	})
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		sessiondStatusFixture("session-alpha"),
 		`{"ok":false,"tool":"script.execute","error":"Cannot connect to Maya commandPort at localhost:7001"}`,
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -4843,6 +4996,7 @@ func TestRunScenarioRealSSHDownloadsValidatorOnlyOutputs(t *testing.T) {
 	sftpLog := filepath.Join(dir, "sftp.log")
 	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")

@@ -65,13 +65,14 @@ type mayaHostConfig struct {
 }
 
 type brokerConfig struct {
-	FakeStatus string `yaml:"-"`
-	Structured bool   `yaml:"-"`
-	Type       string `yaml:"type"`
-	StateDir   string `yaml:"stateDir"`
-	Python     string `yaml:"python"`
-	Repo       string `yaml:"repo"`
-	MCPSource  string `yaml:"mcpSource"`
+	FakeStatus   string `yaml:"-"`
+	Structured   bool   `yaml:"-"`
+	Type         string `yaml:"type"`
+	StateDir     string `yaml:"stateDir"`
+	Python       string `yaml:"python"`
+	Repo         string `yaml:"repo"`
+	MCPSource    string `yaml:"mcpSource"`
+	RecoveryTask string `yaml:"recoveryTask"`
 }
 
 func (config *brokerConfig) UnmarshalYAML(value *yaml.Node) error {
@@ -83,22 +84,24 @@ func (config *brokerConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	var decoded struct {
-		Type      string `yaml:"type"`
-		StateDir  string `yaml:"stateDir"`
-		Python    string `yaml:"python"`
-		Repo      string `yaml:"repo"`
-		MCPSource string `yaml:"mcpSource"`
+		Type         string `yaml:"type"`
+		StateDir     string `yaml:"stateDir"`
+		Python       string `yaml:"python"`
+		Repo         string `yaml:"repo"`
+		MCPSource    string `yaml:"mcpSource"`
+		RecoveryTask string `yaml:"recoveryTask"`
 	}
 	if err := value.Decode(&decoded); err != nil {
 		return err
 	}
 	*config = brokerConfig{
-		Structured: true,
-		Type:       decoded.Type,
-		StateDir:   decoded.StateDir,
-		Python:     decoded.Python,
-		Repo:       decoded.Repo,
-		MCPSource:  decoded.MCPSource,
+		Structured:   true,
+		Type:         decoded.Type,
+		StateDir:     decoded.StateDir,
+		Python:       decoded.Python,
+		Repo:         decoded.Repo,
+		MCPSource:    decoded.MCPSource,
+		RecoveryTask: decoded.RecoveryTask,
 	}
 	return nil
 }
@@ -184,11 +187,12 @@ func (config *sshConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 var brokerConfigYAMLFields = map[string]struct{}{
-	"type":      {},
-	"stateDir":  {},
-	"python":    {},
-	"repo":      {},
-	"mcpSource": {},
+	"type":         {},
+	"stateDir":     {},
+	"python":       {},
+	"repo":         {},
+	"mcpSource":    {},
+	"recoveryTask": {},
 }
 
 var sshConfigYAMLFields = map[string]struct{}{

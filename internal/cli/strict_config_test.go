@@ -192,6 +192,7 @@ hostPools:
           stateDir: C:/maya-stall/sessiond-ui
           python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
           repo: C:/maya-stall/tools/GG_MayaSessiond
+          recoveryTask: MayaStallSessiondUI
         mayaVersions: ["2025"]
 `)
 
@@ -203,7 +204,7 @@ hostPools:
 	if host.SSH.Host != "maya-win-01" || host.SSH.Port != 2222 || host.SSH.SFTPTimeout != "30s" {
 		t.Fatalf("decoded ssh config = %+v, want valid structured ssh config", host.SSH)
 	}
-	if !host.Broker.Structured || !host.Broker.isGGMayaSessiond() {
+	if !host.Broker.Structured || !host.Broker.isGGMayaSessiond() || host.Broker.RecoveryTask != "MayaStallSessiondUI" {
 		t.Fatalf("decoded broker config = %+v, want structured gg_mayasessiond config", host.Broker)
 	}
 }

@@ -91,13 +91,13 @@ func ensureTrustedPluginAllowlist(host mayaHostConfig, versions []string, repair
 		checked++
 		probe, err := trustedPluginPrefs(host, version, repair)
 		if err != nil {
-			return false, fmt.Errorf("Maya %s %s", version, err)
+			return false, fmt.Errorf("maya %s %s", version, err)
 		}
 		if !probe.Exists {
-			return false, fmt.Errorf("Maya %s userPrefs.mel is missing", version)
+			return false, fmt.Errorf("maya %s userPrefs.mel is missing", version)
 		}
 		if !prefsAllowlistContainsRoot(probe.Content, trustedPluginArtifactsRoot(host)) {
-			return false, fmt.Errorf("Maya %s %s does not contain trustedPluginArtifactsRoot", version, safeModeAllowedlistOptionVar)
+			return false, fmt.Errorf("maya %s %s does not contain trustedPluginArtifactsRoot", version, safeModeAllowedlistOptionVar)
 		}
 		changed = changed || probe.Changed
 	}

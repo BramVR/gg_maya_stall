@@ -1700,7 +1700,7 @@ optionVar -cat "Security"
 		t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
 	for _, want := range []string{
-		"trusted-plugin-allowlist: fail - Maya 2025 SafeModeAllowedlistPaths does not contain trustedPluginArtifactsRoot",
+		"trusted-plugin-allowlist: fail - maya 2025 SafeModeAllowedlistPaths does not contain trustedPluginArtifactsRoot",
 		"hint: Add trustedPluginArtifactsRoot to Maya's trusted plug-in locations",
 	} {
 		if !strings.Contains(stdout.String(), want) {
@@ -4446,7 +4446,7 @@ optionVar -cat "Security"
 	if code != 1 {
 		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "trusted Plugin Artifact allowlist preflight failed: Maya 2025 SafeModeAllowedlistPaths does not contain trustedPluginArtifactsRoot") {
+	if !strings.Contains(stderr.String(), "trusted Plugin Artifact allowlist preflight failed: maya 2025 SafeModeAllowedlistPaths does not contain trustedPluginArtifactsRoot") {
 		t.Fatalf("run stderr missing trusted allowlist preflight:\n%s", stderr.String())
 	}
 	if _, err := os.Stat(sftpLog); !os.IsNotExist(err) {

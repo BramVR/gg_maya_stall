@@ -3571,28 +3571,7 @@ func TestRunScenarioRealSSHToleratesMissingTrustedPluginDestination(t *testing.T
 	sftpLog := filepath.Join(dir, "sftp.log")
 	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
 	sshPath := writeMissingTrustedPluginDestinationFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), "C:/maya-stall/trusted-plugin-artifacts/build/demo.mll")
-	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
-	mustWriteFile(t, hostConfigPath, `version: 1
-targetProfiles:
-  ci:
-    hostPool: windows-maya
-hostPools:
-  windows-maya:
-    hosts:
-      - id: alpha
-        transport: ssh
-        ssh:
-          host: maya-win-01
-          binary: `+strconv.Quote(sshPath)+`
-          sftpBinary: `+strconv.Quote(sftpPath)+`
-        workRoot: C:/maya-stall
-        trustedPluginArtifactsRoot: C:/maya-stall/trusted-plugin-artifacts
-        broker:
-          type: gg-mayasessiond
-          stateDir: C:/maya-stall/sessiond-ui
-          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
-          repo: C:/maya-stall/tools/GG_MayaSessiond
-`)
+	hostConfigPath := writeTrustedPluginHostConfig(t, dir, sshPath, sftpPath)
 	var stdout, stderr bytes.Buffer
 
 	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
@@ -3614,28 +3593,7 @@ func TestRunScenarioRealSSHStopsWhenTrustedPluginDestinationRemovalFails(t *test
 	sftpLog := filepath.Join(dir, "sftp.log")
 	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
 	sshPath := writeFailingTrustedPluginDestinationRemovalFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), "C:/maya-stall/trusted-plugin-artifacts/build/demo.mll")
-	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
-	mustWriteFile(t, hostConfigPath, `version: 1
-targetProfiles:
-  ci:
-    hostPool: windows-maya
-hostPools:
-  windows-maya:
-    hosts:
-      - id: alpha
-        transport: ssh
-        ssh:
-          host: maya-win-01
-          binary: `+strconv.Quote(sshPath)+`
-          sftpBinary: `+strconv.Quote(sftpPath)+`
-        workRoot: C:/maya-stall
-        trustedPluginArtifactsRoot: C:/maya-stall/trusted-plugin-artifacts
-        broker:
-          type: gg-mayasessiond
-          stateDir: C:/maya-stall/sessiond-ui
-          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
-          repo: C:/maya-stall/tools/GG_MayaSessiond
-`)
+	hostConfigPath := writeTrustedPluginHostConfig(t, dir, sshPath, sftpPath)
 	var stdout, stderr bytes.Buffer
 
 	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
@@ -7490,6 +7448,16 @@ printf '%%s\n' "$count" > %[1]s
 printf 'CALL %%s %%s\n' "$count" "$*" >> %[2]s
 case "$count" in
 1)
+	cat <<'JSON'
+%[4]s
+JSON
+	;;
+2)
+	cat <<'JSON'
+%[5]s
+JSON
+	;;
+3)
   expected=%[3]s
   case "$*" in
     *"$expected"*)
@@ -7501,19 +7469,23 @@ case "$count" in
       ;;
   esac
   ;;
-2)
+4)
   cat <<'JSON'
 {"ok":true,"tool":"script.execute"}
 JSON
   ;;
-3)
+5)
   cat <<'JSON'
 %[4]s
 JSON
   ;;
 esac
 exit 0
-`, shellQuote(countPath), shellQuote(logPath), shellQuote(expectedCommand), sessiondStatusFixture("session-alpha"))
+`, shellQuote(countPath), shellQuote(logPath), shellQuote(expectedCommand), sessiondStatusFixture("session-alpha"), trustedPluginPrefsProbeOutput(`// Security
+optionVar -cat "Security"
+ -sa "SafeModeAllowedlistPaths"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts";
+`))
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("write missing trusted Plugin Artifact destination fake ssh command: %v", err)
 	}
@@ -7523,6 +7495,7 @@ exit 0
 func writeFailingTrustedPluginDestinationRemovalFakeSSHCommand(t *testing.T, dir string, logPath string, destination string) string {
 	t.Helper()
 	path := filepath.Join(dir, "fake-ssh-failing-trusted-plugin-removal")
+	countPath := filepath.Join(dir, "fake-ssh-failing-trusted-plugin-removal.count")
 	expectedScript := "$ErrorActionPreference = 'Stop'\n" +
 		"foreach ($path in @(" + powerShellSingleQuoted(destination) + ")) {\n" +
 		"  if (Test-Path -LiteralPath $path) {\n" +
@@ -7532,19 +7505,47 @@ func writeFailingTrustedPluginDestinationRemovalFakeSSHCommand(t *testing.T, dir
 		"exit 0\n"
 	expectedCommand := strings.Join(encodedPowerShellCommand(expectedScript), " ")
 	content := fmt.Sprintf(`#!/bin/sh
-printf 'CALL %%s\n' "$*" >> %[1]s
-expected=%[2]s
-case "$*" in
-  *"$expected"*)
+count=0
+if [ -f %[1]s ]; then
+  count=$(cat %[1]s)
+fi
+count=$((count + 1))
+printf '%%s\n' "$count" > %[1]s
+printf 'CALL %%s %%s\n' "$count" "$*" >> %[2]s
+case "$count" in
+1)
+	cat <<'JSON'
+%[4]s
+JSON
+	;;
+2)
+	cat <<'JSON'
+%[5]s
+JSON
+	;;
+3)
+    expected=%[3]s
+    case "$*" in
+      *"$expected"*)
     printf 'access denied removing trusted Plugin Artifact\n' >&2
     exit 1
+        ;;
+      *)
+        printf 'cleanup command did not fail closed on existing destination removal\n' >&2
+        exit 1
+        ;;
+    esac
     ;;
-  *)
-    printf 'cleanup command did not fail closed on existing destination removal\n'
-    exit 0
+*)
+    printf 'unexpected SSH call before trusted Plugin Artifact removal failure\n' >&2
+    exit 1
     ;;
 esac
-`, shellQuote(logPath), shellQuote(expectedCommand))
+`, shellQuote(countPath), shellQuote(logPath), shellQuote(expectedCommand), sessiondStatusFixture("session-alpha"), trustedPluginPrefsProbeOutput(`// Security
+optionVar -cat "Security"
+ -sa "SafeModeAllowedlistPaths"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts";
+`))
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("write failing trusted Plugin Artifact removal fake ssh command: %v", err)
 	}

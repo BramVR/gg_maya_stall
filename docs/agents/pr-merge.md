@@ -70,7 +70,7 @@ repository contents; confirm it against the GitHub API when auditing:
 
 ```sh
 gh api repos/<owner>/<repo>/branches/main/protection \
-  -q '{enforce_admins: .enforce_admins.enabled, contexts: .required_status_checks.contexts}'
+  -q '{enforce_admins: .enforce_admins.enabled, contexts: .required_status_checks.contexts, allow_force_pushes: .allow_force_pushes.enabled, allow_deletions: .allow_deletions.enabled}'
 ```
 
 Required configuration:
@@ -82,23 +82,22 @@ Required configuration:
 
 `Live Maya Gate` reports `skipped` for non-live changes, which satisfies the
 required check; live-required changes wait on the `maya-live-proof` environment
-approval, so an unapproved live PR cannot merge. To (re)apply the settings:
+approval, so an unapproved live PR cannot merge. Add the required contexts and
+admin enforcement without replacing existing checks, review requirements, or
+push restrictions:
 
 ```sh
-gh api -X PUT repos/<owner>/<repo>/branches/main/protection --input - <<'JSON'
+gh api -X POST repos/<owner>/<repo>/branches/main/protection/required_status_checks/contexts --input - <<'JSON'
 {
-  "required_status_checks": {
-    "strict": false,
-    "contexts": ["Proof Manifest, Local Gates", "Live Maya Gate", "golangci-lint"]
-  },
-  "enforce_admins": true,
-  "required_pull_request_reviews": null,
-  "restrictions": null,
-  "allow_force_pushes": false,
-  "allow_deletions": false
+  "contexts": ["Proof Manifest, Local Gates", "Live Maya Gate", "golangci-lint"]
 }
 JSON
+gh api -X POST repos/<owner>/<repo>/branches/main/protection/enforce_admins
 ```
+
+These additive endpoints require branch protection to exist already. If the
+audit reports force pushes or deletion as enabled, disable those settings in
+the repository branch-protection rule without replacing its other controls.
 
 Policy path coverage is audited automatically: `scripts/proof/audit-live-policy.mjs`
 verifies every `proof/live-maya-policy.json` rule path still exists, every prefix

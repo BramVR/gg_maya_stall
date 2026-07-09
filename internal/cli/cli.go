@@ -305,7 +305,7 @@ Usage:
   maya-stall [--help]
   maya-stall version
   maya-stall init
-  maya-stall doctor [--host-config <path>] [--target-profile <name>] [--host <id>] [--scenario <name>]
+  maya-stall doctor [--host-config <path>] [--target-profile <name>] [--host <id>] [--scenario <name>] [--repair-trusted-plugin-allowlist]
   maya-stall run [--host-config <path>] [--target-profile <name>] [--host <id>] [--host-lock-wait <duration>|--host-lock-fail-fast] [--keep-on-failure|--stop-after <success|failure|always|never>] <scenario>
   maya-stall screenshot [--host-config <path>] [--target-profile <name>] [--host <id>]
   maya-stall record [--host-config <path>] [--target-profile <name>] [--host <id>]
@@ -418,10 +418,11 @@ func parseRunArgs(args []string) (runOptions, error) {
 }
 
 type doctorOptions struct {
-	HostConfig    string
-	TargetProfile string
-	HostPin       string
-	ScenarioName  string
+	HostConfig                   string
+	TargetProfile                string
+	HostPin                      string
+	ScenarioName                 string
+	RepairTrustedPluginAllowlist bool
 }
 
 func parseDoctorArgs(args []string) (doctorOptions, error) {
@@ -453,6 +454,8 @@ func parseDoctorArgs(args []string) (doctorOptions, error) {
 				return doctorOptions{}, newUsageError("--scenario needs a name")
 			}
 			options.ScenarioName = args[i]
+		case "--repair-trusted-plugin-allowlist":
+			options.RepairTrustedPluginAllowlist = true
 		default:
 			return doctorOptions{}, newUsageError("unknown doctor option %q", arg)
 		}

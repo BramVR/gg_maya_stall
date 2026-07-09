@@ -17,8 +17,11 @@ import (
 )
 
 const (
-	sessiondScenarioTimeout = 10 * time.Minute
-	sessiondCommandTimeout  = 2 * time.Minute
+	sessiondScenarioTimeout       = 10 * time.Minute
+	sessiondCommandTimeout        = 2 * time.Minute
+	sessiondRecoveryTimeout       = 3 * time.Minute
+	defaultSessiondRecoveryTask   = "MayaStallSessiondUI"
+	sessiondReasonCommandPortDown = "command-port-unreachable"
 )
 
 type ggMayaSessiondBroker struct {
@@ -65,6 +68,16 @@ type sessiondStatusResult struct {
 	ProcessAlive map[string]bool `json:"process_alive"`
 }
 
+type sessiondHealthResult struct {
+	OK                 bool
+	Reason             string
+	Detail             string
+	Hint               string
+	Recoverable        bool
+	Recovered          bool
+	InteractiveDesktop bool
+}
+
 func sessionBrokerForConfig(host mayaHostConfig) sessionBroker {
 	if host.Broker.isGGMayaSessiond() {
 		return ggMayaSessiondBroker{host: host}
@@ -107,6 +120,20 @@ func (broker ggMayaSessiondBroker) RunScenario(context runContext, scenario scen
 		return ScenarioResult{}, err
 	}
 	return ScenarioResult{Status: resultStatusPassed, Summary: "gg_mayasessiond Scenario completed"}, nil
+}
+
+func (broker ggMayaSessiondBroker) PrepareForRun() error {
+	health, err := broker.ensureRunPreflight()
+	if err != nil {
+		return fmt.Errorf("session-broker preflight failed: %w", err)
+	}
+	if health.OK {
+		return nil
+	}
+	if health.Reason != "" {
+		return fmt.Errorf("session-broker preflight failed (%s): %s", health.Reason, health.Detail)
+	}
+	return fmt.Errorf("session-broker preflight failed: %s", health.Detail)
 }
 
 func (broker ggMayaSessiondBroker) CaptureScreenshot(context runContext, request screenshotRequest) (visualEvidenceArtifact, error) {
@@ -368,6 +395,204 @@ func (broker ggMayaSessiondBroker) status() (sessiondStatusResult, error) {
 		return sessiondStatusResult{}, fmt.Errorf("parse gg_mayasessiond status JSON: %w", err)
 	}
 	return result, nil
+}
+
+func (broker ggMayaSessiondBroker) ensureReady() (sessiondHealthResult, error) {
+	health := broker.sessionBrokerHealth()
+	if health.OK || !health.Recoverable {
+		return health, nil
+	}
+	if err := broker.recoverSessionBroker(health.Reason); err != nil {
+		health.Detail = fmt.Sprintf("%s; automatic recovery failed: %v", health.Detail, err)
+		return health, nil
+	}
+	deadline := time.Now().Add(sessiondRecoveryTimeout)
+	var last sessiondHealthResult
+	for time.Now().Before(deadline) {
+		last = broker.sessionBrokerHealth()
+		if last.OK {
+			last.Recovered = true
+			return last, nil
+		}
+		time.Sleep(time.Second)
+	}
+	if last.Detail != "" {
+		health = last
+	}
+	health.Detail = fmt.Sprintf("%s; automatic recovery did not restore gg_mayasessiond commandPort health", health.Detail)
+	return health, nil
+}
+
+func (broker ggMayaSessiondBroker) ensureRunPreflight() (sessiondHealthResult, error) {
+	health := broker.runPreflightHealth()
+	if health.OK || !health.Recoverable {
+		return health, nil
+	}
+	if err := broker.recoverSessionBroker(health.Reason); err != nil {
+		health.Detail = fmt.Sprintf("%s; automatic recovery failed: %v", health.Detail, err)
+		return health, nil
+	}
+	deadline := time.Now().Add(sessiondRecoveryTimeout)
+	var last sessiondHealthResult
+	for time.Now().Before(deadline) {
+		last = broker.runPreflightHealth()
+		if last.OK {
+			last.Recovered = true
+			return last, nil
+		}
+		time.Sleep(time.Second)
+	}
+	if last.Detail != "" {
+		health = last
+	}
+	health.Detail = fmt.Sprintf("%s; automatic recovery did not restore gg_mayasessiond commandPort health", health.Detail)
+	return health, nil
+}
+
+func (broker ggMayaSessiondBroker) runPreflightHealth() sessiondHealthResult {
+	if err := broker.validate(); err != nil {
+		return unrecoverableSessiondHealth("broker-config-invalid", err.Error(), "Configure gg_mayasessiond paths in host config. See docs/setup/windows-maya-host.md#session-broker.")
+	}
+	status, err := broker.status()
+	if err != nil {
+		return unrecoverableSessiondHealth("sessiond-status-unavailable", err.Error(), "Start or repair gg_mayasessiond on this Maya Host. See docs/setup/windows-maya-host.md#session-broker.")
+	}
+	effectiveStatus := status.DerivedStatus
+	if effectiveStatus == "" {
+		effectiveStatus = status.State.Status
+	}
+	if effectiveStatus != "running" {
+		return unrecoverableSessiondHealth("sessiond-not-running", "gg_mayasessiond is not running", "Start the interactive gg_mayasessiond broker. See docs/setup/windows-maya-host.md#session-broker.")
+	}
+	if !status.State.CallServerReady {
+		return recoverableSessiondHealth("command-port-not-ready", "gg_mayasessiond commandPort call server is not ready", "Restart the interactive gg_mayasessiond broker so Maya commandPort localhost:7001 is reacquired. See docs/setup/windows-maya-host.md#session-broker.")
+	}
+	return sessiondHealthResult{OK: true, Detail: "gg_mayasessiond commandPort ready"}
+}
+
+func (broker ggMayaSessiondBroker) sessionBrokerHealth() sessiondHealthResult {
+	if err := broker.validate(); err != nil {
+		return unrecoverableSessiondHealth("broker-config-invalid", err.Error(), "Configure gg_mayasessiond paths in host config. See docs/setup/windows-maya-host.md#session-broker.")
+	}
+	doctorRaw, err := broker.runSessiondCLI(sessiondDoctorArgs(broker.host), sessiondCommandTimeout)
+	if err != nil {
+		return unrecoverableSessiondHealth("sessiond-unreachable", err.Error(), "Start or repair gg_mayasessiond on this Maya Host. See docs/setup/windows-maya-host.md#session-broker.")
+	}
+	var doctor sessiondDoctorOutput
+	if err := json.Unmarshal(doctorRaw, &doctor); err != nil {
+		return unrecoverableSessiondHealth("invalid-doctor-json", "invalid doctor JSON", "Update gg_mayasessiond or fix its CLI JSON output. See docs/setup/windows-maya-host.md#session-broker.")
+	}
+	if !doctor.OK {
+		detail := "gg_mayasessiond doctor failed"
+		if failing := failingSessiondDoctorChecks(doctor); len(failing) > 0 {
+			detail += ": " + strings.Join(failing, ", ")
+		}
+		return unrecoverableSessiondHealth("sessiond-doctor-failed", detail, "Repair the failing gg_mayasessiond doctor check. See docs/setup/windows-maya-host.md#session-broker.")
+	}
+	status, err := broker.status()
+	if err != nil {
+		return unrecoverableSessiondHealth("sessiond-status-unavailable", err.Error(), "Start or repair gg_mayasessiond on this Maya Host. See docs/setup/windows-maya-host.md#session-broker.")
+	}
+	effectiveStatus := status.DerivedStatus
+	if effectiveStatus == "" {
+		effectiveStatus = status.State.Status
+	}
+	if effectiveStatus != "running" {
+		return unrecoverableSessiondHealth("sessiond-not-running", "gg_mayasessiond is not running", "Start the interactive gg_mayasessiond broker. See docs/setup/windows-maya-host.md#session-broker.")
+	}
+	if !status.State.CallServerReady {
+		return recoverableSessiondHealth("command-port-not-ready", "gg_mayasessiond commandPort call server is not ready", "Restart the interactive gg_mayasessiond broker so Maya commandPort localhost:7001 is reacquired. See docs/setup/windows-maya-host.md#session-broker.")
+	}
+	processes, err := mayaProcessSessions(broker.host)
+	if err != nil {
+		return unrecoverableSessiondHealth("maya-process-unavailable", err.Error(), "Check Maya process state from the Windows host. See docs/setup/windows-maya-host.md#interactive-desktop.")
+	}
+	if len(processes) == 0 {
+		return unrecoverableSessiondHealth("maya-not-running", "maya.exe is not running", "Start gg_mayasessiond from the interactive Windows desktop. See docs/setup/windows-maya-host.md#interactive-desktop.")
+	}
+	for _, process := range processes {
+		if process.SessionID == 0 {
+			return unrecoverableSessiondHealth("interactive-desktop-unavailable", "maya.exe is running in Windows Services session 0", "Restart gg_mayasessiond from the interactive Windows desktop. See docs/setup/windows-maya-host.md#interactive-desktop.")
+		}
+	}
+	if err := broker.probeScriptExecute(); err != nil {
+		reason := "script-execute-unavailable"
+		hint := "Repair gg_mayasessiond script.execute access to the Maya Stall work root. See docs/setup/windows-maya-host.md#session-broker."
+		if isCommandPortError(err) {
+			reason = sessiondReasonCommandPortDown
+			hint = "Restart the interactive gg_mayasessiond broker so Maya commandPort localhost:7001 is reacquired. See docs/setup/windows-maya-host.md#session-broker."
+		}
+		if reason == sessiondReasonCommandPortDown {
+			return recoverableSessiondHealth(reason, err.Error(), hint)
+		}
+		return unrecoverableSessiondHealth(reason, err.Error(), hint)
+	}
+	return sessiondHealthResult{OK: true, Detail: "gg_mayasessiond reachable; Maya UI is interactive", InteractiveDesktop: true}
+}
+
+func recoverableSessiondHealth(reason string, detail string, hint string) sessiondHealthResult {
+	return sessiondHealthResult{Reason: reason, Detail: detail, Hint: hint, Recoverable: true}
+}
+
+func unrecoverableSessiondHealth(reason string, detail string, hint string) sessiondHealthResult {
+	return sessiondHealthResult{Reason: reason, Detail: detail, Hint: hint}
+}
+
+func isCommandPortError(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "commandport") || strings.Contains(message, "localhost:7001")
+}
+
+func (broker ggMayaSessiondBroker) recoverSessionBroker(reason string) error {
+	taskName := sessiondRecoveryTaskName(broker.host)
+	if _, err := runSSHCommandOutput(broker.host, encodedPowerShellCommand(sessiondRecoveryScript(broker.host, taskName, reason)), sessiondCommandTimeout+2*time.Minute); err != nil {
+		return fmt.Errorf("restart scheduled task %q: %w", taskName, err)
+	}
+	return nil
+}
+
+func sessiondRecoveryScript(host mayaHostConfig, taskName string, reason string) string {
+	return fmt.Sprintf(`$ErrorActionPreference = 'Stop'
+$taskName = %s
+$stopError = $null
+try {
+  Set-Location -LiteralPath %s
+  & %s -m gg_maya_sessiond.cli @('stop','--state-dir',%s,'--wait-timeout-seconds','120','--json') | Out-String | Write-Output
+} catch {
+  $stopError = $_.Exception.Message
+  Write-Output "gg_mayasessiond stop during recovery failed: $stopError"
+}
+$task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+if ($task.State -eq "Running") {
+  Stop-ScheduledTask -InputObject $task
+  $stopped = $false
+  for ($attempt = 0; $attempt -lt 90; $attempt++) {
+    Start-Sleep -Seconds 1
+    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+    if ($task.State -ne "Running") {
+      $stopped = $true
+      break
+    }
+  }
+  if (-not $stopped) {
+    throw "scheduled task $taskName did not stop before restart"
+  }
+}
+Start-ScheduledTask -InputObject $task
+[pscustomobject]@{ok=$true; task=$taskName; reason=%s; stopError=$stopError} | ConvertTo-Json -Compress`,
+		powerShellSingleQuoted(taskName),
+		powerShellSingleQuoted(host.Broker.Repo),
+		powerShellSingleQuoted(host.Broker.Python),
+		powerShellSingleQuoted(host.Broker.StateDir),
+		powerShellSingleQuoted(reason),
+	)
+}
+
+func sessiondRecoveryTaskName(host mayaHostConfig) string {
+	if task := strings.TrimSpace(host.Broker.RecoveryTask); task != "" {
+		return task
+	}
+	return defaultSessiondRecoveryTask
 }
 
 func (broker ggMayaSessiondBroker) scenarioWrapper(context runContext, scenario scenarioConfig) (string, error) {

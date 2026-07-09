@@ -47,6 +47,10 @@ type sessionBroker interface {
 	RunScenario(runContext, scenarioConfig) (ScenarioResult, error)
 }
 
+type sessionBrokerPreflighter interface {
+	PrepareForRun() error
+}
+
 type runRetentionBroker interface {
 	RetentionCapabilities() brokerCapabilities
 	RetainRun(runContext, runManifest, string) (retainedSessionRecord, error)

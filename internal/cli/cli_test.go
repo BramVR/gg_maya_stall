@@ -1646,6 +1646,7 @@ func TestDoctorReportsTrustedPluginAllowlistForConfiguredRoot(t *testing.T) {
 		`{"ProcessId":123,"SessionId":1,"Name":"maya.exe"}`,
 		`{"ok":true,"tool":"script.execute"}`,
 		`removed`,
+		`maya-version:2025`,
 		trustedPluginPrefsProbeOutput(`// Security
 optionVar -cat "Security"
  -sa "SafeModeAllowedlistPaths"
@@ -1681,6 +1682,7 @@ func TestDoctorFailsWhenTrustedPluginAllowlistMissesConfiguredRoot(t *testing.T)
 		`{"ProcessId":123,"SessionId":1,"Name":"maya.exe"}`,
 		`{"ok":true,"tool":"script.execute"}`,
 		`removed`,
+		`maya-version:2025`,
 		trustedPluginPrefsProbeOutput(`// Security
 optionVar -cat "Security"
  -sa "SafeModeAllowedlistPaths"
@@ -1741,6 +1743,7 @@ func TestDoctorRepairTrustedPluginAllowlistRequiresMayaStopped(t *testing.T) {
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		`maya-stall-ssh-ok`,
 		`writable`,
+		`maya-version:2025`,
 		`{"ProcessId":123,"SessionId":1,"Name":"maya.exe"}`,
 	})
 	hostConfigPath := writeTrustedPluginHostConfig(t, dir, sshPath, sftpPath)
@@ -1768,6 +1771,7 @@ optionVar -cat "Security"
 	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
 		`maya-stall-ssh-ok`,
 		`writable`,
+		`maya-version:2025`,
 		``,
 		trustedPluginPrefsProbeOutputChanged(repairedPrefs, true),
 	})
@@ -1779,6 +1783,7 @@ optionVar -cat "Security"
 		t.Fatalf("doctor exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
 	for _, want := range []string{
+		"maya-version: ok - 2025",
 		"trusted-plugin-allowlist: ok - Maya 2025 SafeModeAllowedlistPaths contains trustedPluginArtifactsRoot after repair",
 		"session-broker: ok - skipped during TrustCenter repair",
 		"visual-evidence: ok - skipped during TrustCenter repair",
@@ -2007,6 +2012,7 @@ func TestDoctorRealSSHVerifiesConnectivityAndWritableWorkRoot(t *testing.T) {
 		`{"ProcessId":123,"SessionId":1,"Name":"maya.exe"}`,
 		`{"ok":true,"tool":"script.execute"}`,
 		`removed`,
+		`maya-version:2025`,
 		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
 		``,
 		``,
@@ -2053,6 +2059,7 @@ hostPools:
 		"work-root: ok - writable",
 		"runtime: ok - ssh-sessiond",
 		"session-broker: ok - gg_mayasessiond",
+		"maya-version: ok - 2025",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("doctor output missing %q:\n%s", want, stdout.String())
@@ -2075,6 +2082,203 @@ hostPools:
 	}
 }
 
+func TestDoctorRealSSHProbesInstalledMayaVersion(t *testing.T) {
+	tests := []struct {
+		name         string
+		probeOutput  string
+		mayaVersions string
+		wantCode     int
+		wantOutput   string
+	}{
+		{
+			name:        "matching version",
+			probeOutput: "PowerShell noise\nmaya-version:2025",
+			wantCode:    0,
+			wantOutput:  "maya-version: ok - 2025 satisfies Scenario smoke",
+		},
+		{
+			name:        "mismatched version",
+			probeOutput: "maya-version:2024",
+			wantCode:    1,
+			wantOutput:  "maya-version: fail - Scenario smoke needs 2025; host has 2024",
+		},
+		{
+			name:        "point release version",
+			probeOutput: "maya-version:2016.5",
+			wantCode:    1,
+			wantOutput:  "maya-version: fail - Scenario smoke needs 2025; host has 2016.5",
+		},
+		{
+			name:        "no installed version",
+			probeOutput: "",
+			wantCode:    1,
+			wantOutput:  "maya-version: fail - no Autodesk Maya installation found on host",
+		},
+		{
+			name:         "config drift",
+			probeOutput:  "maya-version:2025",
+			mayaVersions: `        mayaVersions: ["2024"]` + "\n",
+			wantCode:     0,
+			wantOutput:   "maya-version: ok - 2025 satisfies Scenario smoke; config declares 2024 (drift)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := writeRunConfigFixture(t)
+			useFakeFFmpegLookPath(t, dir)
+			sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+				`maya-stall-ssh-ok`,
+				`writable`,
+				`{"ok":true,"checks":[]}`,
+				`{"derived_status":"running","state":{"status":"running","call_server_ready":true,"maya_alive":true,"mcp_alive":true}}`,
+				`{"ProcessId":123,"SessionId":1,"Name":"maya.exe"}`,
+				`{"ok":true,"tool":"script.execute"}`,
+				`removed`,
+				tt.probeOutput,
+				`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
+				``,
+				``,
+				writeFakeSSHBinaryOutput(t, dir, "recording-frames.zip", zipFrameArchive(t)),
+				`removed`,
+			})
+			sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+			hostConfigPath := writeRealSSHDoctorHostConfig(t, dir, sshPath, sftpPath, tt.mayaVersions)
+			var stdout, stderr bytes.Buffer
+
+			code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha", "--scenario", "smoke"}, &stdout, &stderr, dir, "test-version")
+			if code != tt.wantCode {
+				t.Fatalf("doctor exit code = %d, want %d; stdout: %s stderr: %s", code, tt.wantCode, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), tt.wantOutput) {
+				t.Fatalf("doctor output missing %q:\n%s", tt.wantOutput, stdout.String())
+			}
+		})
+	}
+}
+
+func TestInstalledMayaVersionsProbeRequiresMayaExecutable(t *testing.T) {
+	script := installedMayaVersionsProbeScript()
+	for _, want := range []string{
+		`^Maya(\d{4}(?:\.\d+)?)$`,
+		`^\d{4}(?:\.\d+)?$`,
+		`Join-Path $_.FullName 'bin\maya.exe'`,
+		`Join-Path ([string]$_.Value) 'bin\maya.exe'`,
+		`Test-Path -LiteralPath $mayaExe -PathType Leaf`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("installed Maya probe script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+func TestNormalizeMayaVersions(t *testing.T) {
+	got := normalizeMayaVersions([]string{" 2025 ", "2016.5", "invalid", "2025", "2016.5"})
+	want := []string{"2016.5", "2025"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("normalized Maya versions = %#v, want %#v", got, want)
+	}
+}
+
+func TestDoctorFakeHostUsesFakeInstalledMayaVersions(t *testing.T) {
+	tests := []struct {
+		name           string
+		hostInventory  string
+		wantCode       int
+		wantOutput     string
+		wantAbsent     string
+		configVersions string
+	}{
+		{
+			name:          "found matching install",
+			hostInventory: `        fakeInstalledMayaVersions: ["2025"]` + "\n",
+			wantCode:      0,
+			wantOutput:    "maya-version: ok - 2025 satisfies Scenario smoke",
+		},
+		{
+			name:          "missing install",
+			hostInventory: `        fakeInstalledMayaVersions: []` + "\n",
+			wantCode:      1,
+			wantOutput:    "maya-version: fail - no Autodesk Maya installation found on host",
+		},
+		{
+			name:          "mismatched install",
+			hostInventory: `        fakeInstalledMayaVersions: ["2024"]` + "\n",
+			wantCode:      1,
+			wantOutput:    "maya-version: fail - Scenario smoke needs 2025; host has 2024",
+		},
+		{
+			name:           "config drift",
+			configVersions: `        mayaVersions: ["2025"]` + "\n",
+			hostInventory:  `        fakeInstalledMayaVersions: ["2024"]` + "\n",
+			wantCode:       1,
+			wantOutput:     "maya-version: fail - Scenario smoke needs 2025; host has 2024; config declares 2025 (drift)",
+		},
+		{
+			name:           "config versions are inventory fallback",
+			configVersions: `        mayaVersions: ["2024"]` + "\n",
+			wantCode:       1,
+			wantOutput:     "maya-version: fail - Scenario smoke needs 2025; host has 2024",
+		},
+		{
+			name:           "config fallback satisfies scenario",
+			configVersions: `        mayaVersions: ["2025"]` + "\n",
+			wantCode:       0,
+			wantOutput:     "maya-version: ok - 2025 satisfies Scenario smoke",
+		},
+		{
+			name:          "fake inventory is normalized",
+			hostInventory: `        fakeInstalledMayaVersions: [" 2025 ", "invalid", "2025"]` + "\n",
+			wantCode:      0,
+			wantOutput:    "maya-version: ok - 2025 satisfies Scenario smoke",
+		},
+		{
+			name:           "config fallback is normalized",
+			configVersions: `        mayaVersions: [" 2025 ", "invalid", "2025"]` + "\n",
+			wantCode:       0,
+			wantOutput:     "maya-version: ok - 2025 satisfies Scenario smoke",
+		},
+		{
+			name:           "normalized config avoids false drift",
+			configVersions: `        mayaVersions: [" 2025 ", "invalid", "2025"]` + "\n",
+			hostInventory:  `        fakeInstalledMayaVersions: ["2025"]` + "\n",
+			wantCode:       0,
+			wantOutput:     "maya-version: ok - 2025 satisfies Scenario smoke",
+			wantAbsent:     "(drift)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := writeRunConfigFixture(t)
+			hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+			mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        ssh: ok
+        workRoot: writable
+        broker: ok
+`+tt.configVersions+tt.hostInventory)
+			var stdout, stderr bytes.Buffer
+
+			code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha", "--scenario", "smoke"}, &stdout, &stderr, dir, "test-version")
+			if code != tt.wantCode {
+				t.Fatalf("doctor exit code = %d, want %d; stdout: %s stderr: %s", code, tt.wantCode, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), tt.wantOutput) {
+				t.Fatalf("doctor output missing %q:\n%s", tt.wantOutput, stdout.String())
+			}
+			if tt.wantAbsent != "" && strings.Contains(stdout.String(), tt.wantAbsent) {
+				t.Fatalf("doctor output unexpectedly contains %q:\n%s", tt.wantAbsent, stdout.String())
+			}
+		})
+	}
+}
+
 func TestDoctorHostHealthTiesRealVisualEvidenceToSessionBroker(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	useFakeFFmpegLookPath(t, dir)
@@ -2087,6 +2291,7 @@ func TestDoctorHostHealthTiesRealVisualEvidenceToSessionBroker(t *testing.T) {
 		`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
 		`{"ok":true,"tool":"script.execute"}`,
 		`removed`,
+		`maya-version:2025`,
 		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
 		``,
 		``,
@@ -2154,7 +2359,7 @@ func TestDoctorGGMayaSessiondRejectsMayaInWindowsServicesSession(t *testing.T) {
 		`{"ok":true,"checks":[{"id":"state_dir","ok":true}]}`,
 		`{"derived_status":"running","state":{"status":"running","call_server_ready":true,"maya_alive":true,"mcp_alive":true}}`,
 		`{"ProcessId":1234,"SessionId":0,"Name":"maya.exe"}`,
-		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
+		`maya-version:2025`,
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
 	mustWriteFile(t, hostConfigPath, `version: 1
@@ -2196,8 +2401,8 @@ hostPools:
 	if err != nil {
 		t.Fatalf("read ssh log: %v", err)
 	}
-	if got := strings.Count(string(logBytes), "CALL "); got != 5 {
-		t.Fatalf("doctor should not probe viewport.capture after session-broker failure, got %d SSH calls:\n%s", got, string(logBytes))
+	if got := strings.Count(string(logBytes), "CALL "); got != 6 {
+		t.Fatalf("doctor should only probe Maya versions after session-broker failure, got %d SSH calls:\n%s", got, string(logBytes))
 	}
 }
 
@@ -2214,6 +2419,7 @@ func TestDoctorGGMayaSessiondVerifiesScriptExecuteProbe(t *testing.T) {
 		`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
 		`{"ok":true,"tool":"script.execute"}`,
 		``,
+		`maya-version:2025`,
 		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
 		``,
 		``,
@@ -2277,6 +2483,7 @@ func TestDoctorGGMayaSessiondRecoversCommandPortWithScheduledTask(t *testing.T) 
 		`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
 		`{"ok":true,"tool":"script.execute"}`,
 		`removed`,
+		`maya-version:2025`,
 		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
 		``,
 		``,
@@ -2383,6 +2590,7 @@ func TestDoctorGGMayaSessiondAcceptsRecordingScenario(t *testing.T) {
 		`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
 		`{"ok":true,"tool":"script.execute"}`,
 		`removed`,
+		`maya-version:2025`,
 		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}],"output":{"mime_type":"image/jpeg"}}`,
 		``,
 		``,
@@ -2439,6 +2647,7 @@ func TestDoctorGGMayaSessiondRequiresDesktopRecordingReadiness(t *testing.T) {
 		`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
 		`{"ok":true,"tool":"script.execute"}`,
 		`removed`,
+		`maya-version:2025`,
 		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}],"output":{"mime_type":"image/jpeg"}}`,
 	})
 	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
@@ -2491,22 +2700,22 @@ func TestDoctorGGMayaSessiondReportsDesktopRecordingPrerequisiteFailures(t *test
 	}{
 		{
 			name:       "remote capture root",
-			failIndex:  9,
+			failIndex:  10,
 			failDetail: "remote capture root is not writable",
 		},
 		{
 			name:       "interactive scheduled task",
-			failIndex:  11,
+			failIndex:  12,
 			failDetail: "schtasks.exe is required for interactive desktop capture",
 		},
 		{
 			name:       "desktop assemblies",
-			failIndex:  11,
+			failIndex:  12,
 			failDetail: "Windows PowerShell desktop assemblies System.Windows.Forms and System.Drawing are required",
 		},
 		{
 			name:       "compress archive",
-			failIndex:  11,
+			failIndex:  12,
 			failDetail: "Compress-Archive is not recognized",
 		},
 	}
@@ -2522,6 +2731,7 @@ func TestDoctorGGMayaSessiondReportsDesktopRecordingPrerequisiteFailures(t *test
 				`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
 				`{"ok":true,"tool":"script.execute"}`,
 				`removed`,
+				`maya-version:2025`,
 				`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}],"output":{"mime_type":"image/jpeg"}}`,
 				``,
 				``,
@@ -2740,6 +2950,7 @@ hostPools:
 	for _, want := range []string{
 		"host-lock: fail - alpha locked",
 		"session-broker: fail - skipped because Host Lock is not clear",
+		"maya-version: fail - skipped because Host Lock is not clear",
 		"visual-evidence: fail - skipped because Host Lock is not clear",
 	} {
 		if !strings.Contains(stdout.String(), want) {
@@ -3077,7 +3288,7 @@ hostPools:
 			args:       []string{"--scenario", "smoke"},
 			wantLayer:  "maya-version: fail",
 			wantDetail: "needs 2025",
-			wantHint:   "Install a compatible Autodesk Maya version or choose another Maya Host. See docs/setup/windows-maya-host.md#autodesk-maya.",
+			wantHint:   "Install Autodesk Maya 2025 or choose a Maya Host with 2025 installed; detected 2024. See docs/setup/windows-maya-host.md#autodesk-maya.",
 		},
 		{
 			name: "visual evidence",
@@ -6843,7 +7054,35 @@ hostPools:
         workRoot: writable
         broker: ok
         mayaVersions: ["2025"]
+        fakeInstalledMayaVersions: ["2025"]
         visualEvidence: true
+`)
+	return hostConfigPath
+}
+
+func writeRealSSHDoctorHostConfig(t *testing.T, dir string, sshPath string, sftpPath string, mayaVersions string) string {
+	t.Helper()
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`+mayaVersions+`        visualEvidence: true
 `)
 	return hostConfigPath
 }

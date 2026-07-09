@@ -13,7 +13,6 @@ const safeModeAllowedlistOptionVar = "SafeModeAllowedlistPaths"
 const trustedPluginPrefsJSONPrefix = "MAYA_STALL_TRUST_PREFS_JSON:"
 
 var safeModeAllowedlistOptionPattern = regexp.MustCompile(`(?m)-(sva|sa)\s+"SafeModeAllowedlistPaths"(?:\s+"((?:\\.|[^"])*)")?`)
-var mayaPrefsVersionPattern = regexp.MustCompile(`^[0-9]{4}(?:\.[0-9]+)?$`)
 
 type trustedPluginPrefsProbe struct {
 	Exists  bool   `json:"exists"`
@@ -108,7 +107,7 @@ func ensureTrustedPluginAllowlist(host mayaHostConfig, versions []string, repair
 }
 
 func validateMayaPrefsVersion(version string) error {
-	if !mayaPrefsVersionPattern.MatchString(version) {
+	if !mayaVersionPattern.MatchString(version) {
 		return fmt.Errorf("maya version %q is not a safe preferences path segment", version)
 	}
 	return nil

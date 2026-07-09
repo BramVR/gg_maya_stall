@@ -6,6 +6,7 @@ Release history starts with `v0.1.0`.
 
 ## Unreleased
 
+- Changed Repo Run Config and user host config decoding to reject unknown YAML fields while preserving standard merge-key anchors for shared SSH and broker defaults.
 - Fixed interactive desktop clicks timing out while their Windows scheduled task was still starting by allowing up to 30 seconds for completion.
 - Added Maya TrustCenter allowlist validation for configured `trustedPluginArtifactsRoot` values, plus an explicit `doctor --repair-trusted-plugin-allowlist` path that backs up Maya preferences before preserving and appending trusted locations.
 - Added `gg_mayasessiond` commandPort health preflight and recovery so `maya-stall doctor` and live runs restart the configured interactive recovery task before starting a Scenario, or fail at the `session-broker` layer with an actionable reason.

@@ -1743,6 +1743,7 @@ func TestDoctorRepairTrustedPluginAllowlistRequiresMayaStopped(t *testing.T) {
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		`maya-stall-ssh-ok`,
 		`writable`,
+		`maya-version:2025`,
 		`{"ProcessId":123,"SessionId":1,"Name":"maya.exe"}`,
 	})
 	hostConfigPath := writeTrustedPluginHostConfig(t, dir, sshPath, sftpPath)
@@ -1770,6 +1771,7 @@ optionVar -cat "Security"
 	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
 		`maya-stall-ssh-ok`,
 		`writable`,
+		`maya-version:2025`,
 		``,
 		trustedPluginPrefsProbeOutputChanged(repairedPrefs, true),
 	})
@@ -1781,6 +1783,7 @@ optionVar -cat "Security"
 		t.Fatalf("doctor exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
 	for _, want := range []string{
+		"maya-version: ok - 2025",
 		"trusted-plugin-allowlist: ok - Maya 2025 SafeModeAllowedlistPaths contains trustedPluginArtifactsRoot after repair",
 		"session-broker: ok - skipped during TrustCenter repair",
 		"visual-evidence: ok - skipped during TrustCenter repair",

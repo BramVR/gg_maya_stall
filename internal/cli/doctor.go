@@ -214,7 +214,11 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 		add(withSource(okCheck("runtime", resolved.Metadata.Profile), resolved.Metadata.Profile))
 	}
 	if options.RepairTrustedPluginAllowlist {
-		add(withSource(okCheck("maya-version", "skipped during TrustCenter repair"), "repair"))
+		if host.usesRealSSH() && lockCheck.Status != "ok" {
+			add(withBlockedBy(failedCheck("maya-version", "skipped because Host Lock is not clear", "Wait for the active Fresh Run or clear the stale Host Lock before probing installed Maya versions. See docs/setup/windows-maya-host.md#host-lock-and-retention."), "host-lock"))
+		} else {
+			add(mayaVersionLayer(options, host, scenario))
+		}
 		add(trustedPluginAllowlistDoctorLayer(host, scenario, true, sshOK, lockCheck.Status == "ok"))
 		add(withSource(okCheck("session-broker", "skipped during TrustCenter repair"), "repair"))
 		add(withSource(okCheck("visual-evidence", "skipped during TrustCenter repair"), "repair"))

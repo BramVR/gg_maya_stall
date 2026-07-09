@@ -40,7 +40,9 @@ Autodesk Maya versions in standard Autodesk install directories and registry
 install-path entries. It compares the discovered install inventory with the
 Scenario's Maya Version Requirement and reports drift when host config declares
 different `mayaVersions`. Config declarations are advisory for doctor; they are
-not treated as proof that Maya is installed.
+not treated as proof that Maya is installed. Fake hosts model installed
+inventory with `fakeInstalledMayaVersions`, falling back to `mayaVersions` and
+then the `2025` default when neither is set.
 
 Default checks stay fake/local. Real SSH is opt-in through host config outside
 the consuming repo. A real SSH Maya Host must configure

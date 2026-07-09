@@ -1865,6 +1865,18 @@ func TestDoctorFakeHostUsesFakeInstalledMayaVersions(t *testing.T) {
 			wantCode:       1,
 			wantOutput:     "maya-version: fail - Scenario smoke needs 2025; host has 2024; config declares 2025 (drift)",
 		},
+		{
+			name:           "config versions are inventory fallback",
+			configVersions: `        mayaVersions: ["2024"]` + "\n",
+			wantCode:       1,
+			wantOutput:     "maya-version: fail - Scenario smoke needs 2025; host has 2024",
+		},
+		{
+			name:           "config fallback satisfies scenario",
+			configVersions: `        mayaVersions: ["2025"]` + "\n",
+			wantCode:       0,
+			wantOutput:     "maya-version: ok - 2025 satisfies Scenario smoke",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2835,7 +2847,6 @@ hostPools:
     hosts:
       - id: alpha
         mayaVersions: ["2024"]
-        fakeInstalledMayaVersions: ["2024"]
 `,
 			args:       []string{"--scenario", "smoke"},
 			wantLayer:  "maya-version: fail",

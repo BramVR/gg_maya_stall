@@ -484,6 +484,9 @@ func installedMayaVersionsForDoctor(host mayaHostConfig) ([]string, error) {
 	if host.FakeInstalledMayaVersions != nil {
 		return host.FakeInstalledMayaVersions, nil
 	}
+	if len(host.MayaVersions) > 0 {
+		return host.MayaVersions, nil
+	}
 	return []string{"2025"}, nil
 }
 

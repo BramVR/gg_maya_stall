@@ -48,6 +48,12 @@ With `broker.type: gg-mayasessiond`, `run` stages declared payloads under
 workspace, executes it through `gg_maya_sessiond.cli call ... script.execute`,
 downloads declared outputs, and captures configured Visual Evidence from the
 interactive Windows desktop session.
+Before staging payloads, `run` checks the broker status for commandPort
+readiness. If the commandPort layer is unhealthy, it restarts the configured
+interactive recovery task (`broker.recoveryTask`, default
+`MayaStallSessiondUI`) and retries the status preflight; if recovery is
+unavailable or still unhealthy, the command fails at the `session-broker`
+preflight layer instead of starting a Scenario.
 If the selected Maya Host config sets `trustedPluginArtifactsRoot`, `run` also
 copies declared `pluginArtifacts` to that stable host-managed root and exposes
 it to Scenario scripts as `MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT`.

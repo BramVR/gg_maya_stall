@@ -65,13 +65,14 @@ type mayaHostConfig struct {
 }
 
 type brokerConfig struct {
-	FakeStatus string `yaml:"-"`
-	Structured bool   `yaml:"-"`
-	Type       string `yaml:"type"`
-	StateDir   string `yaml:"stateDir"`
-	Python     string `yaml:"python"`
-	Repo       string `yaml:"repo"`
-	MCPSource  string `yaml:"mcpSource"`
+	FakeStatus   string `yaml:"-"`
+	Structured   bool   `yaml:"-"`
+	Type         string `yaml:"type"`
+	StateDir     string `yaml:"stateDir"`
+	Python       string `yaml:"python"`
+	Repo         string `yaml:"repo"`
+	MCPSource    string `yaml:"mcpSource"`
+	RecoveryTask string `yaml:"recoveryTask"`
 }
 
 func (config *brokerConfig) UnmarshalYAML(value *yaml.Node) error {

@@ -247,6 +247,7 @@ hostPools:
           python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
           repo: C:/maya-stall/tools/gg_mayasessiond
           mcpSource: C:/maya-stall/tools/GG_MayaMCP
+          recoveryTask: MayaStallSessiondUI
         mayaVersions: ["2025"]
         visualEvidence: true
 ```
@@ -259,8 +260,10 @@ maya-stall doctor --host-config ci-hosts.yaml --target-profile ci --host maya-wi
 ```
 
 Start `gg_mayasessiond` with script execution allowed for staged run wrappers,
-for example `--mcp-script-dirs C:/maya-stall/runs`. The full live smoke is
-opt-in:
+for example `--mcp-script-dirs C:/maya-stall/runs`. The configured
+`recoveryTask` lets doctor and run preflight restart the documented interactive
+Session Broker task when the Maya commandPort layer is unhealthy. The full live
+smoke is opt-in:
 
 ```sh
 MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run)Smoke' -count=1

@@ -209,6 +209,14 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 		report.Runtime = resolved.Metadata
 		add(withSource(okCheck("runtime", resolved.Metadata.Profile), resolved.Metadata.Profile))
 	}
+	add(mayaVersionLayer(options, host, scenario))
+	if options.RepairTrustedPluginAllowlist {
+		add(trustedPluginAllowlistDoctorLayer(host, scenario, true, sshOK, lockCheck.Status == "ok"))
+		add(withSource(okCheck("session-broker", "skipped during TrustCenter repair"), "repair"))
+		add(withSource(okCheck("visual-evidence", "skipped during TrustCenter repair"), "repair"))
+		add(withSource(okCheck("desktop-control", "skipped during TrustCenter repair"), "repair"))
+		return
+	}
 	brokerInvalidReason := host.Broker.invalidReason()
 	if runtimeErr != nil {
 		brokerInvalidReason = runtimeErr.Error()
@@ -252,8 +260,7 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 	} else {
 		add(withSource(statusLayer("session-broker", host.Broker.fakeStatus(), "reachable", []string{"", "ok", "healthy", "reachable"}, "Start or repair the Session Broker on this Maya Host. See docs/setup/windows-maya-host.md#session-broker."), "fake"))
 	}
-	add(mayaVersionLayer(options, host, scenario))
-	add(trustedPluginAllowlistDoctorLayer(host, scenario, options.RepairTrustedPluginAllowlist, sshOK, lockCheck.Status == "ok"))
+	add(trustedPluginAllowlistDoctorLayer(host, scenario, false, sshOK, lockCheck.Status == "ok"))
 	if host.VisualEvidence != nil && !*host.VisualEvidence {
 		add(withSource(failedCheck("visual-evidence", "unavailable", "Enable screenshot capture through the Session Broker. See docs/setup/windows-maya-host.md#visual-evidence."), "config"))
 	} else if brokerInvalidReason != "" {

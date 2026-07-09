@@ -12,7 +12,7 @@ const trustedPluginAllowlistLayerID = "trusted-plugin-allowlist"
 const safeModeAllowedlistOptionVar = "SafeModeAllowedlistPaths"
 const trustedPluginPrefsJSONPrefix = "MAYA_STALL_TRUST_PREFS_JSON:"
 
-var safeModeAllowedlistPathPattern = regexp.MustCompile(`(?m)-sva\s+"SafeModeAllowedlistPaths"\s+"((?:\\.|[^"])*)"`)
+var safeModeAllowedlistOptionPattern = regexp.MustCompile(`(?m)-(sva|sa)\s+"SafeModeAllowedlistPaths"(?:\s+"((?:\\.|[^"])*)")?`)
 var mayaPrefsVersionPattern = regexp.MustCompile(`^[0-9]{4}(?:\.[0-9]+)?$`)
 
 type trustedPluginPrefsProbe struct {
@@ -180,11 +180,18 @@ func prefsAllowlistContainsRoot(content string, root string) bool {
 
 func parseSafeModeAllowedlistPaths(content string) []string {
 	var paths []string
-	for _, match := range safeModeAllowedlistPathPattern.FindAllStringSubmatch(content, -1) {
+	for _, match := range safeModeAllowedlistOptionPattern.FindAllStringSubmatch(content, -1) {
 		if len(match) < 2 {
 			continue
 		}
-		paths = append(paths, unescapeMELString(match[1]))
+		switch match[1] {
+		case "sa":
+			paths = nil
+		case "sva":
+			if len(match) >= 3 {
+				paths = append(paths, unescapeMELString(match[2]))
+			}
+		}
 	}
 	return paths
 }
@@ -271,10 +278,14 @@ if ($exists) {
   return
 }
 $paths = New-Object System.Collections.Generic.List[string]
-foreach ($match in [regex]::Matches($content, '-sva\s+"SafeModeAllowedlistPaths"\s+"((?:\\.|[^"])*)"')) {
-  $entry = (($match.Groups[1].Value -replace '\\"','"') -replace '\\\\','\')
-  if ($entry -and -not $paths.Contains($entry)) {
-    $paths.Add($entry)
+foreach ($match in [regex]::Matches($content, '-(sva|sa)\s+"SafeModeAllowedlistPaths"(?:\s+"((?:\\.|[^"])*)")?')) {
+  if ($match.Groups[1].Value -eq 'sa') {
+    $paths.Clear()
+  } else {
+    $entry = (($match.Groups[2].Value -replace '\\"','"') -replace '\\\\','\')
+    if ($entry -and -not $paths.Contains($entry)) {
+      $paths.Add($entry)
+    }
   }
 }
 $wanted = Normalize-MayaStallPath $root

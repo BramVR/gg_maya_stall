@@ -62,6 +62,51 @@ run-scoped desktop screenshot, and clears a controlled modal with
 Non-live-only changes may merge with local gates plus a manifest saying
 `live_maya_required=false`.
 
+## Branch Protection
+
+The live Maya proof gate is only non-skippable when GitHub branch protection
+marks the proof checks as required on `main`. This cannot be verified from the
+repository contents; confirm it against the GitHub API when auditing:
+
+```sh
+gh api repos/<owner>/<repo>/branches/main/protection \
+  -q '{enforce_admins: .enforce_admins.enabled, contexts: .required_status_checks.contexts, allow_force_pushes: .allow_force_pushes.enabled, allow_deletions: .allow_deletions.enabled}'
+```
+
+Required configuration:
+
+- Required status checks on `main`: `Proof Manifest, Local Gates`,
+  `Live Maya Gate`, and `golangci-lint`.
+- `enforce_admins` enabled, so the gate cannot be bypassed by direct pushes.
+- No force pushes or branch deletion.
+
+`Live Maya Gate` reports `skipped` for non-live changes, which satisfies the
+required check; live-required changes wait on the `maya-live-proof` environment
+approval, so an unapproved live PR cannot merge. Add the required contexts and
+admin enforcement without replacing existing checks, review requirements, or
+push restrictions:
+
+```sh
+gh api -X POST repos/<owner>/<repo>/branches/main/protection/required_status_checks/contexts --input - <<'JSON'
+{
+  "contexts": ["Proof Manifest, Local Gates", "Live Maya Gate", "golangci-lint"]
+}
+JSON
+gh api -X POST repos/<owner>/<repo>/branches/main/protection/enforce_admins
+```
+
+These additive endpoints require branch protection to exist already. If the
+audit reports force pushes or deletion as enabled, disable those settings in
+the repository branch-protection rule without replacing its other controls.
+
+Policy path coverage is audited automatically: `scripts/proof/audit-live-policy.mjs`
+verifies every `proof/live-maya-policy.json` rule path still exists, every prefix
+still matches tracked files, and every file under `cmd/`, `internal/`,
+`scripts/proof/`, and `scripts/windows/` is covered by some rule. The audit runs
+in the `Proof Script Tests` step on every PR; run it locally with
+`node scripts/proof/audit-live-policy.mjs`. File drift it reports as follow-up
+issues instead of weakening the policy.
+
 ## Repository Setup
 
 Automation expects a protected GitHub Environment named `maya-live-proof`.

@@ -54,6 +54,20 @@ test("audit fails when a live-sensitive file escapes every rule", () => {
   assert.match(result.stderr, /live-sensitive file internal\/transport\/ssh\.go is not covered by any policy rule/);
 });
 
+test("audit checks Git-quoted live-sensitive filenames", () => {
+  const dir = fixtureRepo({
+    "internal/cli/run.go": "package cli\n",
+    "internal/transport/café.go": "package transport\n",
+  });
+  const policyPath = writePolicy(dir, [
+    { id: "live-product-source", reason: "live source", prefixes: ["internal/cli/"] },
+  ]);
+
+  const result = runAudit(dir, policyPath);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /live-sensitive file internal\/transport\/café\.go is not covered by any policy rule/);
+});
+
 test("audit passes for a covered fixture repo", () => {
   const dir = fixtureRepo({
     "internal/cli/run.go": "package cli\n",

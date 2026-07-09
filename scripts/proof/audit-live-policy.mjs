@@ -86,8 +86,8 @@ function matchesAnyRule(rules, file) {
 }
 
 function listTrackedFiles(repoRoot) {
-  const output = execFileSync("git", ["ls-files"], { cwd: repoRoot, encoding: "utf8" });
-  return output.split("\n").map((line) => line.trim()).filter(Boolean);
+  const output = execFileSync("git", ["ls-files", "-z"], { cwd: repoRoot, encoding: "utf8" });
+  return output.split("\0").filter(Boolean);
 }
 
 function parseArgs(argv) {

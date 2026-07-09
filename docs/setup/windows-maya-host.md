@@ -194,8 +194,17 @@ Host-admin steps:
 - Create or allow Maya Stall to create the stable directory.
 - In Maya security preferences for the interactive Windows account, add that
   exact directory as a trusted plug-in location.
+- Or, after approving the host security-policy change, run
+  `maya-stall doctor --host-config <host-config.yaml> --target-profile <profile> --host <host-id> --repair-trusted-plugin-allowlist`.
+  The repair path backs up existing Maya preferences, preserves existing
+  trusted locations, appends only the configured root, requires Maya to be
+  stopped before repair, requires the target Maya version to have an existing
+  preferences file, and requires a clean Maya restart before proof.
 - Keep the value in host config, CI secret material, or runner-owned config,
   not in `.maya-stall.yaml`.
+- Declare the Maya version in host config `mayaVersions` or Scenario
+  `mayaVersion`; Maya Stall uses that version to locate the durable TrustCenter
+  preferences directory.
 - Keep the root separate from the run workspace tree; Maya Stall rejects roots
   that are `workRoot`, under `workRoot/runs`, or broad enough to contain
   `workRoot/runs`.
@@ -206,6 +215,9 @@ Run behavior:
   `workRoot/runs/<run-id>/payload/`.
 - Only declared `payload.pluginArtifacts` entries are also copied to
   `trustedPluginArtifactsRoot/<repo-relative-path>`.
+- Before staging Plugin Artifacts, `maya-stall run` validates that Maya's
+  durable `SafeModeAllowedlistPaths` preference contains
+  `trustedPluginArtifactsRoot`; missing trust fails before Scenario execution.
 - Each declared trusted destination is removed before upload, so directory
   Plugin Artifacts do not retain stale files.
 - Scenario scripts receive `MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT` and can

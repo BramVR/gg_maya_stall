@@ -30,7 +30,7 @@ support dry-run paths where available.
 ```text
 maya-stall version
 maya-stall init
-maya-stall doctor [--host-config <path>] [--target-profile <name>] [--host <id>] [--scenario <name>]
+maya-stall doctor [--host-config <path>] [--target-profile <name>] [--host <id>] [--scenario <name>] [--repair-trusted-plugin-allowlist]
 ```
 
 See [version](commands/version.md), [init](commands/init.md), and
@@ -122,9 +122,11 @@ opt-in real SSH transport. Keep it in user config, CI secrets, or runner-owned
 files rather than in the consuming repo.
 For real Maya plug-in runs, host config may also set
 `trustedPluginArtifactsRoot` to a stable Maya Host directory that the operator
-has added to Maya's trusted plug-in locations. `maya-stall run` copies only
-declared `pluginArtifacts` there and exposes the root as
-`MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT`.
+has added to Maya's trusted plug-in locations. `maya-stall doctor` validates
+that Maya's durable `SafeModeAllowedlistPaths` preference contains that root,
+and `maya-stall run` fails before staging Plugin Artifacts when the baseline is
+missing. `maya-stall run` copies only declared `pluginArtifacts` there and
+exposes the root as `MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT`.
 
 ## Exit Behavior
 

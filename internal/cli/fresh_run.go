@@ -127,6 +127,9 @@ func (run *freshRunLifecycle) setup() error {
 			return err
 		}
 	}
+	if err := ensureTrustedPluginArtifactsAllowlistedForRun(host.Config, scenario); err != nil {
+		return err
+	}
 
 	runID := run.runtime.Now().UTC().Format("20060102T150405.000000000Z")
 	workspace, err := newRunWorkspace(run.repoDir, runID, host.Config.WorkRoot, scenario.ScenarioResultPath)

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 // Audits proof/live-maya-policy.json against the working tree so policy
 // coverage cannot silently drift away from the live-sensitive surface:
@@ -19,7 +20,7 @@ const liveSensitiveRoots = [
 ];
 
 const args = parseArgs(process.argv.slice(2));
-const root = path.resolve(args.root ?? new URL("../..", import.meta.url).pathname);
+const root = path.resolve(args.root ?? fileURLToPath(new URL("../..", import.meta.url)));
 const policyPath = path.resolve(root, args.policy ?? path.join("proof", "live-maya-policy.json"));
 
 const violations = auditLivePolicy(root, policyPath);

@@ -2,10 +2,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const root = path.resolve(new URL("../..", import.meta.url).pathname);
+const root = path.resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const auditScript = path.join(root, "scripts", "proof", "audit-live-policy.mjs");
 
 test("checked-in policy covers the live-sensitive surface of this repo", () => {
@@ -95,13 +96,38 @@ test("audit reports missing option values without a stack trace", () => {
   assert.equal(result.stderr, "live-policy-audit: --root needs a value\n");
 });
 
+test("audit resolves its default root from a URL-escaped checkout path", () => {
+  const policy = JSON.stringify({
+    schema_version: 1,
+    rules: [{
+      id: "live-product-source",
+      reason: "live source",
+      prefixes: ["internal/cli/", "scripts/proof/"],
+    }],
+  }, null, 2);
+  const dir = fixtureRepo({
+    "internal/cli/run.go": "package cli\n",
+    "proof/live-maya-policy.json": `${policy}\n`,
+    "scripts/proof/audit-live-policy.mjs": fs.readFileSync(auditScript, "utf8"),
+  }, "live policy audit café-");
+
+  const copiedAudit = path.join(dir, "scripts", "proof", "audit-live-policy.mjs");
+  const result = runAuditScript(copiedAudit, []);
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /live-policy-audit: ok/);
+});
+
 function runAudit(dir, policyPath) {
   return runAuditArgs(["--root", dir, "--policy", policyPath]);
 }
 
 function runAuditArgs(args) {
+  return runAuditScript(auditScript, args);
+}
+
+function runAuditScript(script, args) {
   try {
-    const stdout = execFileSync("node", [auditScript, ...args], {
+    const stdout = execFileSync("node", [script, ...args], {
       cwd: root,
       encoding: "utf8",
     });
@@ -117,8 +143,8 @@ function writePolicy(dir, rules) {
   return policyPath;
 }
 
-function fixtureRepo(files) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "live-policy-audit-"));
+function fixtureRepo(files, prefix = "live-policy-audit-") {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   for (const [relative, content] of Object.entries(files)) {
     const filePath = path.join(dir, relative);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });

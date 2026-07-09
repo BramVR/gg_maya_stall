@@ -83,6 +83,12 @@ func (run *freshRunLifecycle) setup() error {
 		return err
 	}
 	run.scenario = scenario
+	if err := validateScenarioInputs(run.repoDir, scenario); err != nil {
+		return err
+	}
+	if err := validateScenarioRemotePaths(scenario.Config); err != nil {
+		return err
+	}
 	host, err := selectHostForRun(run.repoDir, run.options)
 	if err != nil {
 		return err
@@ -92,6 +98,9 @@ func (run *freshRunLifecycle) setup() error {
 	}
 	run.host = host
 	run.releaseHostLock = true
+	if err := validateTrustedPluginArtifactsRoot(host.Config); err != nil {
+		return err
+	}
 
 	resolved, err := resolveRuntimeForHost(host.Config)
 	if err != nil {
@@ -111,6 +120,14 @@ func (run *freshRunLifecycle) setup() error {
 		return err
 	}
 	if err := rejectUnsupportedEvidenceConfig(run.runtime.Broker, scenario.Config); err != nil {
+		return err
+	}
+	if preflighter, ok := run.runtime.Broker.(sessionBrokerPreflighter); ok {
+		if err := preflighter.PrepareForRun(); err != nil {
+			return err
+		}
+	}
+	if err := ensureTrustedPluginArtifactsAllowlistedForRun(host.Config, scenario); err != nil {
 		return err
 	}
 

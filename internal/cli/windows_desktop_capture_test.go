@@ -107,6 +107,8 @@ func TestWindowsDesktopClickUsesInteractiveScheduledTaskAndUser32(t *testing.T) 
 		"user32.dll",
 		"SetCursorPos(12, 34)",
 		"mouse_event",
+		"$deadline = (Get-Date).AddSeconds(30)",
+		"while ((Get-Date) -lt $deadline)",
 		"Remove-Item -Recurse -Force",
 		"interactive desktop session is logged in",
 	} {

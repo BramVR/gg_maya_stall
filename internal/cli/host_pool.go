@@ -61,31 +61,49 @@ type mayaHostConfig struct {
 	TrustedPluginArtifactsRoot string       `yaml:"trustedPluginArtifactsRoot"`
 	Broker                     brokerConfig `yaml:"broker"`
 	MayaVersions               []string     `yaml:"mayaVersions"`
+	FakeInstalledMayaVersions  []string     `yaml:"fakeInstalledMayaVersions"`
 	VisualEvidence             *bool        `yaml:"visualEvidence"`
 }
 
 type brokerConfig struct {
-	FakeStatus string `yaml:"-"`
-	Structured bool   `yaml:"-"`
-	Type       string `yaml:"type"`
-	StateDir   string `yaml:"stateDir"`
-	Python     string `yaml:"python"`
-	Repo       string `yaml:"repo"`
-	MCPSource  string `yaml:"mcpSource"`
+	FakeStatus   string `yaml:"-"`
+	Structured   bool   `yaml:"-"`
+	Type         string `yaml:"type"`
+	StateDir     string `yaml:"stateDir"`
+	Python       string `yaml:"python"`
+	Repo         string `yaml:"repo"`
+	MCPSource    string `yaml:"mcpSource"`
+	RecoveryTask string `yaml:"recoveryTask"`
 }
 
 func (config *brokerConfig) UnmarshalYAML(value *yaml.Node) error {
 	if value.Kind == yaml.ScalarNode {
-		config.FakeStatus = value.Value
+		*config = brokerConfig{FakeStatus: value.Value}
 		return nil
 	}
-	type brokerConfigAlias brokerConfig
-	var decoded brokerConfigAlias
+	if err := rejectUnknownYAMLMappingFields(value, brokerConfigYAMLFields, "cli.brokerConfig"); err != nil {
+		return err
+	}
+	var decoded struct {
+		Type         string `yaml:"type"`
+		StateDir     string `yaml:"stateDir"`
+		Python       string `yaml:"python"`
+		Repo         string `yaml:"repo"`
+		MCPSource    string `yaml:"mcpSource"`
+		RecoveryTask string `yaml:"recoveryTask"`
+	}
 	if err := value.Decode(&decoded); err != nil {
 		return err
 	}
-	*config = brokerConfig(decoded)
-	config.Structured = true
+	*config = brokerConfig{
+		Structured:   true,
+		Type:         decoded.Type,
+		StateDir:     decoded.StateDir,
+		Python:       decoded.Python,
+		Repo:         decoded.Repo,
+		MCPSource:    decoded.MCPSource,
+		RecoveryTask: decoded.RecoveryTask,
+	}
 	return nil
 }
 
@@ -139,16 +157,117 @@ type sshConfig struct {
 
 func (config *sshConfig) UnmarshalYAML(value *yaml.Node) error {
 	if value.Kind == yaml.ScalarNode {
-		config.FakeStatus = value.Value
+		*config = sshConfig{FakeStatus: value.Value}
 		return nil
 	}
-	type sshConfigAlias sshConfig
-	var decoded sshConfigAlias
+	if err := rejectUnknownYAMLMappingFields(value, sshConfigYAMLFields, "cli.sshConfig"); err != nil {
+		return err
+	}
+	var decoded struct {
+		Host         string `yaml:"host"`
+		User         string `yaml:"user"`
+		Port         int    `yaml:"port"`
+		IdentityFile string `yaml:"identityFile"`
+		Binary       string `yaml:"binary"`
+		SFTPBinary   string `yaml:"sftpBinary"`
+		SFTPTimeout  string `yaml:"sftpTimeout"`
+	}
 	if err := value.Decode(&decoded); err != nil {
 		return err
 	}
-	*config = sshConfig(decoded)
+	*config = sshConfig{
+		Host:         decoded.Host,
+		User:         decoded.User,
+		Port:         decoded.Port,
+		IdentityFile: decoded.IdentityFile,
+		Binary:       decoded.Binary,
+		SFTPBinary:   decoded.SFTPBinary,
+		SFTPTimeout:  decoded.SFTPTimeout,
+	}
 	return nil
+}
+
+var brokerConfigYAMLFields = map[string]struct{}{
+	"type":         {},
+	"stateDir":     {},
+	"python":       {},
+	"repo":         {},
+	"mcpSource":    {},
+	"recoveryTask": {},
+}
+
+var sshConfigYAMLFields = map[string]struct{}{
+	"host":         {},
+	"user":         {},
+	"port":         {},
+	"identityFile": {},
+	"binary":       {},
+	"sftpBinary":   {},
+	"sftpTimeout":  {},
+}
+
+func rejectUnknownYAMLMappingFields(value *yaml.Node, known map[string]struct{}, typeName string) error {
+	return rejectUnknownYAMLMappingFieldsWithStack(value, known, typeName, make(map[*yaml.Node]bool), make(map[*yaml.Node]bool))
+}
+
+func rejectUnknownYAMLMappingFieldsWithStack(value *yaml.Node, known map[string]struct{}, typeName string, visiting, validated map[*yaml.Node]bool) error {
+	if value.Kind != yaml.MappingNode {
+		return nil
+	}
+	if validated[value] {
+		return nil
+	}
+	if visiting[value] {
+		return fmt.Errorf("line %d: cyclic YAML merge in type %s", value.Line, typeName)
+	}
+	visiting[value] = true
+	defer delete(visiting, value)
+	for i := 0; i < len(value.Content); i += 2 {
+		key := value.Content[i]
+		if isYAMLMergeKey(key) {
+			if err := rejectUnknownYAMLMergeFields(value.Content[i+1], known, typeName, visiting, validated); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, ok := known[key.Value]; !ok {
+			return fmt.Errorf("line %d: field %s not found in type %s", key.Line, key.Value, typeName)
+		}
+	}
+	validated[value] = true
+	return nil
+}
+
+func isYAMLMergeKey(key *yaml.Node) bool {
+	return key.Kind == yaml.ScalarNode && key.Value == "<<" &&
+		(key.Tag == "" || key.Tag == "!" || key.ShortTag() == "!!merge")
+}
+
+func rejectUnknownYAMLMergeFields(value *yaml.Node, known map[string]struct{}, typeName string, visiting, validated map[*yaml.Node]bool) error {
+	if value.Kind == yaml.AliasNode {
+		value = value.Alias
+	}
+	if value == nil {
+		return nil
+	}
+	if value.Kind == yaml.SequenceNode {
+		if validated[value] {
+			return nil
+		}
+		if visiting[value] {
+			return fmt.Errorf("line %d: cyclic YAML merge in type %s", value.Line, typeName)
+		}
+		visiting[value] = true
+		defer delete(visiting, value)
+		for _, item := range value.Content {
+			if err := rejectUnknownYAMLMergeFields(item, known, typeName, visiting, validated); err != nil {
+				return err
+			}
+		}
+		validated[value] = true
+		return nil
+	}
+	return rejectUnknownYAMLMappingFieldsWithStack(value, known, typeName, visiting, validated)
 }
 
 func selectHostForRun(repoDir string, options runOptions) (hostRuntime, error) {
@@ -212,7 +331,7 @@ func loadUserHostConfig(path string) (userHostConfig, error) {
 		return userHostConfig{}, err
 	}
 	var config userHostConfig
-	if err := yaml.Unmarshal(content, &config); err != nil {
+	if err := decodeKnownYAMLFields(content, &config); err != nil {
 		return userHostConfig{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if config.Version != 1 {

@@ -16,6 +16,7 @@ maya-stall doctor --scenario smoke
 maya-stall doctor --host-config ci-hosts.yaml --target-profile ci
 maya-stall doctor --host-config ci-hosts.yaml --target-profile ci --host maya-win-01
 maya-stall doctor --host-config ci-hosts.yaml --target-profile ci --host maya-win-01 --scenario smoke
+maya-stall doctor --host-config ci-hosts.yaml --target-profile ci --host maya-win-01 --repair-trusted-plugin-allowlist
 ```
 
 ## What It Checks
@@ -32,8 +33,20 @@ Doctor reports the layer that failed and a repair hint where possible:
 - work root readiness;
 - Session Broker readiness;
 - Maya version compatibility;
+- Maya TrustCenter/Safe Mode trusted plug-in allowlist for a configured
+  `trustedPluginArtifactsRoot`;
 - Visual Evidence support;
 - Host Lock state.
+
+The `maya-version` layer probes real Windows Maya Hosts over SSH for installed
+Autodesk Maya versions in standard Autodesk install directories and registry
+install-path entries, requiring an existing `bin/maya.exe`. It compares the
+discovered install inventory with the Scenario's Maya Version Requirement and
+reports drift when host config declares
+different `mayaVersions`. Config declarations are advisory for doctor; they are
+not treated as proof that Maya is installed. Fake hosts model installed
+inventory with `fakeInstalledMayaVersions`, falling back to `mayaVersions` and
+then the `2025` default when neither is set.
 
 Default checks stay fake/local. Real SSH is opt-in through host config outside
 the consuming repo. A real SSH Maya Host must configure
@@ -48,6 +61,24 @@ probe under the configured work root, and fails if Maya is running in Windows
 Services session `0`. Visual Evidence readiness is reported from those same
 Session Broker and recording prerequisites, not from the static host config or
 viewport capture alone.
+
+If the broker reports a commandPort-unhealthy state, doctor restarts the
+configured interactive recovery task (`broker.recoveryTask`, default
+`MayaStallSessiondUI`) and re-runs the broker probes before reporting success or
+a layer-specific `session-broker` failure.
+
+When a real SSH Maya Host sets `trustedPluginArtifactsRoot`, doctor checks the
+interactive Windows account's durable Maya `SafeModeAllowedlistPaths` preference
+for the selected Maya version. Set `mayaVersions` in host config or
+`mayaVersion` on the Scenario so Maya Stall can locate the right preferences
+directory. A missing entry reports
+`trusted-plugin-allowlist: fail` with a repair hint instead of leaving the next
+plug-in load to hang behind Maya's security modal. The repair path is opt-in:
+`--repair-trusted-plugin-allowlist` backs up existing Maya preferences before
+appending a preserved allowlist plus the configured root. Stop Maya before
+repair, make sure the target Maya version has been launched at least once so
+its preferences file exists, then restart it after repair so the durable
+preference is read by a clean interactive session.
 
 ## When To Run
 

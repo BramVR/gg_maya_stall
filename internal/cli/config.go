@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 
@@ -65,7 +66,7 @@ func loadRepoRunConfig(dir string) (repoRunConfig, string, error) {
 		return repoRunConfig{}, "", err
 	}
 	var config repoRunConfig
-	if err := yaml.Unmarshal(content, &config); err != nil {
+	if err := decodeKnownYAMLFields(content, &config); err != nil {
 		return repoRunConfig{}, "", fmt.Errorf("parse %s: %w", path, err)
 	}
 	if config.Version != 1 {
@@ -75,4 +76,10 @@ func loadRepoRunConfig(dir string) (repoRunConfig, string, error) {
 		return repoRunConfig{}, "", fmt.Errorf("repo config has no Scenarios")
 	}
 	return config, path, nil
+}
+
+func decodeKnownYAMLFields(content []byte, out any) error {
+	decoder := yaml.NewDecoder(bytes.NewReader(content))
+	decoder.KnownFields(true)
+	return decoder.Decode(out)
 }

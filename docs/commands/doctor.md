@@ -35,6 +35,13 @@ Doctor reports the layer that failed and a repair hint where possible:
 - Visual Evidence support;
 - Host Lock state.
 
+The `maya-version` layer probes real Windows Maya Hosts over SSH for installed
+Autodesk Maya versions in standard Autodesk install directories and registry
+install-path entries. It compares the discovered install inventory with the
+Scenario's Maya Version Requirement and reports drift when host config declares
+different `mayaVersions`. Config declarations are advisory for doctor; they are
+not treated as proof that Maya is installed.
+
 Default checks stay fake/local. Real SSH is opt-in through host config outside
 the consuming repo. A real SSH Maya Host must configure
 `broker.type: gg-mayasessiond`; doctor reports a runtime/session-broker failure

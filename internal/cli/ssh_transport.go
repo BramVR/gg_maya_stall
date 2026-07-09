@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -60,6 +61,79 @@ Write-Output 'writable'`, powerShellSingleQuoted(host.WorkRoot))
 		return failedCheck("work-root", "unwritable", "Fix the host work root path or permissions. See docs/setup/windows-maya-host.md#work-root.")
 	}
 	return okCheck("work-root", "writable")
+}
+
+func probeInstalledMayaVersions(host mayaHostConfig) ([]string, error) {
+	script := `$versions = New-Object 'System.Collections.Generic.HashSet[string]'
+function Add-MayaVersion([string]$year) {
+  if ($year -match '^\d{4}$') {
+    [void]$versions.Add($year)
+  }
+}
+$autodeskRoots = @()
+if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
+  $autodeskRoots += (Join-Path $env:ProgramFiles 'Autodesk')
+}
+if (-not [string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) {
+  $autodeskRoots += (Join-Path ${env:ProgramFiles(x86)} 'Autodesk')
+}
+$autodeskRoots | Select-Object -Unique | ForEach-Object {
+  Get-ChildItem -LiteralPath $_ -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($_.Name -match '^Maya(\d{4})$') {
+      Add-MayaVersion $Matches[1]
+    }
+  }
+}
+$registryRoots = @('HKLM:\SOFTWARE\Autodesk\Maya', 'HKLM:\SOFTWARE\WOW6432Node\Autodesk\Maya')
+$registryRoots | ForEach-Object {
+  Get-ChildItem -LiteralPath $_ -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($_.PSChildName -match '^\d{4}$') {
+      $year = $_.PSChildName
+      $installPathKey = Join-Path $_.PSPath 'Setup\InstallPath'
+      $props = Get-ItemProperty -LiteralPath $installPathKey -ErrorAction SilentlyContinue
+      if ($null -ne $props) {
+        $props.PSObject.Properties | ForEach-Object {
+          if ($_.Name -notlike 'PS*' -and -not [string]::IsNullOrWhiteSpace([string]$_.Value) -and (Test-Path -LiteralPath ([string]$_.Value))) {
+            Add-MayaVersion $year
+          }
+        }
+      }
+    }
+  }
+}
+$versions | Sort-Object | ForEach-Object { Write-Output ('maya-version:' + $_) }`
+	raw, err := runSSHCommandOutput(host, encodedPowerShellCommand(script), sshCommandTimeout)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var versions []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		value, ok := strings.CutPrefix(strings.TrimSpace(line), "maya-version:")
+		if !ok {
+			continue
+		}
+		version := strings.TrimSpace(value)
+		if !isFourDigitMayaVersion(version) || seen[version] {
+			continue
+		}
+		seen[version] = true
+		versions = append(versions, version)
+	}
+	sort.Strings(versions)
+	return versions, nil
+}
+
+func isFourDigitMayaVersion(version string) bool {
+	if len(version) != 4 {
+		return false
+	}
+	for _, char := range version {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func validateRealSSHConfig(host mayaHostConfig) error {

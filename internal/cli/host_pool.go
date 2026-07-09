@@ -61,6 +61,7 @@ type mayaHostConfig struct {
 	TrustedPluginArtifactsRoot string       `yaml:"trustedPluginArtifactsRoot"`
 	Broker                     brokerConfig `yaml:"broker"`
 	MayaVersions               []string     `yaml:"mayaVersions"`
+	FakeInstalledMayaVersions  []string     `yaml:"fakeInstalledMayaVersions"`
 	VisualEvidence             *bool        `yaml:"visualEvidence"`
 }
 

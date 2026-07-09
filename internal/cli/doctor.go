@@ -236,7 +236,13 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 	} else {
 		add(withSource(statusLayer("session-broker", host.Broker.fakeStatus(), "reachable", []string{"", "ok", "healthy", "reachable"}, "Start or repair the Session Broker on this Maya Host. See docs/setup/windows-maya-host.md#session-broker."), "fake"))
 	}
-	add(mayaVersionLayer(options, host, scenario))
+	if host.usesRealSSH() && probeLockDetail != "" {
+		add(withBlockedBy(failedCheck("maya-version", "skipped because Host Lock is not clear: "+probeLockDetail, "Wait for the active Fresh Run or clear the stale Host Lock before probing installed Maya versions. See docs/setup/windows-maya-host.md#host-lock-and-retention."), "host-lock"))
+	} else if host.usesRealSSH() && lockCheck.Status != "ok" {
+		add(withBlockedBy(failedCheck("maya-version", "skipped because Host Lock is not clear", "Wait for the active Fresh Run or clear the stale Host Lock before probing installed Maya versions. See docs/setup/windows-maya-host.md#host-lock-and-retention."), "host-lock"))
+	} else {
+		add(mayaVersionLayer(options, host, scenario))
+	}
 	if host.VisualEvidence != nil && !*host.VisualEvidence {
 		add(withSource(failedCheck("visual-evidence", "unavailable", "Enable screenshot capture through the Session Broker. See docs/setup/windows-maya-host.md#visual-evidence."), "config"))
 	} else if brokerInvalidReason != "" {
@@ -451,20 +457,69 @@ func statusLayer(layer string, value string, okDetail string, okValues []string,
 }
 
 func mayaVersionLayer(options doctorOptions, host mayaHostConfig, scenario scenarioConfig) doctorCheck {
-	versions := host.MayaVersions
+	versions, err := installedMayaVersionsForDoctor(host)
+	if err != nil {
+		return failedCheck("maya-version", "could not determine installed Maya versions: "+err.Error(), mayaVersionHint())
+	}
 	if len(versions) == 0 {
-		versions = []string{"2025"}
+		return failedCheck("maya-version", "no Autodesk Maya installation found on host"+mayaVersionDriftDetail(host.MayaVersions, versions), mayaVersionHint())
 	}
 	installed := strings.Join(versions, ",")
+	drift := mayaVersionDriftDetail(host.MayaVersions, versions)
 	if options.ScenarioName == "" || scenario.MayaVersion == "" {
-		return okCheck("maya-version", installed)
+		return okCheck("maya-version", installed+drift)
 	}
 	for _, version := range versions {
 		if version == scenario.MayaVersion {
-			return okCheck("maya-version", fmt.Sprintf("%s satisfies Scenario %s", version, options.ScenarioName))
+			return okCheck("maya-version", fmt.Sprintf("%s satisfies Scenario %s%s", version, options.ScenarioName, drift))
 		}
 	}
-	return failedCheck("maya-version", fmt.Sprintf("Scenario %s needs %s; host has %s", options.ScenarioName, scenario.MayaVersion, installed), "Install a compatible Autodesk Maya version or choose another Maya Host. See docs/setup/windows-maya-host.md#autodesk-maya.")
+	return failedCheck("maya-version", fmt.Sprintf("Scenario %s needs %s; host has %s%s", options.ScenarioName, scenario.MayaVersion, installed, drift), mayaVersionMismatchHint(scenario.MayaVersion, installed))
+}
+
+func installedMayaVersionsForDoctor(host mayaHostConfig) ([]string, error) {
+	if host.usesRealSSH() {
+		return probeInstalledMayaVersions(host)
+	}
+	if host.FakeInstalledMayaVersions != nil {
+		return host.FakeInstalledMayaVersions, nil
+	}
+	return []string{"2025"}, nil
+}
+
+func mayaVersionDriftDetail(configured []string, installed []string) string {
+	if len(configured) == 0 || sameStringSet(configured, installed) {
+		return ""
+	}
+	return "; config declares " + strings.Join(configured, ",") + " (drift)"
+}
+
+func sameStringSet(left []string, right []string) bool {
+	leftSet := map[string]bool{}
+	rightSet := map[string]bool{}
+	for _, value := range left {
+		leftSet[value] = true
+	}
+	for _, value := range right {
+		rightSet[value] = true
+	}
+	if len(leftSet) != len(rightSet) {
+		return false
+	}
+	for value := range leftSet {
+		if !rightSet[value] {
+			return false
+		}
+	}
+	return true
+}
+
+func mayaVersionHint() string {
+	return "Install a compatible Autodesk Maya version or choose another Maya Host. See docs/setup/windows-maya-host.md#autodesk-maya."
+}
+
+func mayaVersionMismatchHint(required string, installed string) string {
+	return fmt.Sprintf("Install Autodesk Maya %s or choose a Maya Host with %s installed; detected %s. See docs/setup/windows-maya-host.md#autodesk-maya.", required, required, installed)
 }
 
 func hostLockLayer(repoDir string, hostID string) doctorCheck {

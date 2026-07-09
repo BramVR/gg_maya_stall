@@ -6,6 +6,7 @@ Release history starts with `v0.1.0`.
 
 ## Unreleased
 
+- Changed `maya-stall doctor` Maya version Host Health to probe installed Autodesk Maya versions on real SSH hosts and report config drift instead of trusting `mayaVersions`.
 - Added host-config `trustedPluginArtifactsRoot` support so real SSH runs can copy declared Plugin Artifacts to a stable Maya trusted plug-in location while keeping clean per-run workspaces and repo-owned Scenario loading.
 - Changed `maya-stall run` broker-failure handling to accept a collected passing Scenario Result only when configured Validators pass against collected outputs, while missing, malformed, failed, or Validator-failing results still fail non-zero.
 - Added run-scoped `maya-stall attach <run-id> screenshot` and `maya-stall attach <run-id> control click` commands for modal debugging while the active or kept run owns the Host Lock.

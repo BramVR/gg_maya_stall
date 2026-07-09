@@ -2100,6 +2100,12 @@ func TestDoctorRealSSHProbesInstalledMayaVersion(t *testing.T) {
 			wantOutput:  "maya-version: fail - Scenario smoke needs 2025; host has 2024",
 		},
 		{
+			name:        "point release version",
+			probeOutput: "maya-version:2016.5",
+			wantCode:    1,
+			wantOutput:  "maya-version: fail - Scenario smoke needs 2025; host has 2016.5",
+		},
+		{
 			name:        "no installed version",
 			probeOutput: "",
 			wantCode:    1,
@@ -2145,6 +2151,29 @@ func TestDoctorRealSSHProbesInstalledMayaVersion(t *testing.T) {
 				t.Fatalf("doctor output missing %q:\n%s", tt.wantOutput, stdout.String())
 			}
 		})
+	}
+}
+
+func TestInstalledMayaVersionsProbeRequiresMayaExecutable(t *testing.T) {
+	script := installedMayaVersionsProbeScript()
+	for _, want := range []string{
+		`^Maya(\d{4}(?:\.\d+)?)$`,
+		`^\d{4}(?:\.\d+)?$`,
+		`Join-Path $_.FullName 'bin\maya.exe'`,
+		`Join-Path ([string]$_.Value) 'bin\maya.exe'`,
+		`Test-Path -LiteralPath $mayaExe -PathType Leaf`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("installed Maya probe script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+func TestNormalizeMayaVersions(t *testing.T) {
+	got := normalizeMayaVersions([]string{" 2025 ", "2016.5", "invalid", "2025", "2016.5"})
+	want := []string{"2016.5", "2025"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("normalized Maya versions = %#v, want %#v", got, want)
 	}
 }
 

@@ -7,9 +7,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
+
+var mayaVersionPattern = regexp.MustCompile(`^[0-9]{4}(?:\.[0-9]+)?$`)
 
 type hostHealthReport struct {
 	TargetProfile string
@@ -493,7 +496,7 @@ func normalizeMayaVersions(versions []string) []string {
 	normalized := make([]string, 0, len(versions))
 	for _, version := range versions {
 		version = strings.TrimSpace(version)
-		if !isFourDigitMayaVersion(version) || seen[version] {
+		if !mayaVersionPattern.MatchString(version) || seen[version] {
 			continue
 		}
 		seen[version] = true

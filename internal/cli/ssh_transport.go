@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -64,10 +63,25 @@ Write-Output 'writable'`, powerShellSingleQuoted(host.WorkRoot))
 }
 
 func probeInstalledMayaVersions(host mayaHostConfig) ([]string, error) {
-	script := `$versions = New-Object 'System.Collections.Generic.HashSet[string]'
-function Add-MayaVersion([string]$year) {
-  if ($year -match '^\d{4}$') {
-    [void]$versions.Add($year)
+	raw, err := runSSHCommandOutput(host, encodedPowerShellCommand(installedMayaVersionsProbeScript()), sshCommandTimeout)
+	if err != nil {
+		return nil, err
+	}
+	var versions []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		value, ok := strings.CutPrefix(strings.TrimSpace(line), "maya-version:")
+		if ok {
+			versions = append(versions, value)
+		}
+	}
+	return normalizeMayaVersions(versions), nil
+}
+
+func installedMayaVersionsProbeScript() string {
+	return `$versions = New-Object 'System.Collections.Generic.HashSet[string]'
+function Add-MayaVersion([string]$version) {
+  if ($version -match '^\d{4}(?:\.\d+)?$') {
+    [void]$versions.Add($version)
   }
 }
 $autodeskRoots = @()
@@ -79,22 +93,28 @@ if (-not [string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) {
 }
 $autodeskRoots | Select-Object -Unique | ForEach-Object {
   Get-ChildItem -LiteralPath $_ -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-    if ($_.Name -match '^Maya(\d{4})$') {
-      Add-MayaVersion $Matches[1]
+    if ($_.Name -match '^Maya(\d{4}(?:\.\d+)?)$') {
+      $mayaExe = Join-Path $_.FullName 'bin\maya.exe'
+      if (Test-Path -LiteralPath $mayaExe -PathType Leaf) {
+        Add-MayaVersion $Matches[1]
+      }
     }
   }
 }
 $registryRoots = @('HKLM:\SOFTWARE\Autodesk\Maya', 'HKLM:\SOFTWARE\WOW6432Node\Autodesk\Maya')
 $registryRoots | ForEach-Object {
   Get-ChildItem -LiteralPath $_ -ErrorAction SilentlyContinue | ForEach-Object {
-    if ($_.PSChildName -match '^\d{4}$') {
-      $year = $_.PSChildName
+    if ($_.PSChildName -match '^\d{4}(?:\.\d+)?$') {
+      $version = $_.PSChildName
       $installPathKey = Join-Path $_.PSPath 'Setup\InstallPath'
       $props = Get-ItemProperty -LiteralPath $installPathKey -ErrorAction SilentlyContinue
       if ($null -ne $props) {
         $props.PSObject.Properties | ForEach-Object {
-          if ($_.Name -notlike 'PS*' -and -not [string]::IsNullOrWhiteSpace([string]$_.Value) -and (Test-Path -LiteralPath ([string]$_.Value))) {
-            Add-MayaVersion $year
+          if ($_.Name -notlike 'PS*' -and -not [string]::IsNullOrWhiteSpace([string]$_.Value)) {
+            $mayaExe = Join-Path ([string]$_.Value) 'bin\maya.exe'
+            if (Test-Path -LiteralPath $mayaExe -PathType Leaf) {
+              Add-MayaVersion $version
+            }
           }
         }
       }
@@ -102,38 +122,6 @@ $registryRoots | ForEach-Object {
   }
 }
 $versions | Sort-Object | ForEach-Object { Write-Output ('maya-version:' + $_) }`
-	raw, err := runSSHCommandOutput(host, encodedPowerShellCommand(script), sshCommandTimeout)
-	if err != nil {
-		return nil, err
-	}
-	seen := map[string]bool{}
-	var versions []string
-	for _, line := range strings.Split(string(raw), "\n") {
-		value, ok := strings.CutPrefix(strings.TrimSpace(line), "maya-version:")
-		if !ok {
-			continue
-		}
-		version := strings.TrimSpace(value)
-		if !isFourDigitMayaVersion(version) || seen[version] {
-			continue
-		}
-		seen[version] = true
-		versions = append(versions, version)
-	}
-	sort.Strings(versions)
-	return versions, nil
-}
-
-func isFourDigitMayaVersion(version string) bool {
-	if len(version) != 4 {
-		return false
-	}
-	for _, char := range version {
-		if char < '0' || char > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 func validateRealSSHConfig(host mayaHostConfig) error {

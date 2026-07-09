@@ -102,6 +102,10 @@ func runSSHCommand(host mayaHostConfig, remoteCommand []string) error {
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("ssh command timed out after %s", sshCommandTimeout)
 		}
+		detail := firstUsefulStderrLine(stderr.String())
+		if detail != "" {
+			return fmt.Errorf("ssh command failed: %w: %s", err, detail)
+		}
 		return fmt.Errorf("ssh command failed: %w", err)
 	}
 	return nil

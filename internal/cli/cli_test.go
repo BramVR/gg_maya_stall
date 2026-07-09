@@ -3012,6 +3012,52 @@ hostPools:
 	}
 }
 
+func TestRunScenarioRealSSHStopsWhenTrustedPluginDestinationRemovalFails(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sftpLog := filepath.Join(dir, "sftp.log")
+	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
+	sshPath := writeFailingTrustedPluginDestinationRemovalFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), "C:/maya-stall/trusted-plugin-artifacts/build/demo.mll")
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        trustedPluginArtifactsRoot: C:/maya-stall/trusted-plugin-artifacts
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"prepare trusted Plugin Artifact destination",
+		"access denied removing trusted Plugin Artifact",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("run stderr missing %q:\n%s", want, stderr.String())
+		}
+	}
+	if _, err := os.Stat(sftpLog); !os.IsNotExist(err) {
+		t.Fatalf("trusted Plugin Artifact upload continued after removal failure; sftp log stat = %v", err)
+	}
+}
+
 func TestRunScenarioRejectsTrustedPluginRootUnderRunWorkspaces(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -6730,6 +6776,37 @@ exit 0
 `, shellQuote(countPath), shellQuote(logPath), shellQuote(expectedCommand), sessiondStatusFixture("session-alpha"))
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("write missing trusted Plugin Artifact destination fake ssh command: %v", err)
+	}
+	return path
+}
+
+func writeFailingTrustedPluginDestinationRemovalFakeSSHCommand(t *testing.T, dir string, logPath string, destination string) string {
+	t.Helper()
+	path := filepath.Join(dir, "fake-ssh-failing-trusted-plugin-removal")
+	expectedScript := "$ErrorActionPreference = 'Stop'\n" +
+		"foreach ($path in @(" + powerShellSingleQuoted(destination) + ")) {\n" +
+		"  if (Test-Path -LiteralPath $path) {\n" +
+		"    Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop\n" +
+		"  }\n" +
+		"}\n" +
+		"exit 0\n"
+	expectedCommand := strings.Join(encodedPowerShellCommand(expectedScript), " ")
+	content := fmt.Sprintf(`#!/bin/sh
+printf 'CALL %%s\n' "$*" >> %[1]s
+expected=%[2]s
+case "$*" in
+  *"$expected"*)
+    printf 'access denied removing trusted Plugin Artifact\n' >&2
+    exit 1
+    ;;
+  *)
+    printf 'cleanup command did not fail closed on existing destination removal\n'
+    exit 0
+    ;;
+esac
+`, shellQuote(logPath), shellQuote(expectedCommand))
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write failing trusted Plugin Artifact removal fake ssh command: %v", err)
 	}
 	return path
 }

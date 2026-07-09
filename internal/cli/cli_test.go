@@ -2969,6 +2969,49 @@ hostPools:
 	}
 }
 
+func TestRunScenarioRealSSHToleratesMissingTrustedPluginDestination(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sftpLog := filepath.Join(dir, "sftp.log")
+	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
+	sshPath := writeMissingTrustedPluginDestinationFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), "C:/maya-stall/trusted-plugin-artifacts/build/demo.mll")
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        trustedPluginArtifactsRoot: C:/maya-stall/trusted-plugin-artifacts
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	logBytes, err := os.ReadFile(sftpLog)
+	if err != nil {
+		t.Fatalf("read sftp log: %v", err)
+	}
+	log := string(logBytes)
+	if !strings.Contains(log, `"/C:/maya-stall/trusted-plugin-artifacts/build/demo.mll"`) {
+		t.Fatalf("missing-destination prepare did not continue to trusted Plugin Artifact upload:\n%s", log)
+	}
+}
+
 func TestRunScenarioRejectsTrustedPluginRootUnderRunWorkspaces(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -6635,6 +6678,58 @@ exit 0
 `, shellQuote(countPath), shellQuote(logPath), cases.String())
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("write sequenced fake ssh command: %v", err)
+	}
+	return path
+}
+
+func writeMissingTrustedPluginDestinationFakeSSHCommand(t *testing.T, dir string, logPath string, missingDestination string) string {
+	t.Helper()
+	path := filepath.Join(dir, "fake-ssh-missing-trusted-plugin")
+	countPath := filepath.Join(dir, "fake-ssh-missing-trusted-plugin.count")
+	expectedScript := "$ErrorActionPreference = 'Stop'\n" +
+		"foreach ($path in @(" + powerShellSingleQuoted(missingDestination) + ")) {\n" +
+		"  if (Test-Path -LiteralPath $path) {\n" +
+		"    Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop\n" +
+		"  }\n" +
+		"}\n" +
+		"exit 0\n"
+	expectedCommand := strings.Join(encodedPowerShellCommand(expectedScript), " ")
+	content := fmt.Sprintf(`#!/bin/sh
+count=0
+if [ -f %[1]s ]; then
+  count=$(cat %[1]s)
+fi
+count=$((count + 1))
+printf '%%s\n' "$count" > %[1]s
+printf 'CALL %%s %%s\n' "$count" "$*" >> %[2]s
+case "$count" in
+1)
+  expected=%[3]s
+  case "$*" in
+    *"$expected"*)
+      printf '%%s\n' '{"ok":true,"tool":"trusted-plugin-cleanup"}'
+      ;;
+    *)
+      printf 'missing trusted Plugin Artifact destination should be a successful prepare\n' >&2
+      exit 1
+      ;;
+  esac
+  ;;
+2)
+  cat <<'JSON'
+{"ok":true,"tool":"script.execute"}
+JSON
+  ;;
+3)
+  cat <<'JSON'
+%[4]s
+JSON
+  ;;
+esac
+exit 0
+`, shellQuote(countPath), shellQuote(logPath), shellQuote(expectedCommand), sessiondStatusFixture("session-alpha"))
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write missing trusted Plugin Artifact destination fake ssh command: %v", err)
 	}
 	return path
 }

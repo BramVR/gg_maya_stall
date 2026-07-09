@@ -225,8 +225,11 @@ func (host realSSHHost) prepareTrustedPluginArtifactDestinations(payload []manif
 		builder.WriteString(powerShellSingleQuoted(path))
 	}
 	builder.WriteString(")) {\n")
-	builder.WriteString("  Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue\n")
+	builder.WriteString("  if (Test-Path -LiteralPath $path) {\n")
+	builder.WriteString("    Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop\n")
+	builder.WriteString("  }\n")
 	builder.WriteString("}\n")
+	builder.WriteString("exit 0\n")
 	if err := runSSHCommand(host.host, encodedPowerShellCommand(builder.String())); err != nil {
 		return fmt.Errorf("prepare trusted Plugin Artifact destination: %w", err)
 	}

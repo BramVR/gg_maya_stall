@@ -1815,7 +1815,7 @@ func TestTrustedPluginAllowlistRequiresDeclaredMayaVersion(t *testing.T) {
 	}
 
 	_, err := ensureTrustedPluginAllowlist(host, trustedPluginAllowlistMayaVersions(host, scenarioConfig{}), false)
-	if err == nil || !strings.Contains(err.Error(), "Maya version is required") {
+	if err == nil || !strings.Contains(err.Error(), "maya version is required") {
 		t.Fatalf("missing Maya version error = %v", err)
 	}
 }

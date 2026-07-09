@@ -102,14 +102,14 @@ func ensureTrustedPluginAllowlist(host mayaHostConfig, versions []string, repair
 		changed = changed || probe.Changed
 	}
 	if checked == 0 {
-		return false, fmt.Errorf("Maya version is required to locate TrustCenter preferences; set host mayaVersions or Scenario mayaVersion")
+		return false, fmt.Errorf("maya version is required to locate TrustCenter preferences; set host mayaVersions or Scenario mayaVersion")
 	}
 	return changed, nil
 }
 
 func validateMayaPrefsVersion(version string) error {
 	if !mayaPrefsVersionPattern.MatchString(version) {
-		return fmt.Errorf("Maya version %q is not a safe preferences path segment", version)
+		return fmt.Errorf("maya version %q is not a safe preferences path segment", version)
 	}
 	return nil
 }
@@ -147,7 +147,7 @@ func parseTrustedPluginPrefsProbe(output string) (trustedPluginPrefsProbe, error
 		}
 		return trustedPluginPrefsProbe{Exists: rawProbe.Exists, Content: content, Changed: rawProbe.Changed}, nil
 	}
-	return trustedPluginPrefsProbe{}, fmt.Errorf("Maya TrustCenter prefs probe returned no JSON")
+	return trustedPluginPrefsProbe{}, fmt.Errorf("maya TrustCenter prefs probe returned no JSON")
 }
 
 func trustedPluginPrefsContent(raw json.RawMessage) (string, error) {

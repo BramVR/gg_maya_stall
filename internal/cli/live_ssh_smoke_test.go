@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -425,12 +426,97 @@ func assertLiveFreshRunSessionStopped(t *testing.T, host mayaHostConfig, session
 	if err != nil {
 		t.Fatalf("query gg_mayasessiond after stopped Fresh Run %q: %v", session.SessionID, err)
 	}
-	if status.State.SessionID != session.SessionID {
-		t.Fatalf("stopped Fresh Run evidence session %q does not match gg_mayasessiond status session %q", session.SessionID, status.State.SessionID)
+	if err := freshRunStoppedProofError(status, session); err != nil {
+		t.Fatalf("stopped Fresh Run %q failed post-stop proof: %v", session.SessionID, err)
+	}
+}
+
+func freshRunStoppedProofError(status sessiondStatusResult, session *brokerSessionIdentity) error {
+	if session == nil || session.SessionID == "" {
+		return fmt.Errorf("missing broker session identity")
+	}
+	if status.State.SessionID == "" {
+		if status.HasState || !strings.EqualFold(sessiondEffectiveStatus(status), "missing") {
+			return fmt.Errorf("session identity disappeared without a missing broker state")
+		}
+	} else if status.State.SessionID != session.SessionID {
+		return fmt.Errorf("evidence session %q does not match status session %q", session.SessionID, status.State.SessionID)
 	}
 	if sessiondSessionLooksActive(status) {
-		t.Fatalf("stopped Fresh Run %q left gg_mayasessiond active with session %q and status %q", session.SessionID, status.State.SessionID, status.DerivedStatus)
+		return fmt.Errorf("broker reports active session %q with status %q", status.State.SessionID, status.DerivedStatus)
 	}
+	for process, alive := range status.ProcessAlive {
+		if alive {
+			return fmt.Errorf("broker process %q remains alive", process)
+		}
+	}
+	return nil
+}
+
+func TestFreshRunStoppedProof(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    sessiondStatusResult
+		wantError bool
+	}{
+		{
+			name:   "matching stopped tombstone",
+			status: stoppedSessiondStatus("session-owned"),
+		},
+		{
+			name:   "state removed after stop",
+			status: missingSessiondStatus(),
+		},
+		{
+			name:      "different stopped session",
+			status:    stoppedSessiondStatus("session-other"),
+			wantError: true,
+		},
+		{
+			name:      "missing state with live process",
+			status:    missingSessiondStatusWithLiveProcess(),
+			wantError: true,
+		},
+		{
+			name:      "matching active session",
+			status:    activeSessiondStatus("session-owned"),
+			wantError: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := freshRunStoppedProofError(test.status, &brokerSessionIdentity{SessionID: "session-owned"})
+			if (err != nil) != test.wantError {
+				t.Fatalf("freshRunStoppedProofError() error = %v, wantError %t", err, test.wantError)
+			}
+		})
+	}
+}
+
+func stoppedSessiondStatus(sessionID string) sessiondStatusResult {
+	status := sessiondStatusResult{HasState: true, DerivedStatus: "stopped", ProcessAlive: map[string]bool{"daemon": false, "maya": false, "mcp": false}}
+	status.State.Status = "stopped"
+	status.State.SessionID = sessionID
+	return status
+}
+
+func missingSessiondStatus() sessiondStatusResult {
+	return sessiondStatusResult{DerivedStatus: "missing", ProcessAlive: map[string]bool{}}
+}
+
+func missingSessiondStatusWithLiveProcess() sessiondStatusResult {
+	status := missingSessiondStatus()
+	status.ProcessAlive["maya"] = true
+	return status
+}
+
+func activeSessiondStatus(sessionID string) sessiondStatusResult {
+	status := sessiondStatusResult{HasState: true, DerivedStatus: "running", ProcessAlive: map[string]bool{"daemon": true, "maya": true, "mcp": true}}
+	status.State.Status = "running"
+	status.State.SessionID = sessionID
+	status.State.MayaAlive = true
+	status.State.MCPAlive = true
+	return status
 }
 
 func requireLiveScenarioRecordingArtifact(t *testing.T, evidenceDir string, bundle evidenceBundle) visualEvidenceArtifact {

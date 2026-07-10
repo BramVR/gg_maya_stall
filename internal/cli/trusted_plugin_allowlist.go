@@ -16,7 +16,6 @@ const safeModeAllowedlistOptionVar = "SafeModeAllowedlistPaths"
 const trustedPluginPrefsJSONPrefix = "MAYA_STALL_TRUST_PREFS_JSON:"
 
 var safeModeAllowedlistOptionPattern = regexp.MustCompile(`(?m)-(sva|sa)\s+"SafeModeAllowedlistPaths"(?:\s+"((?:\\.|[^"])*)")?`)
-var mayaPrefsVersionPattern = regexp.MustCompile(`^[0-9]{4}(?:\.[0-9]+)?$`)
 
 type trustedPluginPrefsProbe struct {
 	Exists  bool   `json:"exists"`
@@ -146,7 +145,7 @@ func missingPathsIncludeTrustedRoot(host mayaHostConfig, missingPaths []string) 
 }
 
 func validateMayaPrefsVersion(version string) error {
-	if !mayaPrefsVersionPattern.MatchString(version) {
+	if !mayaVersionPattern.MatchString(version) {
 		return fmt.Errorf("maya version %q is not a safe preferences path segment", version)
 	}
 	return nil
@@ -275,8 +274,12 @@ func trustedPluginAllowlistRequiredPaths(repoDir string, host mayaHostConfig, pa
 			if walkErr != nil {
 				return walkErr
 			}
-			if entry.IsDir() || !isMayaPluginFile(entry.Name()) {
+			if entry.IsDir() {
 				return nil
+			}
+			pluginFile, err := isMayaPluginFile(localPath)
+			if err != nil || !pluginFile {
+				return err
 			}
 			relativeParent, err := filepath.Rel(sourcePath, filepath.Dir(localPath))
 			if err != nil || relativeParent == "." {
@@ -292,12 +295,14 @@ func trustedPluginAllowlistRequiredPaths(repoDir string, host mayaHostConfig, pa
 	return compactTrustedPluginAllowlistPaths(required), nil
 }
 
-func isMayaPluginFile(name string) bool {
-	switch strings.ToLower(filepath.Ext(name)) {
+func isMayaPluginFile(localPath string) (bool, error) {
+	switch strings.ToLower(filepath.Ext(localPath)) {
 	case ".mll", ".py":
-		return true
+		// Python can publish Maya callbacks dynamically, so syntax inspection
+		// cannot safely distinguish plug-ins from helper modules.
+		return true, nil
 	default:
-		return false
+		return false, nil
 	}
 }
 

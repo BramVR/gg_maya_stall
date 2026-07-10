@@ -190,6 +190,7 @@ func TestKLVPushConsumingRepoSmokeFixtureUsesBuiltPluginArtifact(t *testing.T) {
 		t.Fatalf("read Maya Script: %v", err)
 	}
 	for _, want := range []string{
+		`os.environ["MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT"]`,
 		"cmds.unloadPlugin(loaded_plugin, force=True)",
 		"cmds.loadPlugin(plugin_path, quiet=True)",
 		"cmds.deformer(marker, type=plugin_node_type)",
@@ -495,6 +496,10 @@ scenarios:
         equals: true
       - type: jsonEquals
         path: "outputs/klv-push-smoke-result.json"
+        jsonPath: "$.artifact.fromTrustedRoot"
+        equals: true
+      - type: jsonEquals
+        path: "outputs/klv-push-smoke-result.json"
         jsonPath: "$.action.ok"
         equals: true
 `)
@@ -510,11 +515,8 @@ import traceback
 import maya.cmds as cmds
 
 result_path = os.environ["MAYA_STALL_SCENARIO_RESULT"]
-trusted_root = os.environ.get("MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT")
-if trusted_root:
-    artifact_root = os.path.abspath(os.path.join(trusted_root, "build", "maya2025", "Release", "klv_push"))
-else:
-    artifact_root = os.path.abspath(os.path.join(os.getcwd(), "..", "payload", "pluginArtifacts", "build", "maya2025", "Release", "klv_push"))
+trusted_root = os.environ["MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT"]
+artifact_root = os.path.abspath(os.path.join(trusted_root, "build", "maya2025", "Release", "klv_push"))
 package_scripts = os.path.join(artifact_root, "scripts")
 plugin_path = os.path.join(package_scripts, "klv_push", "klvPush.py")
 

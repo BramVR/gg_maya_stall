@@ -6,6 +6,11 @@ Release history starts with `v0.1.0`.
 
 ## Unreleased
 
+- Fixed trusted Plugin Artifact staging so a fresh `trustedPluginArtifactsRoot` no longer fails when the destination `.mll` does not exist yet.
+- Changed `maya-stall doctor` Maya version Host Health to probe installed Autodesk Maya versions on real SSH hosts and report config drift instead of trusting `mayaVersions`.
+- Added a live proof policy audit (`scripts/proof/audit-live-policy.mjs`, run by the proof workflow's script tests) that fails when `proof/live-maya-policy.json` paths go stale or live-sensitive files escape coverage, and documented the required `main` branch protection for the live Maya gate.
+- Changed Repo Run Config and user host config decoding to reject unknown YAML fields while preserving standard merge-key anchors for shared SSH and broker defaults.
+- Fixed interactive desktop clicks timing out while their Windows scheduled task was still starting by allowing up to 30 seconds for completion.
 - Added Maya TrustCenter allowlist validation for configured `trustedPluginArtifactsRoot` values, declared Plugin Artifact destinations, and nested Maya plug-in parent directories, plus an explicit `doctor --repair-trusted-plugin-allowlist` path that backs up Maya preferences before preserving and appending trusted locations.
 - Added `gg_mayasessiond` commandPort health preflight and recovery so `maya-stall doctor` and live runs restart the configured interactive recovery task before starting a Scenario, or fail at the `session-broker` layer with an actionable reason.
 - Added host-config `trustedPluginArtifactsRoot` support so real SSH runs can copy declared Plugin Artifacts to a stable Maya trusted plug-in location while keeping clean per-run workspaces and repo-owned Scenario loading.

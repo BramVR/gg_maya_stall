@@ -195,11 +195,12 @@ Host-admin steps:
 - In Maya security preferences for the interactive Windows account, add that
   exact directory as a trusted plug-in location.
 - Or, after approving the host security-policy change, run
-  `maya-stall doctor --host-config <host-config.yaml> --target-profile <profile> --host <host-id> --repair-trusted-plugin-allowlist`.
+  `maya-stall doctor --host-config <host-config.yaml> --target-profile <profile> --host <host-id> --scenario <scenario> --repair-trusted-plugin-allowlist`.
   The repair path backs up existing Maya preferences, preserves existing
-  trusted locations, appends only the configured root, requires Maya to be
-  stopped before repair, requires the target Maya version to have an existing
-  preferences file, and requires a clean Maya restart before proof.
+  trusted locations, appends the configured root plus declared artifact
+  destinations and detected nested plug-in parent directories, requires Maya
+  to be stopped before repair, requires the target Maya version to have an
+  existing preferences file, and requires a clean Maya restart before proof.
 - Keep the value in host config, CI secret material, or runner-owned config,
   not in `.maya-stall.yaml`.
 - Declare the Maya version in host config `mayaVersions` or Scenario
@@ -218,8 +219,10 @@ Run behavior:
 - Before staging Plugin Artifacts, `maya-stall run` validates that Maya's
   durable `SafeModeAllowedlistPaths` preference contains
   `trustedPluginArtifactsRoot`, declared Plugin Artifact destinations, and
-  parent directories for nested `.mll` and Python Maya plug-ins under directory
-  artifacts; missing trust fails before Scenario execution.
+  parent directories for nested `.mll` and `.py` files under directory
+  artifacts; Python files are treated conservatively because Maya plug-in
+  callbacks can be published dynamically, and missing trust fails before
+  Scenario execution.
 - Each declared trusted destination is removed before upload, so directory
   Plugin Artifacts do not retain stale files.
 - Scenario scripts receive `MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT` and can

@@ -1646,6 +1646,7 @@ func TestDoctorReportsTrustedPluginAllowlistForConfiguredRoot(t *testing.T) {
 		`{"ProcessId":123,"SessionId":1,"Name":"maya.exe"}`,
 		`{"ok":true,"tool":"script.execute"}`,
 		`removed`,
+		`maya-version:2025`,
 		trustedPluginPrefsProbeOutput(`// Security
 optionVar -cat "Security"
  -sa "SafeModeAllowedlistPaths"
@@ -1681,6 +1682,7 @@ func TestDoctorFailsWhenTrustedPluginAllowlistMissesConfiguredRoot(t *testing.T)
 		`{"ProcessId":123,"SessionId":1,"Name":"maya.exe"}`,
 		`{"ok":true,"tool":"script.execute"}`,
 		`removed`,
+		`maya-version:2025`,
 		trustedPluginPrefsProbeOutput(`// Security
 optionVar -cat "Security"
  -sa "SafeModeAllowedlistPaths"
@@ -1741,6 +1743,7 @@ func TestDoctorRepairTrustedPluginAllowlistRequiresMayaStopped(t *testing.T) {
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		`maya-stall-ssh-ok`,
 		`writable`,
+		`maya-version:2025`,
 		`{"ProcessId":123,"SessionId":1,"Name":"maya.exe"}`,
 	})
 	hostConfigPath := writeTrustedPluginHostConfig(t, dir, sshPath, sftpPath)
@@ -1768,6 +1771,7 @@ optionVar -cat "Security"
 	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
 		`maya-stall-ssh-ok`,
 		`writable`,
+		`maya-version:2025`,
 		``,
 		trustedPluginPrefsProbeOutputChanged(repairedPrefs, true),
 	})
@@ -1779,6 +1783,7 @@ optionVar -cat "Security"
 		t.Fatalf("doctor exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
 	for _, want := range []string{
+		"maya-version: ok - 2025",
 		"trusted-plugin-allowlist: ok - Maya 2025 SafeModeAllowedlistPaths contains trustedPluginArtifactsRoot after repair",
 		"session-broker: ok - skipped during TrustCenter repair",
 		"visual-evidence: ok - skipped during TrustCenter repair",
@@ -1882,7 +1887,11 @@ func TestTrustedPluginAllowlistRequiredPathsIncludeNestedPluginParent(t *testing
 
 func TestTrustedPluginAllowlistRequiredPathsIncludeNestedPluginParents(t *testing.T) {
 	dir := t.TempDir()
-	mustWriteFile(t, filepath.Join(dir, "build", "maya2025", "Release", "package", "scripts", "plugin", "tool.py"), "fake package file\n")
+	mustWriteFile(t, filepath.Join(dir, "build", "maya2025", "Release", "package", "scripts", "plugin", "tool.py"), "def initializePlugin(plugin):\n    pass\n\ndef uninitializePlugin(plugin):\n    pass\n")
+	mustWriteFile(t, filepath.Join(dir, "build", "maya2025", "Release", "package", "scripts", "delegated", "loader.py"), "try:\n    from .implementation import initializePlugin, uninitializePlugin\nexcept ImportError:\n    from implementation import initializePlugin, uninitializePlugin\n")
+	mustWriteFile(t, filepath.Join(dir, "build", "maya2025", "Release", "package", "scripts", "star", "loader.py"), "from package.implementation import *\n")
+	mustWriteFile(t, filepath.Join(dir, "build", "maya2025", "Release", "package", "scripts", "tuple", "loader.py"), "initializePlugin, uninitializePlugin = make_callbacks()\n")
+	mustWriteFile(t, filepath.Join(dir, "build", "maya2025", "Release", "package", "scripts", "support", "helper.py"), "# Documents initializePlugin and uninitializePlugin without exporting them.\ndef initializePluginForTest():\n    pass\n\ndef uninitializePluginForTest():\n    pass\n")
 	host := mayaHostConfig{
 		TrustedPluginArtifactsRoot: "C:/maya-stall/trusted-plugin-artifacts",
 	}
@@ -1895,7 +1904,11 @@ func TestTrustedPluginAllowlistRequiredPathsIncludeNestedPluginParents(t *testin
 	want := []string{
 		"C:/maya-stall/trusted-plugin-artifacts",
 		"C:/maya-stall/trusted-plugin-artifacts/build/maya2025/Release/package",
+		"C:/maya-stall/trusted-plugin-artifacts/build/maya2025/Release/package/scripts/delegated",
 		"C:/maya-stall/trusted-plugin-artifacts/build/maya2025/Release/package/scripts/plugin",
+		"C:/maya-stall/trusted-plugin-artifacts/build/maya2025/Release/package/scripts/star",
+		"C:/maya-stall/trusted-plugin-artifacts/build/maya2025/Release/package/scripts/support",
+		"C:/maya-stall/trusted-plugin-artifacts/build/maya2025/Release/package/scripts/tuple",
 	}
 	if !reflect.DeepEqual(paths, want) {
 		t.Fatalf("required allowlist paths = %#v, want %#v", paths, want)
@@ -2054,6 +2067,7 @@ func TestDoctorRealSSHVerifiesConnectivityAndWritableWorkRoot(t *testing.T) {
 		`{"ProcessId":123,"SessionId":1,"Name":"maya.exe"}`,
 		`{"ok":true,"tool":"script.execute"}`,
 		`removed`,
+		`maya-version:2025`,
 		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
 		``,
 		``,
@@ -2100,6 +2114,7 @@ hostPools:
 		"work-root: ok - writable",
 		"runtime: ok - ssh-sessiond",
 		"session-broker: ok - gg_mayasessiond",
+		"maya-version: ok - 2025",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("doctor output missing %q:\n%s", want, stdout.String())
@@ -2122,6 +2137,203 @@ hostPools:
 	}
 }
 
+func TestDoctorRealSSHProbesInstalledMayaVersion(t *testing.T) {
+	tests := []struct {
+		name         string
+		probeOutput  string
+		mayaVersions string
+		wantCode     int
+		wantOutput   string
+	}{
+		{
+			name:        "matching version",
+			probeOutput: "PowerShell noise\nmaya-version:2025",
+			wantCode:    0,
+			wantOutput:  "maya-version: ok - 2025 satisfies Scenario smoke",
+		},
+		{
+			name:        "mismatched version",
+			probeOutput: "maya-version:2024",
+			wantCode:    1,
+			wantOutput:  "maya-version: fail - Scenario smoke needs 2025; host has 2024",
+		},
+		{
+			name:        "point release version",
+			probeOutput: "maya-version:2016.5",
+			wantCode:    1,
+			wantOutput:  "maya-version: fail - Scenario smoke needs 2025; host has 2016.5",
+		},
+		{
+			name:        "no installed version",
+			probeOutput: "",
+			wantCode:    1,
+			wantOutput:  "maya-version: fail - no Autodesk Maya installation found on host",
+		},
+		{
+			name:         "config drift",
+			probeOutput:  "maya-version:2025",
+			mayaVersions: `        mayaVersions: ["2024"]` + "\n",
+			wantCode:     0,
+			wantOutput:   "maya-version: ok - 2025 satisfies Scenario smoke; config declares 2024 (drift)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := writeRunConfigFixture(t)
+			useFakeFFmpegLookPath(t, dir)
+			sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+				`maya-stall-ssh-ok`,
+				`writable`,
+				`{"ok":true,"checks":[]}`,
+				`{"derived_status":"running","state":{"status":"running","call_server_ready":true,"maya_alive":true,"mcp_alive":true}}`,
+				`{"ProcessId":123,"SessionId":1,"Name":"maya.exe"}`,
+				`{"ok":true,"tool":"script.execute"}`,
+				`removed`,
+				tt.probeOutput,
+				`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
+				``,
+				``,
+				writeFakeSSHBinaryOutput(t, dir, "recording-frames.zip", zipFrameArchive(t)),
+				`removed`,
+			})
+			sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+			hostConfigPath := writeRealSSHDoctorHostConfig(t, dir, sshPath, sftpPath, tt.mayaVersions)
+			var stdout, stderr bytes.Buffer
+
+			code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha", "--scenario", "smoke"}, &stdout, &stderr, dir, "test-version")
+			if code != tt.wantCode {
+				t.Fatalf("doctor exit code = %d, want %d; stdout: %s stderr: %s", code, tt.wantCode, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), tt.wantOutput) {
+				t.Fatalf("doctor output missing %q:\n%s", tt.wantOutput, stdout.String())
+			}
+		})
+	}
+}
+
+func TestInstalledMayaVersionsProbeRequiresMayaExecutable(t *testing.T) {
+	script := installedMayaVersionsProbeScript()
+	for _, want := range []string{
+		`^Maya(\d{4}(?:\.\d+)?)$`,
+		`^\d{4}(?:\.\d+)?$`,
+		`Join-Path $_.FullName 'bin\maya.exe'`,
+		`Join-Path ([string]$_.Value) 'bin\maya.exe'`,
+		`Test-Path -LiteralPath $mayaExe -PathType Leaf`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("installed Maya probe script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+func TestNormalizeMayaVersions(t *testing.T) {
+	got := normalizeMayaVersions([]string{" 2025 ", "2016.5", "invalid", "2025", "2016.5"})
+	want := []string{"2016.5", "2025"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("normalized Maya versions = %#v, want %#v", got, want)
+	}
+}
+
+func TestDoctorFakeHostUsesFakeInstalledMayaVersions(t *testing.T) {
+	tests := []struct {
+		name           string
+		hostInventory  string
+		wantCode       int
+		wantOutput     string
+		wantAbsent     string
+		configVersions string
+	}{
+		{
+			name:          "found matching install",
+			hostInventory: `        fakeInstalledMayaVersions: ["2025"]` + "\n",
+			wantCode:      0,
+			wantOutput:    "maya-version: ok - 2025 satisfies Scenario smoke",
+		},
+		{
+			name:          "missing install",
+			hostInventory: `        fakeInstalledMayaVersions: []` + "\n",
+			wantCode:      1,
+			wantOutput:    "maya-version: fail - no Autodesk Maya installation found on host",
+		},
+		{
+			name:          "mismatched install",
+			hostInventory: `        fakeInstalledMayaVersions: ["2024"]` + "\n",
+			wantCode:      1,
+			wantOutput:    "maya-version: fail - Scenario smoke needs 2025; host has 2024",
+		},
+		{
+			name:           "config drift",
+			configVersions: `        mayaVersions: ["2025"]` + "\n",
+			hostInventory:  `        fakeInstalledMayaVersions: ["2024"]` + "\n",
+			wantCode:       1,
+			wantOutput:     "maya-version: fail - Scenario smoke needs 2025; host has 2024; config declares 2025 (drift)",
+		},
+		{
+			name:           "config versions are inventory fallback",
+			configVersions: `        mayaVersions: ["2024"]` + "\n",
+			wantCode:       1,
+			wantOutput:     "maya-version: fail - Scenario smoke needs 2025; host has 2024",
+		},
+		{
+			name:           "config fallback satisfies scenario",
+			configVersions: `        mayaVersions: ["2025"]` + "\n",
+			wantCode:       0,
+			wantOutput:     "maya-version: ok - 2025 satisfies Scenario smoke",
+		},
+		{
+			name:          "fake inventory is normalized",
+			hostInventory: `        fakeInstalledMayaVersions: [" 2025 ", "invalid", "2025"]` + "\n",
+			wantCode:      0,
+			wantOutput:    "maya-version: ok - 2025 satisfies Scenario smoke",
+		},
+		{
+			name:           "config fallback is normalized",
+			configVersions: `        mayaVersions: [" 2025 ", "invalid", "2025"]` + "\n",
+			wantCode:       0,
+			wantOutput:     "maya-version: ok - 2025 satisfies Scenario smoke",
+		},
+		{
+			name:           "normalized config avoids false drift",
+			configVersions: `        mayaVersions: [" 2025 ", "invalid", "2025"]` + "\n",
+			hostInventory:  `        fakeInstalledMayaVersions: ["2025"]` + "\n",
+			wantCode:       0,
+			wantOutput:     "maya-version: ok - 2025 satisfies Scenario smoke",
+			wantAbsent:     "(drift)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := writeRunConfigFixture(t)
+			hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+			mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        ssh: ok
+        workRoot: writable
+        broker: ok
+`+tt.configVersions+tt.hostInventory)
+			var stdout, stderr bytes.Buffer
+
+			code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha", "--scenario", "smoke"}, &stdout, &stderr, dir, "test-version")
+			if code != tt.wantCode {
+				t.Fatalf("doctor exit code = %d, want %d; stdout: %s stderr: %s", code, tt.wantCode, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), tt.wantOutput) {
+				t.Fatalf("doctor output missing %q:\n%s", tt.wantOutput, stdout.String())
+			}
+			if tt.wantAbsent != "" && strings.Contains(stdout.String(), tt.wantAbsent) {
+				t.Fatalf("doctor output unexpectedly contains %q:\n%s", tt.wantAbsent, stdout.String())
+			}
+		})
+	}
+}
+
 func TestDoctorHostHealthTiesRealVisualEvidenceToSessionBroker(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	useFakeFFmpegLookPath(t, dir)
@@ -2134,6 +2346,7 @@ func TestDoctorHostHealthTiesRealVisualEvidenceToSessionBroker(t *testing.T) {
 		`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
 		`{"ok":true,"tool":"script.execute"}`,
 		`removed`,
+		`maya-version:2025`,
 		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
 		``,
 		``,
@@ -2201,7 +2414,7 @@ func TestDoctorGGMayaSessiondRejectsMayaInWindowsServicesSession(t *testing.T) {
 		`{"ok":true,"checks":[{"id":"state_dir","ok":true}]}`,
 		`{"derived_status":"running","state":{"status":"running","call_server_ready":true,"maya_alive":true,"mcp_alive":true}}`,
 		`{"ProcessId":1234,"SessionId":0,"Name":"maya.exe"}`,
-		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
+		`maya-version:2025`,
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
 	mustWriteFile(t, hostConfigPath, `version: 1
@@ -2243,8 +2456,8 @@ hostPools:
 	if err != nil {
 		t.Fatalf("read ssh log: %v", err)
 	}
-	if got := strings.Count(string(logBytes), "CALL "); got != 5 {
-		t.Fatalf("doctor should not probe viewport.capture after session-broker failure, got %d SSH calls:\n%s", got, string(logBytes))
+	if got := strings.Count(string(logBytes), "CALL "); got != 6 {
+		t.Fatalf("doctor should only probe Maya versions after session-broker failure, got %d SSH calls:\n%s", got, string(logBytes))
 	}
 }
 
@@ -2261,6 +2474,7 @@ func TestDoctorGGMayaSessiondVerifiesScriptExecuteProbe(t *testing.T) {
 		`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
 		`{"ok":true,"tool":"script.execute"}`,
 		``,
+		`maya-version:2025`,
 		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
 		``,
 		``,
@@ -2324,6 +2538,7 @@ func TestDoctorGGMayaSessiondRecoversCommandPortWithScheduledTask(t *testing.T) 
 		`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
 		`{"ok":true,"tool":"script.execute"}`,
 		`removed`,
+		`maya-version:2025`,
 		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
 		``,
 		``,
@@ -2430,6 +2645,7 @@ func TestDoctorGGMayaSessiondAcceptsRecordingScenario(t *testing.T) {
 		`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
 		`{"ok":true,"tool":"script.execute"}`,
 		`removed`,
+		`maya-version:2025`,
 		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}],"output":{"mime_type":"image/jpeg"}}`,
 		``,
 		``,
@@ -2486,6 +2702,7 @@ func TestDoctorGGMayaSessiondRequiresDesktopRecordingReadiness(t *testing.T) {
 		`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
 		`{"ok":true,"tool":"script.execute"}`,
 		`removed`,
+		`maya-version:2025`,
 		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}],"output":{"mime_type":"image/jpeg"}}`,
 	})
 	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
@@ -2538,22 +2755,22 @@ func TestDoctorGGMayaSessiondReportsDesktopRecordingPrerequisiteFailures(t *test
 	}{
 		{
 			name:       "remote capture root",
-			failIndex:  9,
+			failIndex:  10,
 			failDetail: "remote capture root is not writable",
 		},
 		{
 			name:       "interactive scheduled task",
-			failIndex:  11,
+			failIndex:  12,
 			failDetail: "schtasks.exe is required for interactive desktop capture",
 		},
 		{
 			name:       "desktop assemblies",
-			failIndex:  11,
+			failIndex:  12,
 			failDetail: "Windows PowerShell desktop assemblies System.Windows.Forms and System.Drawing are required",
 		},
 		{
 			name:       "compress archive",
-			failIndex:  11,
+			failIndex:  12,
 			failDetail: "Compress-Archive is not recognized",
 		},
 	}
@@ -2569,6 +2786,7 @@ func TestDoctorGGMayaSessiondReportsDesktopRecordingPrerequisiteFailures(t *test
 				`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
 				`{"ok":true,"tool":"script.execute"}`,
 				`removed`,
+				`maya-version:2025`,
 				`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}],"output":{"mime_type":"image/jpeg"}}`,
 				``,
 				``,
@@ -2787,6 +3005,7 @@ hostPools:
 	for _, want := range []string{
 		"host-lock: fail - alpha locked",
 		"session-broker: fail - skipped because Host Lock is not clear",
+		"maya-version: fail - skipped because Host Lock is not clear",
 		"visual-evidence: fail - skipped because Host Lock is not clear",
 	} {
 		if !strings.Contains(stdout.String(), want) {
@@ -3124,7 +3343,7 @@ hostPools:
 			args:       []string{"--scenario", "smoke"},
 			wantLayer:  "maya-version: fail",
 			wantDetail: "needs 2025",
-			wantHint:   "Install a compatible Autodesk Maya version or choose another Maya Host. See docs/setup/windows-maya-host.md#autodesk-maya.",
+			wantHint:   "Install Autodesk Maya 2025 or choose a Maya Host with 2025 installed; detected 2024. See docs/setup/windows-maya-host.md#autodesk-maya.",
 		},
 		{
 			name: "visual evidence",
@@ -3403,6 +3622,53 @@ hostPools:
 	}
 }
 
+func TestRunScenarioRealSSHToleratesMissingTrustedPluginDestination(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sftpLog := filepath.Join(dir, "sftp.log")
+	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
+	sshPath := writeMissingTrustedPluginDestinationFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), "C:/maya-stall/trusted-plugin-artifacts/build/demo.mll")
+	hostConfigPath := writeTrustedPluginHostConfig(t, dir, sshPath, sftpPath)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	logBytes, err := os.ReadFile(sftpLog)
+	if err != nil {
+		t.Fatalf("read sftp log: %v", err)
+	}
+	log := string(logBytes)
+	if !strings.Contains(log, `"/C:/maya-stall/trusted-plugin-artifacts/build/demo.mll"`) {
+		t.Fatalf("missing-destination prepare did not continue to trusted Plugin Artifact upload:\n%s", log)
+	}
+}
+
+func TestRunScenarioRealSSHStopsWhenTrustedPluginDestinationRemovalFails(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sftpLog := filepath.Join(dir, "sftp.log")
+	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
+	sshPath := writeFailingTrustedPluginDestinationRemovalFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), "C:/maya-stall/trusted-plugin-artifacts/build/demo.mll")
+	hostConfigPath := writeTrustedPluginHostConfig(t, dir, sshPath, sftpPath)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"prepare trusted Plugin Artifact destination",
+		"access denied removing trusted Plugin Artifact",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("run stderr missing %q:\n%s", want, stderr.String())
+		}
+	}
+	if _, err := os.Stat(sftpLog); !os.IsNotExist(err) {
+		t.Fatalf("trusted Plugin Artifact upload continued after removal failure; sftp log stat = %v", err)
+	}
+}
+
 func TestRunScenarioRejectsTrustedPluginRootUnderRunWorkspaces(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -3433,6 +3699,46 @@ hostPools:
 	}
 	if !strings.Contains(stderr.String(), "trustedPluginArtifactsRoot must be outside workRoot/runs") {
 		t.Fatalf("run stderr missing trusted root rejection:\n%s", stderr.String())
+	}
+}
+
+func TestTrustedPluginArtifactsRootRejectsFilesystemRoots(t *testing.T) {
+	for _, root := range []string{
+		".", "/", "C:/", `C:\`,
+		`//server/share`, `\\server\share`, `//server/share/.`, `//server/share/plugins/..`,
+	} {
+		t.Run(root, func(t *testing.T) {
+			host := mayaHostConfig{
+				WorkRoot:                   "C:/maya-stall",
+				TrustedPluginArtifactsRoot: root,
+			}
+
+			err := validateTrustedPluginArtifactsRoot(host)
+			if err == nil || !strings.Contains(err.Error(), "must resolve to a non-root directory") {
+				t.Fatalf("validate trusted Plugin Artifact root %q error = %v", root, err)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginArtifactsRootRejectsWindowsDeviceNamespaces(t *testing.T) {
+	for _, root := range []string{
+		`\\?\UNC\server\share\plugins`, `\\.\UNC\server\share\plugins`,
+		`\\?\C:\plugins`, `\\.\C:\plugins`,
+		`\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\plugins`,
+		`\\?\GLOBALROOT\Device\HarddiskVolume1\plugins`,
+	} {
+		t.Run(root, func(t *testing.T) {
+			host := mayaHostConfig{
+				WorkRoot:                   "C:/maya-stall",
+				TrustedPluginArtifactsRoot: root,
+			}
+
+			err := validateTrustedPluginArtifactsRoot(host)
+			if err == nil || !strings.Contains(err.Error(), "must not use a Windows device namespace") {
+				t.Fatalf("validate trusted Plugin Artifact root %q error = %v", root, err)
+			}
+		})
 	}
 }
 
@@ -6925,7 +7231,35 @@ hostPools:
         workRoot: writable
         broker: ok
         mayaVersions: ["2025"]
+        fakeInstalledMayaVersions: ["2025"]
         visualEvidence: true
+`)
+	return hostConfigPath
+}
+
+func writeRealSSHDoctorHostConfig(t *testing.T, dir string, sshPath string, sftpPath string, mayaVersions string) string {
+	t.Helper()
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+`+mayaVersions+`        visualEvidence: true
 `)
 	return hostConfigPath
 }
@@ -7218,6 +7552,134 @@ exit 0
 `, shellQuote(countPath), shellQuote(logPath), cases.String())
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("write sequenced fake ssh command: %v", err)
+	}
+	return path
+}
+
+func writeMissingTrustedPluginDestinationFakeSSHCommand(t *testing.T, dir string, logPath string, missingDestination string) string {
+	t.Helper()
+	path := filepath.Join(dir, "fake-ssh-missing-trusted-plugin")
+	countPath := filepath.Join(dir, "fake-ssh-missing-trusted-plugin.count")
+	expectedScript := "$ErrorActionPreference = 'Stop'\n" +
+		"foreach ($path in @(" + powerShellSingleQuoted(missingDestination) + ")) {\n" +
+		"  if (Test-Path -LiteralPath $path) {\n" +
+		"    Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop\n" +
+		"  }\n" +
+		"}\n" +
+		"exit 0\n"
+	expectedCommand := strings.Join(encodedPowerShellCommand(expectedScript), " ")
+	content := fmt.Sprintf(`#!/bin/sh
+count=0
+if [ -f %[1]s ]; then
+  count=$(cat %[1]s)
+fi
+count=$((count + 1))
+printf '%%s\n' "$count" > %[1]s
+printf 'CALL %%s %%s\n' "$count" "$*" >> %[2]s
+case "$count" in
+1)
+	cat <<'JSON'
+%[4]s
+JSON
+	;;
+2)
+	cat <<'JSON'
+%[5]s
+JSON
+	;;
+3)
+  expected=%[3]s
+  case "$*" in
+    *"$expected"*)
+      printf '%%s\n' '{"ok":true,"tool":"trusted-plugin-cleanup"}'
+      ;;
+    *)
+      printf 'missing trusted Plugin Artifact destination should be a successful prepare\n' >&2
+      exit 1
+      ;;
+  esac
+  ;;
+4)
+  cat <<'JSON'
+{"ok":true,"tool":"script.execute"}
+JSON
+  ;;
+5)
+  cat <<'JSON'
+%[4]s
+JSON
+  ;;
+esac
+exit 0
+`, shellQuote(countPath), shellQuote(logPath), shellQuote(expectedCommand), sessiondStatusFixture("session-alpha"), trustedPluginPrefsProbeOutput(`// Security
+optionVar -cat "Security"
+ -sa "SafeModeAllowedlistPaths"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts/build";
+`))
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write missing trusted Plugin Artifact destination fake ssh command: %v", err)
+	}
+	return path
+}
+
+func writeFailingTrustedPluginDestinationRemovalFakeSSHCommand(t *testing.T, dir string, logPath string, destination string) string {
+	t.Helper()
+	path := filepath.Join(dir, "fake-ssh-failing-trusted-plugin-removal")
+	countPath := filepath.Join(dir, "fake-ssh-failing-trusted-plugin-removal.count")
+	expectedScript := "$ErrorActionPreference = 'Stop'\n" +
+		"foreach ($path in @(" + powerShellSingleQuoted(destination) + ")) {\n" +
+		"  if (Test-Path -LiteralPath $path) {\n" +
+		"    Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop\n" +
+		"  }\n" +
+		"}\n" +
+		"exit 0\n"
+	expectedCommand := strings.Join(encodedPowerShellCommand(expectedScript), " ")
+	content := fmt.Sprintf(`#!/bin/sh
+count=0
+if [ -f %[1]s ]; then
+  count=$(cat %[1]s)
+fi
+count=$((count + 1))
+printf '%%s\n' "$count" > %[1]s
+printf 'CALL %%s %%s\n' "$count" "$*" >> %[2]s
+case "$count" in
+1)
+	cat <<'JSON'
+%[4]s
+JSON
+	;;
+2)
+	cat <<'JSON'
+%[5]s
+JSON
+	;;
+3)
+    expected=%[3]s
+    case "$*" in
+      *"$expected"*)
+    printf 'access denied removing trusted Plugin Artifact\n' >&2
+    exit 1
+        ;;
+      *)
+        printf 'cleanup command did not fail closed on existing destination removal\n' >&2
+        exit 1
+        ;;
+    esac
+    ;;
+*)
+    printf 'unexpected SSH call before trusted Plugin Artifact removal failure\n' >&2
+    exit 1
+    ;;
+esac
+`, shellQuote(countPath), shellQuote(logPath), shellQuote(expectedCommand), sessiondStatusFixture("session-alpha"), trustedPluginPrefsProbeOutput(`// Security
+optionVar -cat "Security"
+ -sa "SafeModeAllowedlistPaths"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts/build";
+`))
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write failing trusted Plugin Artifact removal fake ssh command: %v", err)
 	}
 	return path
 }

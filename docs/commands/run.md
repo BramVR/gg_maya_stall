@@ -60,8 +60,9 @@ it to Scenario scripts as `MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT`.
 Before staging Plugin Artifacts, `run` validates that Maya's durable
 `SafeModeAllowedlistPaths` preference for the selected Maya version contains
 the configured root, declared Plugin Artifact destinations, and parent
-directories for nested `.mll` and Python Maya plug-ins under directory
-artifacts. A missing baseline fails before upload or Scenario execution, with
+directories for nested `.mll` and `.py` files under directory artifacts. Python
+files are treated conservatively because Maya plug-in callbacks can be
+published dynamically. A missing baseline fails before upload or Scenario execution, with
 an actionable TrustCenter diagnostic instead of hanging behind Maya's
 untrusted plug-in modal.
 The normal per-run payload copy still happens.

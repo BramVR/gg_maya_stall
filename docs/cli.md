@@ -125,7 +125,8 @@ For real Maya plug-in runs, host config may also set
 has added to Maya's trusted plug-in locations. `maya-stall doctor` validates
 that Maya's durable `SafeModeAllowedlistPaths` preference contains that root,
 Scenario-declared Plugin Artifact destinations, and parent directories for
-nested `.mll` and Python Maya plug-ins under directory artifacts.
+nested `.mll` and `.py` files under directory artifacts. Python files are
+treated conservatively because Maya plug-in callbacks can be published dynamically.
 `maya-stall run` fails before staging Plugin Artifacts when the baseline is
 missing. `maya-stall run` copies only declared `pluginArtifacts` there and
 exposes the root as `MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT`.

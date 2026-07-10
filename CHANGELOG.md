@@ -6,6 +6,7 @@ Release history starts with `v0.1.0`.
 
 ## Unreleased
 
+- Expanded the Maya Stall product vision around pooled parallel Maya Hosts, shared Host Locks, durable run lifecycles, Maya-native observation, verifiable Evidence Bundles, and release qualification while keeping v1 delivery limits separate.
 - Fixed trusted Plugin Artifact staging so a fresh `trustedPluginArtifactsRoot` no longer fails when the destination `.mll` does not exist yet.
 - Changed `maya-stall doctor` Maya version Host Health to probe installed Autodesk Maya versions on real SSH hosts and report config drift instead of trusting `mayaVersions`.
 - Added a live proof policy audit (`scripts/proof/audit-live-policy.mjs`, run by the proof workflow's script tests) that fails when `proof/live-maya-policy.json` paths go stale or live-sensitive files escape coverage, and documented the required `main` branch protection for the live Maya gate.

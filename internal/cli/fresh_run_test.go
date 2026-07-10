@@ -130,6 +130,24 @@ func TestFreshRunLifecycleSettlesStopPolicyAndFailures(t *testing.T) {
 		}
 	})
 
+	t.Run("payload staging error honors keep on failure", func(t *testing.T) {
+		dir := writeRunConfigFixture(t)
+		runtime := defaultRunRuntime()
+		runtime.Host = stageFailingRunHost{message: "payload staging failed"}
+		runtime.Broker = fakeSessionBroker{}
+
+		outcome, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterSuccess}, runtime).Run()
+		if err == nil || !strings.Contains(err.Error(), "payload staging failed") {
+			t.Fatalf("Fresh Run error = %v, want staging failure", err)
+		}
+		if outcome.StopPolicy != "kept" || outcome.RunID == "" {
+			t.Fatalf("staging-failure outcome = %+v, want kept run", outcome)
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")); statErr != nil {
+			t.Fatalf("staging-failure Host Lock missing: %v", statErr)
+		}
+	})
+
 	t.Run("broker success requires an owned session identity", func(t *testing.T) {
 		dir := writeRunConfigFixture(t)
 		runtime := defaultRunRuntime()
@@ -588,6 +606,52 @@ func TestFreshRunRejectsRetainedSessionIdentityChange(t *testing.T) {
 	}
 }
 
+func TestFreshRunDeferredStopSuccessCleansRunState(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	broker := &retryingStopSessionBroker{fakeSessionBroker: fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "passed"}}}
+	runtime := defaultRunRuntime()
+	runtime.Broker = broker
+
+	_, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
+	if err == nil || !strings.Contains(err.Error(), "transient stop failure") {
+		t.Fatalf("Fresh Run error = %v, want primary stop failure", err)
+	}
+	if broker.stopCalls != 2 || broker.cleanupCalls != 1 {
+		t.Fatalf("deferred cleanup calls = stop %d cleanup %d, want 2/1", broker.stopCalls, broker.cleanupCalls)
+	}
+	evidenceDir := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	runID := filepath.Base(evidenceDir)
+	if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "runs", runID)); !os.IsNotExist(statErr) {
+		t.Fatalf("deferred-stop run state = %v, want removed", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")); !os.IsNotExist(statErr) {
+		t.Fatalf("deferred-stop Host Lock = %v, want released", statErr)
+	}
+}
+
+func TestFreshRunDeferredStopRetainsStateWhenRemoteCleanupFails(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	broker := &retryingStopSessionBroker{
+		fakeSessionBroker: fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "passed"}},
+		cleanupErr:        fmt.Errorf("remote cleanup failed"),
+	}
+	runtime := defaultRunRuntime()
+	runtime.Broker = broker
+
+	_, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
+	if err == nil || !strings.Contains(err.Error(), "remote cleanup failed") {
+		t.Fatalf("Fresh Run error = %v, want remote cleanup failure", err)
+	}
+	evidenceDir := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	runID := filepath.Base(evidenceDir)
+	if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "runs", runID, "run-record.json")); statErr != nil {
+		t.Fatalf("cleanup-failure Run Record missing: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")); statErr != nil {
+		t.Fatalf("cleanup-failure Host Lock missing: %v", statErr)
+	}
+}
+
 func TestGGMayaSessiondFreshRunFailsClosedWhenInheritedSessionStopFails(t *testing.T) {
 	dir := t.TempDir()
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
@@ -808,6 +872,15 @@ type recordingRunHost struct {
 	recorder *freshRunLifecycleRecorder
 }
 
+type stageFailingRunHost struct {
+	fakeHost
+	message string
+}
+
+func (host stageFailingRunHost) StagePayload(runContext, []manifestPayload) error {
+	return fmt.Errorf("%s", host.message)
+}
+
 func (host recordingRunHost) StagePayload(runContext, []manifestPayload) error {
 	host.recorder.add("setup.stage-payload")
 	return nil
@@ -884,6 +957,26 @@ type failingRetainableSessionBroker struct {
 
 type failingExecutionRetentionBroker struct {
 	failingRetainableSessionBroker
+}
+
+type retryingStopSessionBroker struct {
+	fakeSessionBroker
+	stopCalls    int
+	cleanupCalls int
+	cleanupErr   error
+}
+
+func (broker *retryingStopSessionBroker) StopSession(context runContext, session brokerSessionIdentity) error {
+	broker.stopCalls++
+	if broker.stopCalls == 1 {
+		return fmt.Errorf("transient stop failure")
+	}
+	return broker.fakeSessionBroker.StopSession(context, session)
+}
+
+func (broker *retryingStopSessionBroker) CleanupRun(runContext) error {
+	broker.cleanupCalls++
+	return broker.cleanupErr
 }
 
 func (broker failingExecutionRetentionBroker) RetainRun(runContext, runManifest, string) (retainedSessionRecord, error) {

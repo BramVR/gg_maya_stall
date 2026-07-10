@@ -54,8 +54,15 @@ func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 			if stopErr := run.runtime.Broker.StopSession(run.context, run.session); stopErr != nil {
 				err = errors.Join(err, fmt.Errorf("stop Maya UI Session for %s after run failure: %w", run.manifest.RunID, stopErr))
 				run.releaseHostLock = false
-			} else if syncErr := run.syncEvidenceEvents(); syncErr != nil {
-				err = errors.Join(err, syncErr)
+			} else {
+				run.sessionSettled = true
+				if syncErr := run.syncEvidenceEvents(); syncErr != nil {
+					err = errors.Join(err, syncErr)
+				}
+				if cleanupErr := run.cleanupStoppedRun(); cleanupErr != nil {
+					err = errors.Join(err, cleanupErr)
+					run.releaseHostLock = false
+				}
 			}
 		}
 		if run.releaseHostLock {
@@ -66,7 +73,7 @@ func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 	}()
 
 	if err := run.setup(); err != nil {
-		return runOutcome{}, err
+		return run.finishFailedRun(err)
 	}
 	defer func() {
 		if err == nil && outcome.StopPolicy == "stopped" {
@@ -77,14 +84,7 @@ func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 	}()
 
 	if err := run.execute(); err != nil {
-		if run.sessionStarted && !shouldStopAfter(run.options.StopAfter, resultStatusFailed) {
-			reason := run.configureKeptStopPolicy()
-			if retainErr := run.retainSession(reason); retainErr != nil {
-				return runOutcome{}, errors.Join(err, retainErr)
-			}
-			return run.currentOutcome(), err
-		}
-		return runOutcome{}, err
+		return run.finishFailedRun(err)
 	}
 	outcome, err = run.settle()
 	return outcome, err
@@ -484,6 +484,33 @@ func (run *freshRunLifecycle) configureKeptStopPolicy() string {
 	return run.retentionReason()
 }
 
+func (run *freshRunLifecycle) finishFailedRun(runErr error) (runOutcome, error) {
+	if !run.sessionStarted || shouldStopAfter(run.options.StopAfter, resultStatusFailed) {
+		return runOutcome{}, runErr
+	}
+	if run.result.Status == "" {
+		run.result = ScenarioResult{Status: resultStatusFailed, Summary: fmt.Sprintf("Scenario failed before result collection: %v", runErr)}
+	}
+	if _, err := os.Stat(filepath.Join(run.context.EvidenceDir, evidenceBundleFileName)); errors.Is(err, os.ErrNotExist) {
+		if evidenceErr := ensureFailureLog(run.context, runErr); evidenceErr != nil {
+			return runOutcome{}, errors.Join(runErr, evidenceErr)
+		}
+		if evidenceErr := appendEvent(run.context.EventsPath, "run.failed-before-result-collection", runErr.Error()); evidenceErr != nil {
+			return runOutcome{}, errors.Join(runErr, evidenceErr)
+		}
+		if evidenceErr := run.writeBrokerFailureEvidence(runErr); evidenceErr != nil {
+			return runOutcome{}, errors.Join(runErr, evidenceErr)
+		}
+	} else if err != nil {
+		return runOutcome{}, errors.Join(runErr, err)
+	}
+	reason := run.configureKeptStopPolicy()
+	if retainErr := run.retainSession(reason); retainErr != nil {
+		return runOutcome{}, errors.Join(runErr, retainErr)
+	}
+	return run.currentOutcome(), runErr
+}
+
 func (run *freshRunLifecycle) retentionReason() string {
 	if run.options.StopAfter == stopAfterSuccess {
 		return "keep-on-failure"
@@ -530,6 +557,20 @@ func (run *freshRunLifecycle) currentOutcome() runOutcome {
 		StopPolicy:       run.stopPolicy,
 		FollowUpCommands: run.followUp,
 	}
+}
+
+func (run *freshRunLifecycle) cleanupStoppedRun() error {
+	if retention, ok := run.runtime.Broker.(runRetentionBroker); ok && retention.RetentionCapabilities().CleanupRetainedWorkspace {
+		if err := retention.CleanupRun(run.context); err != nil {
+			return fmt.Errorf("clean up remote run workspace for %s: %w", run.manifest.RunID, err)
+		}
+	}
+	if run.manifest.RunID != "" {
+		if err := cleanupRunState(run.repoDir, run.manifest.RunID); err != nil {
+			return fmt.Errorf("clean up Fresh Run state for %s: %w", run.manifest.RunID, err)
+		}
+	}
+	return nil
 }
 
 func (run *freshRunLifecycle) syncEvidenceEvents() error {

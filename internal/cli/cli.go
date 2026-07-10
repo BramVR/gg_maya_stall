@@ -153,6 +153,9 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 			}
 			outcome, err := runScenario(workDir, options, runtime)
 			if err != nil {
+				if outcome.RunID != "" {
+					printRunOutcome(stdout, outcome)
+				}
 				var userErr *usageError
 				if errors.As(err, &userErr) {
 					fmt.Fprintf(stderr, "maya-stall evidence collect: %v\n", err)

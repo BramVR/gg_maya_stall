@@ -6116,6 +6116,26 @@ func TestKeepOnFailurePrintsRetainedRunWhenBrokerExecutionErrors(t *testing.T) {
 	}
 }
 
+func TestEvidenceCollectPrintsRetainedRunWhenBrokerExecutionErrors(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+	runtime := defaultRunRuntime()
+	runtime.Broker = failingRetainableSessionBroker{
+		fakeSessionBroker: fakeSessionBroker{},
+		message:           "broker disconnected before result",
+	}
+
+	code := RunWithRuntime([]string{"evidence", "collect", "--keep-on-failure", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("evidence collect exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"status: failed", "stopPolicy: kept", "next: maya-stall stop"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("evidence collect output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
 func TestStopReleasesKeptHostLockWhenEvidenceIsMissing(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	var stdout, stderr bytes.Buffer

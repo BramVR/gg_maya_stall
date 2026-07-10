@@ -315,7 +315,9 @@ func appendRunScopedEvidenceEvents(statePath string, evidencePath string, offset
 	if err != nil {
 		return err
 	}
-	defer source.Close()
+	defer func() {
+		_ = source.Close()
+	}()
 	if _, err := source.Seek(offset, io.SeekStart); err != nil {
 		return err
 	}
@@ -323,9 +325,11 @@ func appendRunScopedEvidenceEvents(statePath string, evidencePath string, offset
 	if err != nil {
 		return err
 	}
-	defer destination.Close()
-	_, err = io.Copy(destination, source)
-	return err
+	if _, err := io.Copy(destination, source); err != nil {
+		_ = destination.Close()
+		return err
+	}
+	return destination.Close()
 }
 
 func appendRunScopedVisualEvidenceState(path string, artifact visualEvidenceArtifact) error {

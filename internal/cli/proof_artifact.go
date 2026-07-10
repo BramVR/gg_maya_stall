@@ -294,7 +294,7 @@ func requireBrokerCapturedVisualEvidence(evidenceDir string, bundle evidenceBund
 	for _, artifact := range bundle.VisualEvidence {
 		clean := cleanEvidenceArtifactPath(artifact.Path)
 		if clean == "" {
-			return fmt.Errorf("Visual Evidence artifact path %q must stay inside the Evidence Bundle", artifact.Path)
+			return fmt.Errorf("visual Evidence artifact path %q must stay inside the Evidence Bundle", artifact.Path)
 		}
 		if artifact.Origin != visualEvidenceOriginBrokerCapture {
 			return fmt.Errorf("live Visual Evidence proof requires Session Broker captured artifacts: %s has origin %q", clean, visualEvidenceOriginLabel(artifact.Origin))
@@ -307,7 +307,7 @@ func requireBrokerCapturedVisualEvidence(evidenceDir string, bundle evidenceBund
 			return err
 		}
 		if !strings.EqualFold(hash, artifact.SHA256) {
-			return fmt.Errorf("Visual Evidence artifact %s sha256 %s does not match recorded provenance hash %s", clean, hash, artifact.SHA256)
+			return fmt.Errorf("visual Evidence artifact %s sha256 %s does not match recorded provenance hash %s", clean, hash, artifact.SHA256)
 		}
 	}
 	return nil
@@ -329,7 +329,9 @@ func requireBrokerCaptureProvenanceEvents(evidenceDir string, bundle evidenceBun
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	var events []visualEvidenceProvenanceEvent
 	scanner := bufio.NewScanner(file)
@@ -369,13 +371,13 @@ func requireBrokerCaptureProvenanceEvents(evidenceDir string, bundle evidenceBun
 			break
 		}
 		if requestedIndex < 0 {
-			return fmt.Errorf("Visual Evidence artifact %s is missing capture-requested provenance", path)
+			return fmt.Errorf("visual Evidence artifact %s is missing capture-requested provenance", path)
 		}
 		if !capturedFound {
 			if capturedBeforeRequest {
-				return fmt.Errorf("Visual Evidence artifact %s captured provenance appears before matching capture-requested provenance", path)
+				return fmt.Errorf("visual Evidence artifact %s captured provenance appears before matching capture-requested provenance", path)
 			}
-			return fmt.Errorf("Visual Evidence artifact %s is missing matching captured provenance", path)
+			return fmt.Errorf("visual Evidence artifact %s is missing matching captured provenance", path)
 		}
 	}
 	return nil

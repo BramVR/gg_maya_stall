@@ -17,8 +17,15 @@ import (
 )
 
 const (
-	sessiondScenarioTimeout = 10 * time.Minute
-	sessiondCommandTimeout  = 2 * time.Minute
+	sessiondScenarioTimeout     = 10 * time.Minute
+	sessiondCommandTimeout      = 2 * time.Minute
+	sessiondSessionStartTimeout = 5 * time.Minute
+	sessiondSessionPollInterval = 5 * time.Second
+	// defaultSessiondUITaskName is the interactive Windows scheduled task
+	// created by scripts/windows/prepare-maya-host.ps1. It launches
+	// gg_mayasessiond in the logged-in interactive console session so
+	// maya.exe does not start in Windows Services session 0.
+	defaultSessiondUITaskName = "MayaStallSessiondUI"
 )
 
 type ggMayaSessiondBroker struct {
@@ -73,6 +80,124 @@ func sessionBrokerForConfig(host mayaHostConfig) sessionBroker {
 		return invalidSessionBroker{err: fmt.Errorf("%s", reason)}
 	}
 	return fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "fake Scenario completed"}}
+}
+
+func (broker ggMayaSessiondBroker) StartFreshSession(context runContext, scenario scenarioConfig) (brokerSessionIdentity, error) {
+	if err := broker.validate(); err != nil {
+		return brokerSessionIdentity{}, err
+	}
+	previousSessionID := ""
+	if status, err := broker.status(); err == nil {
+		previousSessionID = status.State.SessionID
+		if sessiondSessionLooksActive(status) {
+			if err := broker.stopSessiondSession(); err != nil {
+				return brokerSessionIdentity{}, fmt.Errorf("stop inherited gg_mayasessiond Maya UI Session: %w", err)
+			}
+		}
+	}
+	if err := broker.startSessiondUITask(); err != nil {
+		return brokerSessionIdentity{}, fmt.Errorf("start gg_mayasessiond Maya UI Session task %q (see docs/setup/windows-maya-host.md#session-broker): %w", broker.sessiondUITaskName(), err)
+	}
+	identity, err := broker.awaitFreshSession(previousSessionID)
+	if err != nil {
+		return brokerSessionIdentity{}, err
+	}
+	if err := appendEvent(context.EventsPath, "broker.session.fresh", identity.SessionID); err != nil {
+		return brokerSessionIdentity{}, err
+	}
+	return identity, nil
+}
+
+func (broker ggMayaSessiondBroker) StopSession(context runContext, session brokerSessionIdentity) error {
+	if err := broker.validate(); err != nil {
+		return err
+	}
+	status, err := broker.status()
+	if err != nil {
+		return err
+	}
+	if sessiondSessionLooksActive(status) {
+		if session.SessionID != "" && status.State.SessionID != "" && status.State.SessionID != session.SessionID {
+			return fmt.Errorf("gg_mayasessiond session id changed from %s to %s since this Fresh Run started; refusing to stop a session this run does not own", session.SessionID, status.State.SessionID)
+		}
+		if err := broker.stopSessiondSession(); err != nil {
+			return err
+		}
+	}
+	return appendEvent(context.EventsPath, "broker.session.stopped", session.SessionID)
+}
+
+func sessiondSessionLooksActive(status sessiondStatusResult) bool {
+	derived := status.DerivedStatus
+	if derived == "" {
+		derived = status.State.Status
+	}
+	return status.HasState && derived != "" && !strings.EqualFold(derived, "stopped")
+}
+
+func (broker ggMayaSessiondBroker) sessiondUITaskName() string {
+	if task := strings.TrimSpace(broker.host.Broker.UITask); task != "" {
+		return task
+	}
+	return defaultSessiondUITaskName
+}
+
+func (broker ggMayaSessiondBroker) startSessiondUITask() error {
+	script := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
+$task = Get-ScheduledTask -TaskName %s -ErrorAction Stop
+if ($task.State -ne 'Running') {
+  Start-ScheduledTask -InputObject $task
+}`, powerShellSingleQuoted(broker.sessiondUITaskName()))
+	_, err := runSSHCommandOutput(broker.host, encodedPowerShellCommand(script), sessiondCommandTimeout)
+	return err
+}
+
+func (broker ggMayaSessiondBroker) awaitFreshSession(previousSessionID string) (brokerSessionIdentity, error) {
+	deadline := time.Now().Add(sessiondSessionStartTimeout)
+	lastDetail := "gg_mayasessiond did not report a running session"
+	for {
+		status, err := broker.status()
+		switch {
+		case err != nil:
+			lastDetail = err.Error()
+		case !sessiondSessionLooksActive(status):
+			lastDetail = "gg_mayasessiond session is not running yet"
+		case !status.State.CallServerReady:
+			lastDetail = "gg_mayasessiond call server is not ready yet"
+		case status.State.SessionID == "":
+			lastDetail = "gg_mayasessiond did not report a broker session id"
+		case previousSessionID != "" && status.State.SessionID == previousSessionID:
+			lastDetail = fmt.Sprintf("gg_mayasessiond still reports inherited session %s", previousSessionID)
+		default:
+			return brokerSessionIdentity{
+				BrokerAdapter: "gg-mayasessiond",
+				SessionID:     status.State.SessionID,
+			}, nil
+		}
+		if !time.Now().Before(deadline) {
+			return brokerSessionIdentity{}, fmt.Errorf("fresh gg_mayasessiond Maya UI Session was not ready within %s: %s", sessiondSessionStartTimeout, lastDetail)
+		}
+		time.Sleep(sessiondSessionPollInterval)
+	}
+}
+
+func (broker ggMayaSessiondBroker) stopSessiondSession() error {
+	raw, err := broker.runSessiondCLI([]string{"stop", "--state-dir", broker.host.Broker.StateDir, "--wait-timeout-seconds", "120", "--json"}, sessiondCommandTimeout+2*time.Minute)
+	if err != nil {
+		return err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return fmt.Errorf("parse gg_mayasessiond stop JSON: %w", err)
+	}
+	ok, found := result["ok"].(bool)
+	if !found || !ok {
+		if message, _ := result["error"].(string); message != "" {
+			return fmt.Errorf("gg_mayasessiond stop failed: %s", message)
+		}
+		return fmt.Errorf("gg_mayasessiond stop failed")
+	}
+	return nil
 }
 
 func (broker ggMayaSessiondBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
@@ -278,22 +403,8 @@ func (broker ggMayaSessiondBroker) StopRetainedRun(record runRetentionRecord) er
 		if strings.TrimSpace(remoteRunRoot) == "" {
 			return fmt.Errorf("refusing to stop retained run %s because broker state is %s and no remote workspace cleanup path is recorded: %s", record.RunID, status.State, status.Detail)
 		}
-	} else {
-		raw, err := broker.runSessiondCLI([]string{"stop", "--state-dir", broker.host.Broker.StateDir, "--wait-timeout-seconds", "120", "--json"}, sessiondCommandTimeout+2*time.Minute)
-		if err != nil {
-			return err
-		}
-		var result map[string]any
-		if err := json.Unmarshal(raw, &result); err != nil {
-			return fmt.Errorf("parse gg_mayasessiond stop JSON: %w", err)
-		}
-		ok, found := result["ok"].(bool)
-		if !found || !ok {
-			if message, _ := result["error"].(string); message != "" {
-				return fmt.Errorf("gg_mayasessiond stop failed: %s", message)
-			}
-			return fmt.Errorf("gg_mayasessiond stop failed")
-		}
+	} else if err := broker.stopSessiondSession(); err != nil {
+		return err
 	}
 	if strings.TrimSpace(remoteRunRoot) != "" {
 		if err := broker.removeRemotePath(remoteRunRoot); err != nil {

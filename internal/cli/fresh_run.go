@@ -22,6 +22,9 @@ type freshRunLifecycle struct {
 	resolvedRuntime              resolvedRuntime
 	context                      runContext
 	manifest                     runManifest
+	session                      brokerSessionIdentity
+	sessionStarted               bool
+	sessionSettled               bool
 	brokerResult                 ScenarioResult
 	result                       ScenarioResult
 	visualEvidence               []visualEvidenceArtifact
@@ -47,6 +50,13 @@ func newFreshRun(repoDir string, options runOptions, runtime runRuntime) freshRu
 
 func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 	defer func() {
+		if run.sessionStarted && !run.sessionSettled {
+			if stopErr := run.runtime.Broker.StopSession(run.context, run.session); stopErr != nil {
+				err = errors.Join(err, fmt.Errorf("stop Maya UI Session for %s after run failure: %w", run.manifest.RunID, stopErr))
+			} else if syncErr := run.syncEvidenceEvents(); syncErr != nil {
+				err = errors.Join(err, syncErr)
+			}
+		}
 		if run.releaseHostLock {
 			if releaseErr := run.host.release(); releaseErr != nil {
 				err = errors.Join(err, fmt.Errorf("release Host Lock for %s: %w", run.host.HostID, releaseErr))
@@ -164,6 +174,22 @@ func (run *freshRunLifecycle) setup() error {
 }
 
 func (run *freshRunLifecycle) execute() error {
+	session, err := run.runtime.Broker.StartFreshSession(run.context, run.scenario.Config)
+	if err != nil {
+		if evidenceErr := run.collectBrokerFailureArtifacts(err); evidenceErr != nil {
+			return errors.Join(err, evidenceErr)
+		}
+		if evidenceErr := run.writeBrokerFailureEvidence(err); evidenceErr != nil {
+			return errors.Join(err, evidenceErr)
+		}
+		return err
+	}
+	run.session = session
+	run.sessionStarted = true
+	run.manifest.BrokerSession = &session
+	if err := writeJSONFile(filepath.Join(run.context.StateDir, "manifest.json"), run.manifest); err != nil {
+		return err
+	}
 	result, err := run.runtime.Broker.RunScenario(run.context, run.scenario.Config)
 	if err != nil {
 		if evidenceErr := run.collectBrokerFailureArtifacts(err); evidenceErr != nil {
@@ -386,6 +412,12 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 			fmt.Sprintf("maya-stall stop %s", run.manifest.RunID),
 		)
 	}
+	if run.stopPolicy == "stopped" {
+		if err := run.runtime.Broker.StopSession(run.context, run.session); err != nil {
+			return runOutcome{}, fmt.Errorf("stop Maya UI Session for %s: %w", run.manifest.RunID, err)
+		}
+		run.sessionSettled = true
+	}
 	if err := appendEvent(run.context.EventsPath, "run.completed", run.result.Status); err != nil {
 		return runOutcome{}, err
 	}
@@ -415,6 +447,7 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 		if err := writeRunRetentionRecord(run.context, record); err != nil {
 			return runOutcome{}, err
 		}
+		run.sessionSettled = true
 	} else if retention, ok := run.runtime.Broker.(runRetentionBroker); ok && retention.RetentionCapabilities().CleanupRetainedWorkspace {
 		if err := retention.CleanupRun(run.context); err != nil {
 			return runOutcome{}, fmt.Errorf("clean up remote run workspace for %s: %w", run.manifest.RunID, err)
@@ -432,4 +465,21 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 		StopPolicy:       run.stopPolicy,
 		FollowUpCommands: run.followUp,
 	}, nil
+}
+
+func (run *freshRunLifecycle) syncEvidenceEvents() error {
+	if _, err := os.Stat(run.context.EvidenceDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	events, err := os.ReadFile(run.context.EventsPath)
+	if err != nil {
+		return fmt.Errorf("read run events after stopping failed run: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(run.context.EvidenceDir, evidenceEventsFileName), events, 0o644); err != nil {
+		return fmt.Errorf("update Evidence Bundle events after stopping failed run: %w", err)
+	}
+	return nil
 }

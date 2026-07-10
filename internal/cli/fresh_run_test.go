@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -30,8 +31,10 @@ func TestFreshRunLifecycleOrdersSetupExecuteAndSettle(t *testing.T) {
 
 	recorder.requireOrder(t,
 		"setup.stage-payload",
+		"execute.start-session",
 		"execute.run-scenario",
 		"settle.collect-artifacts",
+		"settle.stop-session",
 	)
 	readEvidenceBundle(t, filepath.Join(dir, "artifacts", "maya-stall", outcome.RunID))
 	if _, _, err := readScenarioResultDocument(filepath.Join(dir, "artifacts", "maya-stall", outcome.RunID, "scenario-result.json")); err != nil {
@@ -70,6 +73,14 @@ func TestFreshRunLifecycleSettlesStopPolicyAndFailures(t *testing.T) {
 		}
 		if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")); !os.IsNotExist(statErr) {
 			t.Fatalf("broker-error Host Lock = %v, want missing", statErr)
+		}
+		evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+		events, readErr := os.ReadFile(filepath.Join(evidence, "events.jsonl"))
+		if readErr != nil {
+			t.Fatalf("read broker-error events: %v", readErr)
+		}
+		if !strings.Contains(string(events), `"event":"broker.session.stopped"`) {
+			t.Fatalf("broker-error events missing stopped Maya UI Session:\n%s", string(events))
 		}
 	})
 
@@ -342,6 +353,182 @@ scenarios:
 	}
 }
 
+func TestFreshRunSessionLifecycleRecordsIdentityAndStopPolicy(t *testing.T) {
+	tests := []struct {
+		name             string
+		stopAfter        string
+		brokerResult     ScenarioResult
+		wantStopPolicy   string
+		wantStoppedEvent bool
+	}{
+		{
+			name:             "stopped run stops the Maya UI Session",
+			stopAfter:        stopAfterAlways,
+			brokerResult:     ScenarioResult{Status: resultStatusPassed, Summary: "fake Scenario completed"},
+			wantStopPolicy:   "stopped",
+			wantStoppedEvent: true,
+		},
+		{
+			name:             "kept run retains the Maya UI Session",
+			stopAfter:        stopAfterNever,
+			brokerResult:     ScenarioResult{Status: resultStatusPassed, Summary: "fake Scenario completed"},
+			wantStopPolicy:   "kept",
+			wantStoppedEvent: false,
+		},
+		{
+			name:             "keep on failure retains the Maya UI Session",
+			stopAfter:        stopAfterSuccess,
+			brokerResult:     ScenarioResult{Status: resultStatusFailed, Summary: "fake failure"},
+			wantStopPolicy:   "kept",
+			wantStoppedEvent: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := writeRunConfigFixture(t)
+			runtime := defaultRunRuntime()
+			runtime.Broker = fakeSessionBroker{Result: tt.brokerResult}
+
+			outcome, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: tt.stopAfter}, runtime).Run()
+			if err != nil {
+				t.Fatalf("Fresh Run returned error: %v", err)
+			}
+			if outcome.StopPolicy != tt.wantStopPolicy {
+				t.Fatalf("Fresh Run Stop Policy = %q, want %q", outcome.StopPolicy, tt.wantStopPolicy)
+			}
+			evidence := filepath.Join(dir, "artifacts", "maya-stall", outcome.RunID)
+			bundle := readEvidenceBundle(t, evidence)
+			wantSessionID := "fake-" + outcome.RunID
+			if bundle.BrokerSession == nil || bundle.BrokerSession.BrokerAdapter != "fake" || bundle.BrokerSession.SessionID != wantSessionID {
+				t.Fatalf("Evidence Bundle broker session = %+v, want fake %q", bundle.BrokerSession, wantSessionID)
+			}
+			manifest := readRunManifestFile(t, filepath.Join(evidence, "manifest.json"))
+			if manifest.BrokerSession == nil || manifest.BrokerSession.SessionID != wantSessionID {
+				t.Fatalf("manifest broker session = %+v, want %q", manifest.BrokerSession, wantSessionID)
+			}
+			events, err := os.ReadFile(filepath.Join(evidence, "events.jsonl"))
+			if err != nil {
+				t.Fatalf("read evidence events: %v", err)
+			}
+			if !strings.Contains(string(events), `{"detail":"`+wantSessionID+`","event":"broker.session.fresh"}`) {
+				t.Fatalf("evidence events missing fresh session identity:\n%s", string(events))
+			}
+			hasStopped := strings.Contains(string(events), `"broker.session.stopped"`)
+			if hasStopped != tt.wantStoppedEvent {
+				t.Fatalf("evidence events stopped marker = %v, want %v:\n%s", hasStopped, tt.wantStoppedEvent, string(events))
+			}
+			if tt.wantStopPolicy == "kept" {
+				record := readRunRetentionRecordFile(t, filepath.Join(dir, ".maya-stall", "state", "runs", outcome.RunID, "run-record.json"))
+				if record.RemoteSession.SessionID != wantSessionID {
+					t.Fatalf("kept run retained session = %q, want the Fresh Run session %q", record.RemoteSession.SessionID, wantSessionID)
+				}
+			}
+		})
+	}
+}
+
+func TestFreshRunDoesNotReuseSessionAcrossConsecutiveRuns(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	sessionIDs := make(map[string]bool)
+	for attempt := 0; attempt < 2; attempt++ {
+		outcome, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, defaultRunRuntime()).Run()
+		if err != nil {
+			t.Fatalf("Fresh Run %d returned error: %v", attempt+1, err)
+		}
+		bundle := readEvidenceBundle(t, filepath.Join(dir, "artifacts", "maya-stall", outcome.RunID))
+		if bundle.BrokerSession == nil || bundle.BrokerSession.SessionID == "" {
+			t.Fatalf("Fresh Run %d Evidence Bundle missing broker session identity: %+v", attempt+1, bundle.BrokerSession)
+		}
+		if sessionIDs[bundle.BrokerSession.SessionID] {
+			t.Fatalf("Fresh Run reused Maya UI Session %q across consecutive runs", bundle.BrokerSession.SessionID)
+		}
+		sessionIDs[bundle.BrokerSession.SessionID] = true
+	}
+}
+
+func TestFreshRunFailsWhenSessionLifecycleFails(t *testing.T) {
+	t.Run("start fresh session failure fails the run with evidence", func(t *testing.T) {
+		dir := writeRunConfigFixture(t)
+		runtime := defaultRunRuntime()
+		runtime.Broker = startFailingSessionBroker{message: "no interactive Maya UI Session available"}
+
+		_, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
+		if err == nil || !strings.Contains(err.Error(), "no interactive Maya UI Session available") {
+			t.Fatalf("Fresh Run error = %v, want session start failure", err)
+		}
+		evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+		bundle := readEvidenceBundle(t, evidence)
+		if bundle.Status != resultStatusFailed || bundle.BrokerSession != nil {
+			t.Fatalf("failure Evidence Bundle = status %q session %+v, want failed without session", bundle.Status, bundle.BrokerSession)
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")); !os.IsNotExist(statErr) {
+			t.Fatalf("session-start-failure Host Lock = %v, want missing", statErr)
+		}
+	})
+
+	t.Run("stop session failure fails the run", func(t *testing.T) {
+		dir := writeRunConfigFixture(t)
+		runtime := defaultRunRuntime()
+		runtime.Broker = stopFailingSessionBroker{
+			fakeSessionBroker: fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "fake Scenario completed"}},
+			message:           "gg_mayasessiond stop failed",
+		}
+
+		_, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
+		if err == nil || !strings.Contains(err.Error(), "stop Maya UI Session") || !strings.Contains(err.Error(), "gg_mayasessiond stop failed") {
+			t.Fatalf("Fresh Run error = %v, want stop session failure", err)
+		}
+	})
+}
+
+func readRunManifestFile(t *testing.T, path string) runManifest {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read run manifest: %v", err)
+	}
+	var manifest runManifest
+	if err := json.Unmarshal(content, &manifest); err != nil {
+		t.Fatalf("parse run manifest: %v", err)
+	}
+	return manifest
+}
+
+func readRunRetentionRecordFile(t *testing.T, path string) runRetentionRecord {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read run retention record: %v", err)
+	}
+	var record runRetentionRecord
+	if err := json.Unmarshal(content, &record); err != nil {
+		t.Fatalf("parse run retention record: %v", err)
+	}
+	return record
+}
+
+type startFailingSessionBroker struct {
+	fakeSessionLifecycle
+	message string
+}
+
+func (broker startFailingSessionBroker) StartFreshSession(runContext, scenarioConfig) (brokerSessionIdentity, error) {
+	return brokerSessionIdentity{}, fmt.Errorf("%s", broker.message)
+}
+
+func (broker startFailingSessionBroker) RunScenario(runContext, scenarioConfig) (ScenarioResult, error) {
+	return ScenarioResult{}, fmt.Errorf("RunScenario must not run when the fresh session did not start")
+}
+
+type stopFailingSessionBroker struct {
+	fakeSessionBroker
+	message string
+}
+
+func (broker stopFailingSessionBroker) StopSession(runContext, brokerSessionIdentity) error {
+	return fmt.Errorf("%s", broker.message)
+}
+
 type freshRunLifecycleRecorder struct {
 	events []string
 }
@@ -379,6 +566,16 @@ func (host recordingRunHost) CollectArtifacts(runContext, scenarioContract) erro
 type recordingSessionBroker struct {
 	recorder *freshRunLifecycleRecorder
 	result   ScenarioResult
+}
+
+func (broker recordingSessionBroker) StartFreshSession(context runContext, scenario scenarioConfig) (brokerSessionIdentity, error) {
+	broker.recorder.add("execute.start-session")
+	return fakeSessionLifecycle{}.StartFreshSession(context, scenario)
+}
+
+func (broker recordingSessionBroker) StopSession(context runContext, session brokerSessionIdentity) error {
+	broker.recorder.add("settle.stop-session")
+	return fakeSessionLifecycle{}.StopSession(context, session)
 }
 
 func (broker recordingSessionBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
@@ -421,6 +618,7 @@ scenarios:
 }
 
 type failingSessionBroker struct {
+	fakeSessionLifecycle
 	message string
 }
 
@@ -432,6 +630,7 @@ func (broker failingSessionBroker) RunScenario(context runContext, scenario scen
 }
 
 type failingScreenshotSessionBroker struct {
+	fakeSessionLifecycle
 	message string
 }
 
@@ -444,6 +643,7 @@ func (failingScreenshotSessionBroker) CaptureScreenshot(context runContext, requ
 }
 
 type brokerFailureAfterScenarioCompletion struct {
+	fakeSessionLifecycle
 	result  string
 	files   map[string]string
 	message string

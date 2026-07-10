@@ -28,11 +28,12 @@ settle flow:
 5. Acquire a Host Lock.
 6. Stage only declared Run Payload paths.
 7. Provide `MAYA_STALL_SCENARIO_RESULT` to the Scenario.
-8. Run through the resolved fake-local or ssh-sessiond runtime.
-9. Collect outputs, logs, runtime metadata, Scenario Result, and Visual Evidence into an
+8. Ask the Session Broker to stop any inherited Maya UI Session and start a new identified Maya UI Session.
+9. Run through the resolved fake-local or ssh-sessiond runtime.
+10. Collect outputs, logs, runtime metadata, broker session identity, Scenario Result, and Visual Evidence into an
    Evidence Bundle.
-10. Run Validators.
-11. Apply the Stop Policy and release or retain the Host Lock.
+11. Run Validators.
+12. Apply the Stop Policy to that Maya UI Session and release or retain the Host Lock.
 
 Supported runtime profiles:
 
@@ -135,8 +136,9 @@ Use `--host-lock-wait <duration>` to wait for a busy host or
 
 ## Stop Policy
 
-Fresh Runs stop and clean hidden run state and the remote run workspace by
-default after writing the Evidence Bundle. Use `--keep-on-failure` to retain a
+Fresh Runs stop their identified broker-owned Maya UI Session and clean hidden
+run state plus the remote run workspace by default after writing the Evidence
+Bundle. Use `--keep-on-failure` to retain a
 failed Session Broker-backed Maya UI Session for debugging.
 
 Explicit `--stop-after` values are:

@@ -72,6 +72,7 @@ type brokerConfig struct {
 	Python     string `yaml:"python"`
 	Repo       string `yaml:"repo"`
 	MCPSource  string `yaml:"mcpSource"`
+	UITask     string `yaml:"uiTask"`
 }
 
 func (config *brokerConfig) UnmarshalYAML(value *yaml.Node) error {

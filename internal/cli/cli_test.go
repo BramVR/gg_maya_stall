@@ -6348,6 +6348,7 @@ hostPools:
 }
 
 type blockingBroker struct {
+	fakeSessionLifecycle
 	started chan struct{}
 	release chan struct{}
 	result  ScenarioResult
@@ -6382,7 +6383,7 @@ func (broker *blockingBroker) RunScenario(context runContext, scenario scenarioC
 	return broker.result, nil
 }
 
-type lockCorruptingBroker struct{}
+type lockCorruptingBroker struct{ fakeSessionLifecycle }
 
 func (lockCorruptingBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
 	lockPath := filepath.Join(context.RepoDir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")
@@ -6401,7 +6402,7 @@ func (lockCorruptingBroker) RunScenario(context runContext, scenario scenarioCon
 	return ScenarioResult{Status: "passed", Summary: "lock release should fail"}, nil
 }
 
-type lockCorruptingVisualBroker struct{}
+type lockCorruptingVisualBroker struct{ fakeSessionLifecycle }
 
 func (lockCorruptingVisualBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
 	return ScenarioResult{Status: resultStatusPassed}, nil
@@ -6422,11 +6423,13 @@ func (lockCorruptingVisualBroker) CaptureScreenshot(context runContext, request 
 }
 
 type outputWritingBroker struct {
+	fakeSessionLifecycle
 	files          map[string]string
 	visualEvidence bool
 }
 
 type environmentCheckingBroker struct {
+	fakeSessionLifecycle
 	runID       string
 	resultPath  string
 	environment map[string]string
@@ -6448,7 +6451,7 @@ func (broker *environmentCheckingBroker) RunScenario(context runContext, scenari
 	return ScenarioResult{Status: resultStatusPassed, Summary: "checked run environment"}, nil
 }
 
-type scenarioResultFileBroker struct{}
+type scenarioResultFileBroker struct{ fakeSessionLifecycle }
 
 func (scenarioResultFileBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
 	if err := appendEvent(context.EventsPath, "broker.session.started", scenario.MayaVersion); err != nil {
@@ -6474,7 +6477,7 @@ func (scenarioResultFileBroker) RunScenario(context runContext, scenario scenari
 	return ScenarioResult{Status: resultStatusPassed, Summary: "broker fallback"}, nil
 }
 
-type partialScenarioResultFileBroker struct{}
+type partialScenarioResultFileBroker struct{ fakeSessionLifecycle }
 
 func (partialScenarioResultFileBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
 	if err := appendEvent(context.EventsPath, "broker.session.started", scenario.MayaVersion); err != nil {
@@ -6492,7 +6495,7 @@ func (partialScenarioResultFileBroker) RunScenario(context runContext, scenario 
 	return ScenarioResult{Status: resultStatusFailed, Summary: "broker failure"}, nil
 }
 
-type trailingScenarioResultBroker struct{}
+type trailingScenarioResultBroker struct{ fakeSessionLifecycle }
 
 func (trailingScenarioResultBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
 	if err := appendEvent(context.EventsPath, "broker.session.started", scenario.MayaVersion); err != nil {
@@ -6546,6 +6549,7 @@ func (broker outputWritingBroker) RunScenario(context runContext, scenario scena
 }
 
 type symlinkOutputBroker struct {
+	fakeSessionLifecycle
 	linkPath string
 	target   string
 }

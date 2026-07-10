@@ -72,6 +72,22 @@ func TestOptInRealSSHRunSmoke(t *testing.T) {
 	options.Host = bundle.Host
 	host := liveSmokeHostConfigByID(t, options, bundle.Host)
 	requireLiveScenarioRecordingArtifact(t, evidenceDir, bundle)
+	assertLiveFreshRunSessionStopped(t, host, bundle.BrokerSession)
+
+	var secondRunStdout, secondRunStderr bytes.Buffer
+	secondRunCode := Run(options.runArgs("smoke"), &secondRunStdout, &secondRunStderr, dir, "test-version")
+	if secondRunCode != 0 {
+		t.Fatalf("second real SSH smoke run exit code = %d, want 0; stdout: %s stderr: %s", secondRunCode, secondRunStdout.String(), secondRunStderr.String())
+	}
+	secondEvidenceDir := smokeOutputValue(secondRunStdout.String(), "evidence")
+	if secondEvidenceDir == "" {
+		t.Fatalf("second real SSH smoke run did not print Evidence Bundle path:\n%s", secondRunStdout.String())
+	}
+	secondBundle := assertLiveSmokeEvidenceBundle(t, secondEvidenceDir)
+	if secondBundle.BrokerSession.SessionID == bundle.BrokerSession.SessionID {
+		t.Fatalf("two consecutive Fresh Runs reused broker session %q", bundle.BrokerSession.SessionID)
+	}
+	assertLiveFreshRunSessionStopped(t, host, secondBundle.BrokerSession)
 
 	var keptStdout, keptStderr bytes.Buffer
 	keptCode := Run(options.runArgs("retention-failure", "--keep-on-failure"), &keptStdout, &keptStderr, dir, "test-version")
@@ -351,6 +367,9 @@ func assertLiveSmokeEvidenceBundle(t *testing.T, evidenceDir string) evidenceBun
 	if bundle.Runtime.Profile != "ssh-sessiond" || bundle.Runtime.HostAdapter != "ssh" || bundle.Runtime.BrokerAdapter != "gg-mayasessiond" || !bundle.Runtime.LiveProofEligible {
 		t.Fatalf("Evidence Bundle runtime = %+v, want live-proof-eligible ssh-sessiond", bundle.Runtime)
 	}
+	if bundle.BrokerSession == nil || bundle.BrokerSession.BrokerAdapter != "gg-mayasessiond" || bundle.BrokerSession.SessionID == "" {
+		t.Fatalf("Evidence Bundle broker session = %+v, want identified gg-mayasessiond Maya UI Session", bundle.BrokerSession)
+	}
 	if len(bundle.VisualEvidence) == 0 {
 		t.Fatalf("Evidence Bundle missing Visual Evidence")
 	}
@@ -395,6 +414,20 @@ func assertLiveSmokeEvidenceBundle(t *testing.T, evidenceDir string) evidenceBun
 		}
 	}
 	return bundle
+}
+
+func assertLiveFreshRunSessionStopped(t *testing.T, host mayaHostConfig, session *brokerSessionIdentity) {
+	t.Helper()
+	if session == nil || session.SessionID == "" {
+		t.Fatal("cannot verify stopped Fresh Run without broker session identity")
+	}
+	status, err := (ggMayaSessiondBroker{host: host}).status()
+	if err != nil {
+		t.Fatalf("query gg_mayasessiond after stopped Fresh Run %q: %v", session.SessionID, err)
+	}
+	if sessiondSessionLooksActive(status) {
+		t.Fatalf("stopped Fresh Run %q left gg_mayasessiond active with session %q and status %q", session.SessionID, status.State.SessionID, status.DerivedStatus)
+	}
 }
 
 func requireLiveScenarioRecordingArtifact(t *testing.T, evidenceDir string, bundle evidenceBundle) visualEvidenceArtifact {

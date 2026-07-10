@@ -75,14 +75,6 @@ func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 	if err := run.setup(); err != nil {
 		return run.finishFailedRun(err)
 	}
-	defer func() {
-		if err == nil && outcome.StopPolicy == "stopped" {
-			if cleanupErr := cleanupRunState(run.repoDir, outcome.RunID); cleanupErr != nil {
-				err = fmt.Errorf("clean up Fresh Run state for %s: %w", outcome.RunID, cleanupErr)
-			}
-		}
-	}()
-
 	if err := run.execute(); err != nil {
 		return run.finishFailedRun(err)
 	}

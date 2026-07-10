@@ -675,6 +675,26 @@ func TestFreshRunStopCleansStateWhenEvidenceSyncFails(t *testing.T) {
 	}
 }
 
+func TestFreshRunSettleRetainsStateWhenRemoteCleanupFails(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	broker := &settleCleanupFailingBroker{fakeSessionBroker: fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "passed"}}}
+	runtime := defaultRunRuntime()
+	runtime.Broker = broker
+
+	_, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
+	if err == nil || !strings.Contains(err.Error(), "settle cleanup failed") {
+		t.Fatalf("Fresh Run error = %v, want settle cleanup failure", err)
+	}
+	evidenceDir := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	runID := filepath.Base(evidenceDir)
+	if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "runs", runID, "run-record.json")); statErr != nil {
+		t.Fatalf("settle cleanup-failure Run Record missing: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")); statErr != nil {
+		t.Fatalf("settle cleanup-failure Host Lock missing: %v", statErr)
+	}
+}
+
 func TestGGMayaSessiondFreshRunFailsClosedWhenInheritedSessionStopFails(t *testing.T) {
 	dir := t.TempDir()
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
@@ -1016,6 +1036,14 @@ type retryingStopSessionBroker struct {
 type syncFailingStopSessionBroker struct {
 	fakeSessionBroker
 	cleanupCalls int
+}
+
+type settleCleanupFailingBroker struct {
+	fakeSessionBroker
+}
+
+func (broker *settleCleanupFailingBroker) CleanupRun(runContext) error {
+	return fmt.Errorf("settle cleanup failed")
 }
 
 func (broker *syncFailingStopSessionBroker) StopSession(context runContext, session brokerSessionIdentity) error {

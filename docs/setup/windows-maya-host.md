@@ -248,20 +248,31 @@ broker:
   recoveryTask: MayaStallSessiondUI
 ```
 
+`recoveryTask` is optional and defaults to the prepare script's
+`MayaStallSessiondUI` interactive scheduled task. Each Fresh Run stops an
+existing daemon session, restarts that task, waits for a new ready broker
+session identity, and refuses to reuse the previous identity. The same task
+recovers commandPort health before a live Scenario starts. A `stopped` Stop
+Policy stops that exact Maya UI Session; a `kept` policy retains its identity
+for `status`, `attach`, and `stop`.
+
 Maya Stall invokes `gg_maya_sessiond.cli` on the Windows host through the same SSH transport. Runs stage declared payloads under `workRoot/runs/<run-id>/`, execute a staged wrapper with `script.execute`, download declared outputs from the remote workspace, and capture configured Visual Evidence from the interactive Windows desktop. Remote Scenario execution through `script.execute` is capped at 10 minutes. The Session Broker launcher must allow the staged wrapper directory; otherwise doctor fails the `session-broker` layer with a `script.execute` repair hint.
 
 `recoveryTask` names the host-managed interactive scheduled task Maya Stall may
 restart when `gg_mayasessiond` reports a commandPort-unhealthy state before a
 live Scenario starts. If omitted, Maya Stall uses the documented prepare-script
 default `MayaStallSessiondUI`. Recovery is limited to commandPort health
-reasons such as `command-port-not-ready` and `command-port-unreachable`;
-unrelated broker, host, config, or desktop failures fail at the
+reasons such as `command-port-not-ready` and `command-port-unreachable`, plus
+the known malformed `script.execute` tool result produced by a stale broker
+session. Unrelated broker, host, config, or desktop failures fail at the
 `session-broker` layer with their own reason instead of being hidden as Scenario
 or plugin failures.
 
-Each `manifest.json` and `evidence.json` records the resolved runtime profile, host adapter, broker adapter, redacted broker config source, and whether the run is eligible for live product proof.
+Each `manifest.json` and `evidence.json` records the resolved runtime profile,
+host adapter, broker adapter, broker session identity, redacted broker config
+source, and whether the run is eligible for live product proof.
 
-`maya-stall doctor` also performs live broker probes for `gg_mayasessiond`: it runs daemon `doctor` and `status`, checks the Windows `maya.exe` session, stages a tiny probe script under `workRoot/runs/doctor-*`, executes it with `script.execute`, removes that probe directory, and checks `viewport.capture`. If the commandPort layer is unhealthy and the configured recovery task is available, doctor restarts that task and re-runs the broker probes before reporting success. The local Host Lock gates these probes for Maya Stall runs from the same checkout, but operators should still treat doctor as a live diagnostic that briefly executes code in the active Maya session.
+`maya-stall doctor` also performs live broker probes for `gg_mayasessiond`: it runs daemon `doctor` and `status`, checks the Windows `maya.exe` session, stages a tiny probe script under `workRoot/runs/doctor-*`, executes it with `script.execute`, removes that probe directory, and checks `viewport.capture`. If the commandPort layer is unhealthy or the probe returns the known stale-session malformed tool result and the configured recovery task is available, doctor restarts that task and re-runs the broker probes before reporting success. The local Host Lock gates these probes for Maya Stall runs from the same checkout, but operators should still treat doctor as a live diagnostic that briefly executes code in the active Maya session.
 
 The Doctor CLI renders a Host Health report rather than independent text-only checks. Tests and live proof use the same report fields for layer status, Host Lock state, interactive desktop proof, and broker-backed Visual Evidence readiness.
 
@@ -411,7 +422,7 @@ To run the full live smoke, use:
 MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run)Smoke' -count=1
 ```
 
-`TestOptInRealSSHRunSmoke` first runs `doctor --scenario smoke`, then runs one generated `smoke` Scenario through the configured `gg_mayasessiond` Session Broker, requires screenshot and recording Visual Evidence, and checks that the local Evidence Bundle contains `evidence.json`, events, logs, Scenario Result, the captured screenshot, and an MP4 recording with duration/FPS plus selected Target Profile and Maya Host metadata. `TestOptInRealRunScopedDesktopOpsSmoke` keeps a failed run locked, proves standalone screenshot fails closed while the Host Lock is held, captures a run-scoped desktop screenshot, and clears a controlled modal through `attach <run-id> control click`. Live smokes restart the documented interactive `MayaStallSessiondUI` task before proof starts and after retained-stop tests, or the task named by `MAYA_STALL_SMOKE_SESSIOND_UI_TASK`.
+`TestOptInRealSSHRunSmoke` first runs `doctor --scenario smoke`, then runs two consecutive generated `smoke` Scenarios through the configured `gg_mayasessiond` Session Broker. It requires distinct broker session identities, verifies each stopped run leaves the broker session stopped, requires screenshot and recording Visual Evidence, and checks that the local Evidence Bundle contains `evidence.json`, events, logs, Scenario Result, the captured screenshot, and an MP4 recording with duration/FPS plus selected Target Profile and Maya Host metadata. `TestOptInRealRunScopedDesktopOpsSmoke` keeps a failed run locked, proves standalone screenshot fails closed while the Host Lock is held, captures a run-scoped desktop screenshot, and clears a controlled modal through `attach <run-id> control click`. Live smokes restart the documented interactive `MayaStallSessiondUI` task before proof starts and after retained-stop tests, or the task named by `MAYA_STALL_SMOKE_SESSIOND_UI_TASK`.
 
 To include the canonical Consuming Repo smoke, add a checked-out consuming repo path and run:
 

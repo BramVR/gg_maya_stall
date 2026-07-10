@@ -2532,6 +2532,67 @@ hostPools:
 	}
 }
 
+func TestDoctorGGMayaSessiondRecoversMalformedScriptExecuteResponse(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	useFakeFFmpegLookPath(t, dir)
+	sshLog := filepath.Join(dir, "ssh.log")
+	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
+		``,
+		``,
+		`{"ok":true,"checks":[{"id":"state_dir","ok":true}]}`,
+		`{"derived_status":"running","state":{"status":"running","call_server_ready":true,"maya_alive":true,"mcp_alive":true}}`,
+		`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
+		`{"ok":false,"tool":"script.execute","error":"Error calling tool 'script.execute': 'int' object has no attribute 'get'"}`,
+		`removed`,
+		`{"ok":true,"task":"MayaStallSessiondUI","reason":"script-execute-invalid-response"}`,
+		`{"ok":true,"checks":[{"id":"state_dir","ok":true}]}`,
+		`{"derived_status":"running","state":{"status":"running","call_server_ready":true,"maya_alive":true,"mcp_alive":true}}`,
+		`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
+		`{"ok":true,"tool":"script.execute"}`,
+		`removed`,
+		`maya-version:2025`,
+		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
+		``,
+		``,
+		writeFakeSSHBinaryOutput(t, dir, "recording-frames.zip", zipFrameArchive(t)),
+		`removed`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+          recoveryTask: MayaStallSessiondUI
+        visualEvidence: true
+`)
+
+	report := runDoctor(dir, doctorOptions{HostConfig: hostConfigPath, TargetProfile: "ci", HostPin: "alpha"})
+
+	if !report.Healthy {
+		t.Fatalf("Host Health healthy = false, checks: %+v", report.Layers)
+	}
+	broker := requireHostHealthLayer(t, report, "session-broker")
+	if broker.Status != "ok" || broker.State != "recovered" || !broker.InteractiveDesktop {
+		t.Fatalf("session-broker Host Health = %+v, want recovered interactive broker", broker)
+	}
+}
+
 func TestDoctorGGMayaSessiondReportsDaemonDoctorCheckIDs(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
@@ -3441,7 +3502,7 @@ func TestRunScenarioRealSSHUploadsPayloadAndDownloadsDeclaredOutputs(t *testing.
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
-		sessiondStatusFixture("session-alpha"),
+		sessiondStatusFixture("session-fresh"),
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
 	mustWriteFile(t, hostConfigPath, `version: 1
@@ -3503,15 +3564,15 @@ func TestRunScenarioRealSSHUploadsPluginArtifactsToTrustedRoot(t *testing.T) {
 	sftpLog := filepath.Join(dir, "sftp.log")
 	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
-		sessiondStatusFixture("session-alpha"),
 		trustedPluginPrefsProbeOutput(`// Security
 optionVar -cat "Security"
  -sa "SafeModeAllowedlistPaths"
  -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts";
 `),
 		`{"ok":true,"tool":"trusted-plugin-cleanup"}`,
-		`{"ok":true,"tool":"script.execute"}`,
 		sessiondStatusFixture("session-alpha"),
+		`{"ok":true,"tool":"script.execute"}`,
+		sessiondStatusFixture("session-fresh"),
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
 	mustWriteFile(t, hostConfigPath, `version: 1
@@ -3825,7 +3886,7 @@ func TestRunScenarioGGMayaSessiondBrokerExecutesRemoteScenarioAndCapturesScreens
 		`{"ok":true,"tool":"script.execute"}`,
 		`png proof`,
 		``,
-		sessiondStatusFixture("session-alpha"),
+		sessiondStatusFixture("session-fresh"),
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
 	mustWriteFile(t, hostConfigPath, `version: 1
@@ -3948,11 +4009,11 @@ func TestRunRetentionCommandsUseSessiondBrokerForStatusAttachAndStop(t *testing.
 	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
 		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
-		sessiondStatusFixture("session-alpha"),
-		sessiondStatusFixture("session-alpha"),
-		sessiondStatusFixture("session-alpha"),
+		sessiondStatusFixture("session-fresh"),
+		sessiondStatusFixture("session-fresh"),
+		sessiondStatusFixture("session-fresh"),
 		`{"events":[{"kind":"session","message":"retained run log"}]}`,
-		sessiondStatusFixture("session-alpha"),
+		sessiondStatusFixture("session-fresh"),
 		`{"ok":true,"status":"stopped"}`,
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -3990,7 +4051,7 @@ hostPools:
 	if code != 0 {
 		t.Fatalf("status exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
-	for _, want := range []string{"state: kept", "remoteState: running", "brokerSession: session-alpha", "remoteWorkspace: C:/maya-stall/runs/" + runID + "/workspace"} {
+	for _, want := range []string{"state: kept", "remoteState: running", "brokerSession: session-fresh", "remoteWorkspace: C:/maya-stall/runs/" + runID + "/workspace"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("status output missing %q:\n%s", want, stdout.String())
 		}
@@ -4130,8 +4191,8 @@ hostPools:
 	if err != nil {
 		t.Fatalf("read ssh log: %v", err)
 	}
-	if got := strings.Count(string(sshBytes), "CALL "); got != 5 {
-		t.Fatalf("missing-session-id stop made %d SSH calls, want status plus cleanup but no broker stop:\n%s", got, string(sshBytes))
+	if got := strings.Count(string(sshBytes), "CALL "); got != 6 {
+		t.Fatalf("missing-session-id stop made %d SSH calls, want Fresh Run lifecycle plus status and cleanup but no retained broker stop:\n%s", got, string(sshBytes))
 	}
 }
 
@@ -4141,7 +4202,7 @@ func TestRunRetentionStatusReportsStaleWhenSessiondSessionChanged(t *testing.T) 
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
-		sessiondStatusFixture("session-alpha"),
+		sessiondStatusFixture("session-fresh"),
 		sessiondStatusFixture("session-beta"),
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -4192,8 +4253,8 @@ func TestRunRetentionStopFailureKeepsRunStateAndHostLock(t *testing.T) {
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
-		sessiondStatusFixture("session-alpha"),
-		sessiondStatusFixture("session-alpha"),
+		sessiondStatusFixture("session-fresh"),
+		sessiondStatusFixture("session-fresh"),
 		`{"ok":false,"error":"cannot stop retained session"}`,
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -4248,7 +4309,7 @@ func TestRunRetentionStopStatusFailureKeepsRunStateAndHostLock(t *testing.T) {
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
-		sessiondStatusFixture("session-alpha"),
+		sessiondStatusFixture("session-fresh"),
 		`{"ok":false,"error":"status unavailable"}`,
 		`{"ok":true,"status":"stopped"}`,
 	})
@@ -4311,8 +4372,8 @@ func TestRunRetentionStopRequiresConfirmedBrokerStop(t *testing.T) {
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
-		sessiondStatusFixture("session-alpha"),
-		sessiondStatusFixture("session-alpha"),
+		sessiondStatusFixture("session-fresh"),
+		sessiondStatusFixture("session-fresh"),
 		`{"status":"stopped"}`,
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
@@ -4364,7 +4425,7 @@ func TestRunRetentionStopRejectsTamperedRemoteCleanupPath(t *testing.T) {
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
-		sessiondStatusFixture("session-alpha"),
+		sessiondStatusFixture("session-fresh"),
 		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"status":"stopped"}`,
 	})
@@ -4437,7 +4498,7 @@ func TestRunRetentionStopRefusesStaleSessiondSession(t *testing.T) {
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
-		sessiondStatusFixture("session-alpha"),
+		sessiondStatusFixture("session-fresh"),
 		sessiondStatusFixture("session-beta"),
 		`{"ok":true,"status":"stopped"}`,
 	})
@@ -4494,7 +4555,7 @@ func TestRunRetentionStopTreatsMissingCurrentSessionIDAsStale(t *testing.T) {
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
-		sessiondStatusFixture("session-alpha"),
+		sessiondStatusFixture("session-fresh"),
 		`{"has_state":true,"derived_status":"running","state":{"status":"running","maya_alive":true,"mcp_alive":true,"call_server_ready":true}}`,
 		`{"ok":true,"status":"stopped"}`,
 	})
@@ -4693,7 +4754,7 @@ func TestRunScenarioRealSSHPreflightFailsBeforeStagingWhenCommandPortRecoveryUna
 	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		`{"derived_status":"running","state":{"status":"running","call_server_ready":false,"maya_alive":true,"mcp_alive":true}}`,
-		`@fail:Cannot find scheduled task MayaStallSessiondUI`,
+		`@fresh-fail:Cannot find scheduled task MayaStallSessiondUI`,
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
 	mustWriteFile(t, hostConfigPath, `version: 1
@@ -4723,8 +4784,8 @@ hostPools:
 		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
 	for _, want := range []string{
-		"session-broker preflight failed (command-port-not-ready)",
-		"automatic recovery failed",
+		"restart gg_mayasessiond for a fresh Maya UI Session",
+		"restart scheduled task",
 		"MayaStallSessiondUI",
 	} {
 		if !strings.Contains(stderr.String(), want) {
@@ -4741,7 +4802,6 @@ func TestRunScenarioRealSSHFailsBeforeStagingWhenTrustedPluginAllowlistMissing(t
 	sftpLog := filepath.Join(dir, "sftp.log")
 	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
-		sessiondStatusFixture("session-alpha"),
 		trustedPluginPrefsProbeOutput(`// Security
 optionVar -cat "Security"
  -sa "SafeModeAllowedlistPaths"
@@ -5319,12 +5379,72 @@ func TestRunSessiondCLIRejectsStructuredLogWithoutResult(t *testing.T) {
 	}
 }
 
+func TestSessiondStatusJSONFromNonzeroExit(t *testing.T) {
+	tests := []struct {
+		name        string
+		output      string
+		wantError   bool
+		wantDerived string
+		wantSession string
+	}{
+		{
+			name:        "stopped",
+			output:      `@stdout-fail:{"state_dir":"C:/maya-stall/sessiond-ui","has_state":true,"derived_status":"stopped","state":{"status":"stopped","session_id":"session-stopped"},"process_alive":{"daemon":false,"maya":false,"mcp":false}}`,
+			wantDerived: "stopped",
+			wantSession: "session-stopped",
+		},
+		{
+			name:        "missing",
+			output:      `@stdout-fail:{"state_dir":"C:/maya-stall/sessiond-ui","has_state":false,"derived_status":"missing","state":{},"process_alive":{}}`,
+			wantDerived: "missing",
+		},
+		{
+			name:      "running",
+			output:    `@stdout-fail:{"state_dir":"C:/maya-stall/sessiond-ui","has_state":true,"derived_status":"running","state":{"status":"running","session_id":"session-running"},"process_alive":{"daemon":true,"maya":true,"mcp":true}}`,
+			wantError: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := writeRunConfigFixture(t)
+			sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{test.output})
+			broker := ggMayaSessiondBroker{host: mayaHostConfig{
+				Transport: "ssh",
+				SSH:       sshConfig{Host: "maya-win-01", Binary: sshPath},
+				WorkRoot:  "C:/maya-stall",
+				Broker: brokerConfig{
+					Type:     "gg-mayasessiond",
+					StateDir: "C:/maya-stall/sessiond-ui",
+					Python:   "C:/maya-stall/sessiond-venv311/Scripts/python.exe",
+					Repo:     "C:/maya-stall/tools/GG_MayaSessiond",
+				},
+			}}
+
+			status, err := broker.status()
+			if test.wantError {
+				if err == nil {
+					t.Fatal("status returned nil error for non-stopped JSON from nonzero exit")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("status returned error for inactive JSON: %v", err)
+			}
+			if status.DerivedStatus != test.wantDerived || status.State.SessionID != test.wantSession {
+				t.Fatalf("status = %+v, want derived status %q and session %q", status, test.wantDerived, test.wantSession)
+			}
+		})
+	}
+}
+
 func TestRunScenarioRealSSHRequiresDownloadedScenarioResult(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	sftpPath := writeFailingGetSFTPCommand(t, dir)
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
+		sessiondStatusFixture("session-fresh"),
+		`{"ok":true,"status":"stopped"}`,
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
 	mustWriteFile(t, hostConfigPath, `version: 1
@@ -5391,6 +5511,8 @@ func TestRunScenarioRealSSHAcceptsCollectedCompletionAfterBrokerDisconnect(t *te
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		sessiondStatusFixture("session-alpha"),
 		`{"ok":false,"tool":"script.execute","error":"Cannot connect to Maya commandPort at localhost:7001"}`,
+		sessiondStatusFixture("session-fresh"),
+		`{"ok":true,"status":"stopped"}`,
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
 	mustWriteFile(t, hostConfigPath, `version: 1
@@ -5603,6 +5725,8 @@ func TestRunScenarioRealSSHDownloadsValidatorOnlyOutputs(t *testing.T) {
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
+		sessiondStatusFixture("session-fresh"),
+		`{"ok":true,"status":"stopped"}`,
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
 	mustWriteFile(t, hostConfigPath, `version: 1
@@ -6024,6 +6148,49 @@ func TestKeepOnFailureLeavesSessionForStatusAttachAndStop(t *testing.T) {
 	}
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 		t.Fatalf("kept Host Lock after stop = %v, want missing", err)
+	}
+}
+
+func TestKeepOnFailurePrintsRetainedRunWhenBrokerExecutionErrors(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+	runtime := defaultRunRuntime()
+	runtime.Broker = failingRetainableSessionBroker{
+		fakeSessionBroker: fakeSessionBroker{},
+		message:           "broker disconnected before result",
+	}
+
+	code := RunWithRuntime([]string{"run", "--keep-on-failure", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"status: failed", "stopPolicy: kept", "next: maya-stall stop"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("run output missing %q:\n%s", want, stdout.String())
+		}
+	}
+	if !strings.Contains(stderr.String(), "broker disconnected before result") {
+		t.Fatalf("run stderr missing broker error: %s", stderr.String())
+	}
+}
+
+func TestEvidenceCollectPrintsRetainedRunWhenBrokerExecutionErrors(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+	runtime := defaultRunRuntime()
+	runtime.Broker = failingRetainableSessionBroker{
+		fakeSessionBroker: fakeSessionBroker{},
+		message:           "broker disconnected before result",
+	}
+
+	code := RunWithRuntime([]string{"evidence", "collect", "--keep-on-failure", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("evidence collect exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"status: failed", "stopPolicy: kept", "next: maya-stall stop"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("evidence collect output missing %q:\n%s", want, stdout.String())
+		}
 	}
 }
 
@@ -7135,6 +7302,7 @@ hostPools:
 }
 
 type blockingBroker struct {
+	fakeSessionLifecycle
 	started chan struct{}
 	release chan struct{}
 	result  ScenarioResult
@@ -7169,7 +7337,7 @@ func (broker *blockingBroker) RunScenario(context runContext, scenario scenarioC
 	return broker.result, nil
 }
 
-type lockCorruptingBroker struct{}
+type lockCorruptingBroker struct{ fakeSessionLifecycle }
 
 func (lockCorruptingBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
 	lockPath := filepath.Join(context.RepoDir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")
@@ -7188,7 +7356,7 @@ func (lockCorruptingBroker) RunScenario(context runContext, scenario scenarioCon
 	return ScenarioResult{Status: "passed", Summary: "lock release should fail"}, nil
 }
 
-type lockCorruptingVisualBroker struct{}
+type lockCorruptingVisualBroker struct{ fakeSessionLifecycle }
 
 func (lockCorruptingVisualBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
 	return ScenarioResult{Status: resultStatusPassed}, nil
@@ -7209,11 +7377,13 @@ func (lockCorruptingVisualBroker) CaptureScreenshot(context runContext, request 
 }
 
 type outputWritingBroker struct {
+	fakeSessionLifecycle
 	files          map[string]string
 	visualEvidence bool
 }
 
 type environmentCheckingBroker struct {
+	fakeSessionLifecycle
 	runID       string
 	resultPath  string
 	environment map[string]string
@@ -7235,7 +7405,7 @@ func (broker *environmentCheckingBroker) RunScenario(context runContext, scenari
 	return ScenarioResult{Status: resultStatusPassed, Summary: "checked run environment"}, nil
 }
 
-type scenarioResultFileBroker struct{}
+type scenarioResultFileBroker struct{ fakeSessionLifecycle }
 
 func (scenarioResultFileBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
 	if err := appendEvent(context.EventsPath, "broker.session.started", scenario.MayaVersion); err != nil {
@@ -7261,7 +7431,7 @@ func (scenarioResultFileBroker) RunScenario(context runContext, scenario scenari
 	return ScenarioResult{Status: resultStatusPassed, Summary: "broker fallback"}, nil
 }
 
-type partialScenarioResultFileBroker struct{}
+type partialScenarioResultFileBroker struct{ fakeSessionLifecycle }
 
 func (partialScenarioResultFileBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
 	if err := appendEvent(context.EventsPath, "broker.session.started", scenario.MayaVersion); err != nil {
@@ -7279,7 +7449,7 @@ func (partialScenarioResultFileBroker) RunScenario(context runContext, scenario 
 	return ScenarioResult{Status: resultStatusFailed, Summary: "broker failure"}, nil
 }
 
-type trailingScenarioResultBroker struct{}
+type trailingScenarioResultBroker struct{ fakeSessionLifecycle }
 
 func (trailingScenarioResultBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
 	if err := appendEvent(context.EventsPath, "broker.session.started", scenario.MayaVersion); err != nil {
@@ -7333,6 +7503,7 @@ func (broker outputWritingBroker) RunScenario(context runContext, scenario scena
 }
 
 type symlinkOutputBroker struct {
+	fakeSessionLifecycle
 	linkPath string
 	target   string
 }
@@ -7388,13 +7559,64 @@ func writeFakeCommand(t *testing.T, dir string, name string, logPath string, exi
 	return path
 }
 
+func freshRunAwareFakeSSHPrelude(dir string, prefix string, freshRunFailure string, inheritedStopFailure string) string {
+	lifecyclePath := filepath.Join(dir, prefix+".lifecycle")
+	decodedCommandPath := filepath.Join(dir, prefix+".command")
+	seenFreshRunPath := filepath.Join(dir, prefix+".fresh-seen")
+	return fmt.Sprintf(`#!/bin/sh
+encoded=""
+for argument in "$@"; do
+  encoded="$argument"
+done
+if ! printf '%%s' "$encoded" | base64 --decode > %[1]s 2>/dev/null; then
+  printf '%%s' "$encoded" | base64 -D > %[1]s 2>/dev/null || true
+fi
+decoded=$(iconv -f UTF-16LE -t UTF-8 %[1]s 2>/dev/null || true)
+if [ ! -f %[2]s ] && printf '%%s' "$decoded" | grep -q "'stop'" && ! printf '%%s' "$decoded" | grep -q "Get-ScheduledTask"; then
+  inherited_stop_failure=%[3]s
+  if [ -n "$inherited_stop_failure" ]; then
+    printf '%%s\n' '{"ok":false,"error":"inherited session stop failed"}'
+    exit 0
+  fi
+  printf '%%s\n' '{"ok":true,"status":"stopped"}'
+  exit 0
+fi
+if printf '%%s' "$decoded" | grep -q "fresh-run"; then
+  fresh_failure=%[4]s
+  if [ -n "$fresh_failure" ]; then
+    printf '%%s\n' "$fresh_failure" >&2
+    exit 1
+  fi
+  printf 'seen\n' > %[2]s
+  printf '1\n' > %[5]s
+  printf '%%s\n' '{"ok":true,"task":"MayaStallSessiondUI","reason":"fresh-run"}'
+  exit 0
+fi
+if [ -f %[5]s ] && printf '%%s' "$decoded" | grep -q "'status'"; then
+  rm -f %[5]s
+  printf '%%s\n' '{"state_dir":"C:/maya-stall/sessiond-ui","has_state":true,"derived_status":"running","state":{"status":"running","session_id":"session-fresh","call_server_ready":true}}'
+  exit 0
+fi
+`, shellQuote(decodedCommandPath), shellQuote(seenFreshRunPath), shellQuote(inheritedStopFailure), shellQuote(freshRunFailure), shellQuote(lifecyclePath))
+}
+
 func writeSequencedFakeSSHCommand(t *testing.T, dir string, logPath string, outputs []string) string {
 	t.Helper()
 	path := filepath.Join(dir, "fake-ssh-sequenced")
 	countPath := filepath.Join(dir, "fake-ssh-sequenced.count")
 	var cases strings.Builder
+	freshRunFailure := ""
+	inheritedStopFailure := ""
 	for index, output := range outputs {
 		if output == "" {
+			continue
+		}
+		if message, ok := strings.CutPrefix(output, "@fresh-fail:"); ok {
+			freshRunFailure = message
+			continue
+		}
+		if message, ok := strings.CutPrefix(output, "@inherited-stop-fail:"); ok {
+			inheritedStopFailure = message
 			continue
 		}
 		if path, ok := strings.CutPrefix(output, "@file:"); ok {
@@ -7405,10 +7627,13 @@ func writeSequencedFakeSSHCommand(t *testing.T, dir string, logPath string, outp
 			fmt.Fprintf(&cases, "%d) printf '%%s\\n' %s >&2; exit 1\n;;\n", index+1, shellQuote(message))
 			continue
 		}
+		if message, ok := strings.CutPrefix(output, "@stdout-fail:"); ok {
+			fmt.Fprintf(&cases, "%d) printf '%%s\\n' %s; exit 1\n;;\n", index+1, shellQuote(message))
+			continue
+		}
 		fmt.Fprintf(&cases, "%d) cat <<'JSON'\n%s\nJSON\n;;\n", index+1, output)
 	}
-	content := fmt.Sprintf(`#!/bin/sh
-count=0
+	content := freshRunAwareFakeSSHPrelude(dir, "fake-ssh-sequenced", freshRunFailure, inheritedStopFailure) + fmt.Sprintf(`count=0
 if [ -f %[1]s ]; then
   count=$(cat %[1]s)
 fi
@@ -7438,8 +7663,7 @@ func writeMissingTrustedPluginDestinationFakeSSHCommand(t *testing.T, dir string
 		"}\n" +
 		"exit 0\n"
 	expectedCommand := strings.Join(encodedPowerShellCommand(expectedScript), " ")
-	content := fmt.Sprintf(`#!/bin/sh
-count=0
+	content := freshRunAwareFakeSSHPrelude(dir, "fake-ssh-missing-trusted-plugin", "", "") + fmt.Sprintf(`count=0
 if [ -f %[1]s ]; then
   count=$(cat %[1]s)
 fi
@@ -7449,12 +7673,12 @@ printf 'CALL %%s %%s\n' "$count" "$*" >> %[2]s
 case "$count" in
 1)
 	cat <<'JSON'
-%[4]s
+%[5]s
 JSON
 	;;
 2)
 	cat <<'JSON'
-%[5]s
+%[4]s
 JSON
 	;;
 3)
@@ -7476,7 +7700,7 @@ JSON
   ;;
 5)
   cat <<'JSON'
-%[4]s
+{"has_state":true,"derived_status":"running","state":{"status":"running","session_id":"session-fresh","call_server_ready":true}}
 JSON
   ;;
 esac
@@ -7504,8 +7728,7 @@ func writeFailingTrustedPluginDestinationRemovalFakeSSHCommand(t *testing.T, dir
 		"}\n" +
 		"exit 0\n"
 	expectedCommand := strings.Join(encodedPowerShellCommand(expectedScript), " ")
-	content := fmt.Sprintf(`#!/bin/sh
-count=0
+	content := freshRunAwareFakeSSHPrelude(dir, "fake-ssh-failing-trusted-plugin-removal", "", "") + fmt.Sprintf(`count=0
 if [ -f %[1]s ]; then
   count=$(cat %[1]s)
 fi
@@ -7515,12 +7738,12 @@ printf 'CALL %%s %%s\n' "$count" "$*" >> %[2]s
 case "$count" in
 1)
 	cat <<'JSON'
-%[4]s
+%[5]s
 JSON
 	;;
 2)
 	cat <<'JSON'
-%[5]s
+%[4]s
 JSON
 	;;
 3)

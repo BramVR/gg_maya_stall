@@ -6,6 +6,9 @@ Release history starts with `v0.1.0`.
 
 ## Unreleased
 
+- Changed Fresh Runs to start a new broker-owned Maya UI Session, record its identity in evidence, and stop that exact session for stopped Stop Policy outcomes instead of only cleaning the run workspace.
+- Fixed Host Health recovery to restart a stale interactive broker session when `script.execute` returns its known malformed tool result, then re-probe before a Fresh Run.
+- Fixed `--keep-on-failure` and `--stop-after never` to retain the owned Maya UI Session, Host Lock, and follow-up commands when a post-start setup or Session Broker execution failure occurs before a Scenario Result is recovered.
 - Expanded the Maya Stall product vision around pooled parallel Maya Hosts, shared Host Locks, durable run lifecycles, Maya-native observation, verifiable Evidence Bundles, and release qualification while keeping v1 delivery limits separate.
 - Fixed trusted Plugin Artifact staging so a fresh `trustedPluginArtifactsRoot` no longer fails when the destination `.mll` does not exist yet.
 - Changed `maya-stall doctor` Maya version Host Health to probe installed Autodesk Maya versions on real SSH hosts and report config drift instead of trusting `mayaVersions`.

@@ -406,15 +406,22 @@ func TestAttachRunScreenshotCapturesThroughOwnedHostLock(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "artifacts", "maya-stall", runID, "screenshots", "run-scoped-screenshot.png")); err != nil {
 		t.Fatalf("expected run-scoped screenshot artifact: %v", err)
 	}
-	bundle := readEvidenceBundle(t, filepath.Join(dir, "artifacts", "maya-stall", runID))
+	evidenceDir := filepath.Join(dir, "artifacts", "maya-stall", runID)
+	bundle := readEvidenceBundle(t, evidenceDir)
 	found := false
 	for _, artifact := range bundle.VisualEvidence {
 		if artifact.Kind == "screenshot" && artifact.Path == "screenshots/run-scoped-screenshot.png" && artifact.TargetProfile == "default" && artifact.Host == defaultFakeHostID {
+			if artifact.Origin != visualEvidenceOriginFakeBrokerCapture || artifact.SHA256 != sha256HexOfBytes([]byte("fake screenshot\n")) {
+				t.Fatalf("run-scoped screenshot provenance = %+v", artifact)
+			}
 			found = true
 		}
 	}
 	if !found {
 		t.Fatalf("Evidence Bundle missing run-scoped screenshot metadata: %+v", bundle.VisualEvidence)
+	}
+	if err := requireBrokerCaptureProvenanceEvents(evidenceDir, bundle); err != nil {
+		t.Fatalf("run-scoped screenshot bundle provenance events: %v", err)
 	}
 }
 

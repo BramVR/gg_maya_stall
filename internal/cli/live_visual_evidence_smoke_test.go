@@ -742,11 +742,18 @@ func requireLiveRunScopedScreenshotArtifact(t *testing.T, evidenceDir string, bu
 	t.Helper()
 	for _, artifact := range bundle.VisualEvidence {
 		if artifact.Kind == "screenshot" && artifact.MediaType == "image/png" && artifact.Path == "screenshots/"+runScopedScreenshotName {
-			if _, err := os.Stat(filepath.Join(evidenceDir, filepath.FromSlash(artifact.Path))); err != nil {
+			content, err := os.ReadFile(filepath.Join(evidenceDir, filepath.FromSlash(artifact.Path)))
+			if err != nil {
 				t.Fatalf("missing run-scoped Visual Evidence artifact %s: %v", artifact.Path, err)
 			}
 			if artifact.TargetProfile != bundle.TargetProfile || artifact.Host != bundle.Host {
 				t.Fatalf("run-scoped screenshot target metadata = %+v, want bundle target %q host %q", artifact, bundle.TargetProfile, bundle.Host)
+			}
+			if artifact.Origin != visualEvidenceOriginBrokerCapture || artifact.SHA256 != sha256HexOfBytes(content) {
+				t.Fatalf("run-scoped screenshot provenance = %+v, want broker capture with byte-matched sha256", artifact)
+			}
+			if err := requireBrokerCaptureProvenanceEvents(evidenceDir, bundle); err != nil {
+				t.Fatalf("run-scoped screenshot provenance events: %v", err)
 			}
 			return artifact
 		}

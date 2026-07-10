@@ -11,8 +11,8 @@ This page is a glossary. For deeper domain wording, see the root
 
 ## Product Boundary
 
-**Maya Stall** - reusable test harness for real Autodesk Maya UI end-to-end
-checks on owned Maya Hosts.
+**Maya Stall** - release-qualification system for running and proving real
+Autodesk Maya UI end-to-end checks across owned Windows Maya Hosts.
 
 **maya-stall** - the command-line binary.
 
@@ -33,19 +33,27 @@ Host Pool in external host config.
 
 **Host Pool** - a set of selectable Maya Hosts.
 
-**Maya Host** - an owned Windows machine with Autodesk Maya, OpenSSH, an
-interactive desktop, a writable work root, and a Session Broker.
+**Control Plane** - the shared Maya Stall service that records submitted runs,
+schedules them across Host Pools, owns shared Host Locks, and keeps run history.
+
+**Maya Host** - an owned physical or virtual Windows machine with one isolated
+interactive desktop, Autodesk Maya, a writable work root, and the services
+needed to provide one Maya Stall execution slot.
 
 **Host Credentials** - secrets and identity material needed to reach or use a
 Maya Host. Keep them outside Repo Run Config.
+
+**Windows Host Agent** - the Maya Stall-owned service on a Maya Host that
+enforces the Host Lock, prepares workspaces, monitors work, transfers evidence,
+and coordinates cleanup with the Session Broker.
 
 **Maya Version Requirement** - the Autodesk Maya version a Scenario needs.
 
 **Host Health** - layered readiness checks for config, SSH, work root, Session
 Broker, Maya version, Visual Evidence, Host Lock, and Scenario inputs.
 
-**Host Lock** - a claim that prevents more than one active Fresh Run from using
-the same Maya Host at the same time.
+**Host Lock** - a shared claim with a unique lock token that prevents more than
+one active or kept Maya UI run from using the same Maya Host at the same time.
 
 ## Run Lifecycle
 
@@ -53,6 +61,9 @@ the same Maya Host at the same time.
 
 **Fresh Run** - a run that starts from a clean Maya UI Session and clean
 workspace.
+
+**Run ID** - the stable identity created for a submitted Scenario before config
+validation, host selection, or remote preflight.
 
 **Maya UI Session** - an interactive Autodesk Maya desktop process used for a
 run. Raw SSH-launched service-session Maya is not accepted as UI proof.

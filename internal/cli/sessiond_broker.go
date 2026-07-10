@@ -876,6 +876,11 @@ Set-Location -LiteralPath %s
 & %s -m gg_maya_sessiond.cli @(%s)`, powerShellSingleQuoted(broker.host.Broker.Repo), powerShellSingleQuoted(broker.host.Broker.Python), strings.Join(quoted, ","))
 	raw, err := runSSHCommandOutput(broker.host, encodedPowerShellCommand(script), timeout)
 	if err != nil {
+		if args[0] == "status" {
+			if jsonOutput, ok := sessiondStatusJSONFromFailedOutput(raw); ok {
+				return jsonOutput, nil
+			}
+		}
 		if jsonOutput, ok := sessiondJSONFromFailedOutput(raw); ok {
 			return jsonOutput, nil
 		}
@@ -1083,6 +1088,9 @@ func isSessiondJSONDocument(document []byte) bool {
 			return hasAnyJSONKey(object, "tool", "checks", "content", "output", "error", "status")
 		}
 	}
+	if isSessiondStatusJSONObject(object) {
+		return true
+	}
 	if raw, ok := object["state"]; ok && !hasAnyJSONKey(object, "level", "msg") {
 		var state map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &state); err == nil {
@@ -1090,6 +1098,22 @@ func isSessiondJSONDocument(document []byte) bool {
 		}
 	}
 	return false
+}
+
+func isSessiondStatusJSONObject(object map[string]json.RawMessage) bool {
+	if hasAnyJSONKey(object, "level", "msg") {
+		return false
+	}
+	var hasState bool
+	if err := json.Unmarshal(object["has_state"], &hasState); err != nil {
+		return false
+	}
+	var derivedStatus string
+	if err := json.Unmarshal(object["derived_status"], &derivedStatus); err != nil || strings.TrimSpace(derivedStatus) == "" {
+		return false
+	}
+	var state map[string]json.RawMessage
+	return json.Unmarshal(object["state"], &state) == nil
 }
 
 func hasAnyJSONKey(object map[string]json.RawMessage, keys ...string) bool {
@@ -1115,6 +1139,38 @@ func sessiondJSONFromFailedOutput(raw []byte) ([]byte, bool) {
 	}
 	okValue, ok := object["ok"].(bool)
 	if !ok || okValue {
+		return nil, false
+	}
+	return jsonOutput, true
+}
+
+func sessiondStatusJSONFromFailedOutput(raw []byte) ([]byte, bool) {
+	jsonOutput := trimToJSON(raw)
+	if !isSessiondJSONDocument(jsonOutput) {
+		return nil, false
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(jsonOutput, &object); err != nil || !isSessiondStatusJSONObject(object) {
+		return nil, false
+	}
+	var hasState bool
+	if err := json.Unmarshal(object["has_state"], &hasState); err != nil {
+		return nil, false
+	}
+	var derivedStatus string
+	if err := json.Unmarshal(object["derived_status"], &derivedStatus); err != nil {
+		return nil, false
+	}
+	if !hasState {
+		return jsonOutput, derivedStatus == "missing"
+	}
+	if derivedStatus != "stopped" {
+		return nil, false
+	}
+	var state struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(object["state"], &state); err != nil || state.Status != "stopped" {
 		return nil, false
 	}
 	return jsonOutput, true

@@ -5379,6 +5379,64 @@ func TestRunSessiondCLIRejectsStructuredLogWithoutResult(t *testing.T) {
 	}
 }
 
+func TestSessiondStatusJSONFromNonzeroExit(t *testing.T) {
+	tests := []struct {
+		name        string
+		output      string
+		wantError   bool
+		wantDerived string
+		wantSession string
+	}{
+		{
+			name:        "stopped",
+			output:      `@stdout-fail:{"state_dir":"C:/maya-stall/sessiond-ui","has_state":true,"derived_status":"stopped","state":{"status":"stopped","session_id":"session-stopped"},"process_alive":{"daemon":false,"maya":false,"mcp":false}}`,
+			wantDerived: "stopped",
+			wantSession: "session-stopped",
+		},
+		{
+			name:        "missing",
+			output:      `@stdout-fail:{"state_dir":"C:/maya-stall/sessiond-ui","has_state":false,"derived_status":"missing","state":{},"process_alive":{}}`,
+			wantDerived: "missing",
+		},
+		{
+			name:      "running",
+			output:    `@stdout-fail:{"state_dir":"C:/maya-stall/sessiond-ui","has_state":true,"derived_status":"running","state":{"status":"running","session_id":"session-running"},"process_alive":{"daemon":true,"maya":true,"mcp":true}}`,
+			wantError: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := writeRunConfigFixture(t)
+			sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{test.output})
+			broker := ggMayaSessiondBroker{host: mayaHostConfig{
+				Transport: "ssh",
+				SSH:       sshConfig{Host: "maya-win-01", Binary: sshPath},
+				WorkRoot:  "C:/maya-stall",
+				Broker: brokerConfig{
+					Type:     "gg-mayasessiond",
+					StateDir: "C:/maya-stall/sessiond-ui",
+					Python:   "C:/maya-stall/sessiond-venv311/Scripts/python.exe",
+					Repo:     "C:/maya-stall/tools/GG_MayaSessiond",
+				},
+			}}
+
+			status, err := broker.status()
+			if test.wantError {
+				if err == nil {
+					t.Fatal("status returned nil error for non-stopped JSON from nonzero exit")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("status returned error for inactive JSON: %v", err)
+			}
+			if status.DerivedStatus != test.wantDerived || status.State.SessionID != test.wantSession {
+				t.Fatalf("status = %+v, want derived status %q and session %q", status, test.wantDerived, test.wantSession)
+			}
+		})
+	}
+}
+
 func TestRunScenarioRealSSHRequiresDownloadedScenarioResult(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	sftpPath := writeFailingGetSFTPCommand(t, dir)
@@ -7567,6 +7625,10 @@ func writeSequencedFakeSSHCommand(t *testing.T, dir string, logPath string, outp
 		}
 		if message, ok := strings.CutPrefix(output, "@fail:"); ok {
 			fmt.Fprintf(&cases, "%d) printf '%%s\\n' %s >&2; exit 1\n;;\n", index+1, shellQuote(message))
+			continue
+		}
+		if message, ok := strings.CutPrefix(output, "@stdout-fail:"); ok {
+			fmt.Fprintf(&cases, "%d) printf '%%s\\n' %s; exit 1\n;;\n", index+1, shellQuote(message))
 			continue
 		}
 		fmt.Fprintf(&cases, "%d) cat <<'JSON'\n%s\nJSON\n;;\n", index+1, output)

@@ -255,6 +255,10 @@ func (broker ggMayaSessiondBroker) CaptureScreenshot(context runContext, request
 	if name == "" || name == "." || name == ".." {
 		name = evidenceDefaultScreenshotName
 	}
+	name = forceVisualEvidenceExtension(name, ".png")
+	if err := appendVisualEvidenceCaptureRequested(context, "screenshot", visualEvidenceOriginBrokerCapture, name); err != nil {
+		return visualEvidenceArtifact{}, err
+	}
 	remoteRoot := broker.remoteVisualEvidenceRoot(context, "screenshot")
 	defer func() {
 		_ = broker.removeRemotePath(remoteRoot)
@@ -263,7 +267,7 @@ func (broker ggMayaSessiondBroker) CaptureScreenshot(context runContext, request
 	if err != nil {
 		return visualEvidenceArtifact{}, err
 	}
-	return registerVisualEvidenceBytes(context, "screenshot", visualEvidenceOriginBrokerCapture, forceVisualEvidenceExtension(name, ".png"), "image/png", data)
+	return registerVisualEvidenceBytes(context, "screenshot", visualEvidenceOriginBrokerCapture, name, "image/png", data)
 }
 
 func (broker ggMayaSessiondBroker) CaptureRecording(context runContext, request recordingRequest) (visualEvidenceArtifact, error) {
@@ -274,6 +278,10 @@ func (broker ggMayaSessiondBroker) CaptureRecording(context runContext, request 
 	if name == "" || name == "." || name == ".." {
 		name = evidenceDefaultRecordingName
 	}
+	name = forceVisualEvidenceExtension(name, ".mp4")
+	if err := appendVisualEvidenceCaptureRequested(context, "recording", visualEvidenceOriginBrokerCapture, name); err != nil {
+		return visualEvidenceArtifact{}, err
+	}
 	remoteRoot := broker.remoteVisualEvidenceRoot(context, "recording")
 	defer func() {
 		_ = broker.removeRemotePath(remoteRoot)
@@ -282,7 +290,7 @@ func (broker ggMayaSessiondBroker) CaptureRecording(context runContext, request 
 	if err != nil {
 		return visualEvidenceArtifact{}, err
 	}
-	artifact, err := registerVisualEvidenceBytes(context, "recording", visualEvidenceOriginBrokerCapture, forceVisualEvidenceExtension(name, ".mp4"), "video/mp4", data)
+	artifact, err := registerVisualEvidenceBytes(context, "recording", visualEvidenceOriginBrokerCapture, name, "video/mp4", data)
 	if err != nil {
 		return visualEvidenceArtifact{}, err
 	}

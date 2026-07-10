@@ -1145,13 +1145,16 @@ func addLiveDesktopScreenshotForProofArtifact(t *testing.T, repoDir string, evid
 	defer func() {
 		_ = ggMayaSessiondBroker{host: host}.removeRemotePath(remoteRoot)
 	}()
-	screenshotBytes, err := captureWindowsDesktopScreenshot(sshWindowsDesktopTransport(host), remoteRoot)
-	if err != nil {
-		t.Fatalf("capture desktop screenshot for proof artifact: %v", err)
-	}
 	context := runContext{
 		EvidenceDir: evidenceDir,
 		EventsPath:  filepath.Join(evidenceDir, evidenceEventsFileName),
+	}
+	if err := appendVisualEvidenceCaptureRequested(context, "screenshot", visualEvidenceOriginBrokerCapture, "desktop-screenshot.png"); err != nil {
+		t.Fatalf("record desktop screenshot capture request: %v", err)
+	}
+	screenshotBytes, err := captureWindowsDesktopScreenshot(sshWindowsDesktopTransport(host), remoteRoot)
+	if err != nil {
+		t.Fatalf("capture desktop screenshot for proof artifact: %v", err)
 	}
 	screenshot, err := registerVisualEvidenceBytes(context, "screenshot", visualEvidenceOriginBrokerCapture, "desktop-screenshot.png", "image/png", screenshotBytes)
 	if err != nil {
@@ -1331,6 +1334,9 @@ func validateLiveRecordCommandProofBundle(evidenceDir string, processes []window
 	if err := requireBrokerCapturedVisualEvidence(evidenceDir, bundle); err != nil {
 		return evidenceBundle{}, err
 	}
+	if err := requireBrokerCaptureProvenanceEvents(evidenceDir, bundle); err != nil {
+		return evidenceBundle{}, err
+	}
 	recordingBytes, err := os.ReadFile(filepath.Join(evidenceDir, filepath.FromSlash(recording.Path)))
 	if err != nil {
 		return evidenceBundle{}, err
@@ -1416,6 +1422,9 @@ func validateLiveVisualEvidenceProofBundle(evidenceDir string, processes []windo
 	if err := requireBrokerCapturedVisualEvidence(evidenceDir, bundle); err != nil {
 		return evidenceBundle{}, err
 	}
+	if err := requireBrokerCaptureProvenanceEvents(evidenceDir, bundle); err != nil {
+		return evidenceBundle{}, err
+	}
 	screenshotBytes, err := os.ReadFile(filepath.Join(evidenceDir, filepath.FromSlash(screenshot.Path)))
 	if err != nil {
 		return evidenceBundle{}, err
@@ -1476,7 +1485,13 @@ func writeLiveVisualEvidenceProofBundle(t *testing.T, runtime runtimeMetadata, v
 	t.Helper()
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, evidenceManifestFileName), "{}\n")
-	mustWriteFile(t, filepath.Join(dir, evidenceEventsFileName), "{}\n")
+	var events strings.Builder
+	for _, artifact := range visual {
+		path, requestedEvent, capturedEvent := visualEvidenceEventDetails(artifact.Kind, artifact.Path)
+		fmt.Fprintf(&events, "{\"event\":%q,\"detail\":%q,\"origin\":%q}\n", requestedEvent, path, artifact.Origin)
+		fmt.Fprintf(&events, "{\"event\":%q,\"detail\":%q,\"origin\":%q,\"sha256\":%q}\n", capturedEvent, path, artifact.Origin, artifact.SHA256)
+	}
+	mustWriteFile(t, filepath.Join(dir, evidenceEventsFileName), events.String())
 	mustWriteFile(t, filepath.Join(dir, evidenceLogPath), "log\n")
 	mustWriteFile(t, filepath.Join(dir, evidenceScenarioResultFileName), `{"status":"passed"}`+"\n")
 	for relative, content := range files {

@@ -1263,6 +1263,9 @@ func (fakeSessionBroker) CaptureScreenshot(context runContext, request screensho
 	if name == "" {
 		name = evidenceDefaultScreenshotName
 	}
+	if err := appendVisualEvidenceCaptureRequested(context, "screenshot", visualEvidenceOriginFakeBrokerCapture, name); err != nil {
+		return visualEvidenceArtifact{}, err
+	}
 	return registerVisualEvidenceBytes(context, "screenshot", visualEvidenceOriginFakeBrokerCapture, name, "image/png", []byte("fake screenshot\n"))
 }
 
@@ -1270,6 +1273,9 @@ func (fakeSessionBroker) CaptureRecording(context runContext, request recordingR
 	name := request.Name
 	if name == "" {
 		name = evidenceDefaultRecordingName
+	}
+	if err := appendVisualEvidenceCaptureRequested(context, "recording", visualEvidenceOriginFakeBrokerCapture, name); err != nil {
+		return visualEvidenceArtifact{}, err
 	}
 	content := []byte{0, 0, 0, 24, 'f', 't', 'y', 'p', 'm', 'p', '4', '2', 'f', 'a', 'k', 'e', '\n'}
 	return registerVisualEvidenceBytes(context, "recording", visualEvidenceOriginFakeBrokerCapture, name, "video/mp4", content)

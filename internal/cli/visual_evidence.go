@@ -241,7 +241,7 @@ func capturePlannedVisualEvidence(broker sessionBroker, context runContext, plan
 	return artifacts, nil
 }
 
-func registerVisualEvidenceBytes(context runContext, kind string, origin string, name string, mediaType string, content []byte) (visualEvidenceArtifact, error) {
+func visualEvidenceEventDetails(kind string, name string) (relative string, requestedEvent string, capturedEvent string) {
 	name = filepath.Base(filepath.ToSlash(name))
 	if name == "." || name == ".." || name == "" {
 		switch kind {
@@ -252,22 +252,29 @@ func registerVisualEvidenceBytes(context runContext, kind string, origin string,
 		}
 	}
 	dir := evidenceScreenshotsDir
-	requestedEvent := "broker.screenshot.capture-requested"
-	capturedEvent := "broker.screenshot.captured"
+	requestedEvent = "broker.screenshot.capture-requested"
+	capturedEvent = "broker.screenshot.captured"
 	if kind == "recording" {
 		dir = evidenceRecordingsDir
 		requestedEvent = "broker.recording.capture-requested"
 		capturedEvent = "broker.recording.captured"
 	}
-	relative := filepath.Join(dir, name)
-	path := filepath.Join(context.EvidenceDir, relative)
-	if err := appendEventRecord(context.EventsPath, map[string]string{
+	relative = filepath.ToSlash(filepath.Join(dir, name))
+	return relative, requestedEvent, capturedEvent
+}
+
+func appendVisualEvidenceCaptureRequested(context runContext, kind string, origin string, name string) error {
+	relative, requestedEvent, _ := visualEvidenceEventDetails(kind, name)
+	return appendEventRecord(context.EventsPath, map[string]string{
 		"event":  requestedEvent,
-		"detail": name,
+		"detail": relative,
 		"origin": origin,
-	}); err != nil {
-		return visualEvidenceArtifact{}, err
-	}
+	})
+}
+
+func registerVisualEvidenceBytes(context runContext, kind string, origin string, name string, mediaType string, content []byte) (visualEvidenceArtifact, error) {
+	relative, _, capturedEvent := visualEvidenceEventDetails(kind, name)
+	path := filepath.Join(context.EvidenceDir, relative)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return visualEvidenceArtifact{}, err
 	}
@@ -280,13 +287,13 @@ func registerVisualEvidenceBytes(context runContext, kind string, origin string,
 	hash := sha256HexOfBytes(content)
 	if err := appendEventRecord(context.EventsPath, map[string]string{
 		"event":  capturedEvent,
-		"detail": filepath.ToSlash(relative),
+		"detail": relative,
 		"origin": origin,
 		"sha256": hash,
 	}); err != nil {
 		return visualEvidenceArtifact{}, err
 	}
-	return visualEvidenceArtifact{Kind: kind, Path: filepath.ToSlash(relative), MediaType: mediaType, Origin: origin, SHA256: hash}, nil
+	return visualEvidenceArtifact{Kind: kind, Path: relative, MediaType: mediaType, Origin: origin, SHA256: hash}, nil
 }
 
 func annotateVisualEvidenceTarget(artifacts []visualEvidenceArtifact, targetProfile string, host string) {

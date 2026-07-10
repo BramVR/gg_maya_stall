@@ -667,6 +667,9 @@ func assertLiveSmokeEvidenceBundle(t *testing.T, evidenceDir string) evidenceBun
 			}
 		}
 	}
+	if err := requireBrokerCaptureProvenanceEvents(evidenceDir, bundle); err != nil {
+		t.Fatalf("Visual Evidence provenance events: %v", err)
+	}
 	return bundle
 }
 

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -144,6 +145,9 @@ func publishLiveVisualEvidenceProofArtifact(evidenceDir string, options liveVisu
 		return "", err
 	}
 	if err := requireBrokerCapturedVisualEvidence(evidenceDir, bundle); err != nil {
+		return "", err
+	}
+	if err := requireBrokerCaptureProvenanceEvents(evidenceDir, bundle); err != nil {
 		return "", err
 	}
 	if !options.MediaReviewed {
@@ -304,6 +308,74 @@ func requireBrokerCapturedVisualEvidence(evidenceDir string, bundle evidenceBund
 		}
 		if !strings.EqualFold(hash, artifact.SHA256) {
 			return fmt.Errorf("Visual Evidence artifact %s sha256 %s does not match recorded provenance hash %s", clean, hash, artifact.SHA256)
+		}
+	}
+	return nil
+}
+
+type visualEvidenceProvenanceEvent struct {
+	Event  string `json:"event"`
+	Detail string `json:"detail"`
+	Origin string `json:"origin"`
+	SHA256 string `json:"sha256"`
+}
+
+func requireBrokerCaptureProvenanceEvents(evidenceDir string, bundle evidenceBundle) error {
+	eventsPath := cleanEvidenceArtifactPath(bundle.Events)
+	if eventsPath == "" {
+		return fmt.Errorf("live Visual Evidence proof requires an events.jsonl path")
+	}
+	file, err := os.Open(filepath.Join(evidenceDir, filepath.FromSlash(eventsPath)))
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	var events []visualEvidenceProvenanceEvent
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		if strings.TrimSpace(scanner.Text()) == "" {
+			continue
+		}
+		var event visualEvidenceProvenanceEvent
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			return fmt.Errorf("parse Visual Evidence provenance event: %w", err)
+		}
+		events = append(events, event)
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+
+	for _, artifact := range bundle.VisualEvidence {
+		path := cleanEvidenceArtifactPath(artifact.Path)
+		_, requestedEvent, capturedEvent := visualEvidenceEventDetails(artifact.Kind, path)
+		requestedIndex := -1
+		capturedBeforeRequest := false
+		capturedFound := false
+		for index, event := range events {
+			if event.Event == requestedEvent && event.Detail == path && event.Origin == artifact.Origin {
+				requestedIndex = index
+				continue
+			}
+			if event.Event != capturedEvent || event.Detail != path || event.Origin != artifact.Origin || !strings.EqualFold(event.SHA256, artifact.SHA256) {
+				continue
+			}
+			if requestedIndex < 0 {
+				capturedBeforeRequest = true
+				continue
+			}
+			capturedFound = true
+			break
+		}
+		if requestedIndex < 0 {
+			return fmt.Errorf("Visual Evidence artifact %s is missing capture-requested provenance", path)
+		}
+		if !capturedFound {
+			if capturedBeforeRequest {
+				return fmt.Errorf("Visual Evidence artifact %s captured provenance appears before matching capture-requested provenance", path)
+			}
+			return fmt.Errorf("Visual Evidence artifact %s is missing matching captured provenance", path)
 		}
 	}
 	return nil

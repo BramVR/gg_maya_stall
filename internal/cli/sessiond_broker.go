@@ -156,7 +156,7 @@ func sessiondSessionLooksActive(status sessiondStatusResult) bool {
 
 func (broker ggMayaSessiondBroker) awaitFreshSession(previousSessionID string) (brokerSessionIdentity, error) {
 	deadline := time.Now().Add(sessiondSessionStartTimeout)
-	lastDetail := "gg_mayasessiond did not report a running session"
+	var lastDetail string
 	identity := brokerSessionIdentity{BrokerAdapter: "gg-mayasessiond"}
 	for {
 		status, err := broker.status()

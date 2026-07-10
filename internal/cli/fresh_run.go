@@ -469,7 +469,7 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 			return runOutcome{}, err
 		}
 		if session.BrokerAdapter != run.session.BrokerAdapter || session.SessionID != run.session.SessionID {
-			return runOutcome{}, fmt.Errorf("Session Broker retained a different Maya UI Session: started %s/%s, retained %s/%s", run.session.BrokerAdapter, run.session.SessionID, session.BrokerAdapter, session.SessionID)
+			return runOutcome{}, fmt.Errorf("session broker retained a different Maya UI Session: started %s/%s, retained %s/%s", run.session.BrokerAdapter, run.session.SessionID, session.BrokerAdapter, session.SessionID)
 		}
 		record := newRunRetentionRecord(run.context, run.manifest, run.host.Config, "kept", reason)
 		record.BrokerCapabilities = retention.RetentionCapabilities()

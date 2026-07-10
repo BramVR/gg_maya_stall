@@ -1953,9 +1953,11 @@ optionVar -cat "Security"
 }
 
 func TestTrustedPluginPrefsRepairScriptDocumentsMutationSafety(t *testing.T) {
-	script := trustedPluginPrefsRepairScript("2025", []string{"C:/maya-stall/trusted-plugin-artifacts", "C:/maya-stall/trusted-plugin-artifacts/build/maya2025/Release"})
+	script := trustedPluginPrefsRepairScript("2025")
 	for _, want := range []string{
 		"$env:MAYA_APP_DIR",
+		"[Console]::In.ReadToEnd()",
+		"ConvertFrom-Json",
 		"[Environment]::GetFolderPath('MyDocuments')",
 		"[System.IO.Path]::GetFullPath",
 		"Copy-Item -LiteralPath $prefs",
@@ -1970,6 +1972,61 @@ func TestTrustedPluginPrefsRepairScriptDocumentsMutationSafety(t *testing.T) {
 	}
 	if strings.Contains(script, "New-Item -ItemType Directory") {
 		t.Fatalf("repair script should not fabricate missing Maya prefs:\n%s", script)
+	}
+	if strings.Contains(script, "C:/maya-stall/trusted-plugin-artifacts") {
+		t.Fatalf("repair script must receive required paths over stdin, not the command line:\n%s", script)
+	}
+}
+
+func TestTrustedPluginPrefsRepairInputKeepsLargePathSetsOutOfCommandLine(t *testing.T) {
+	paths := make([]string, 0, 1_000)
+	for index := range 1_000 {
+		paths = append(paths, fmt.Sprintf("C:/maya-stall/trusted-plugin-artifacts/package-%04d/scripts", index))
+	}
+
+	input, err := trustedPluginPrefsRepairInput(paths)
+	if err != nil {
+		t.Fatalf("build repair input: %v", err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(input)
+	if err != nil {
+		t.Fatalf("decode repair input: %v", err)
+	}
+	var got []string
+	if err := json.Unmarshal(decoded, &got); err != nil {
+		t.Fatalf("parse repair input JSON: %v", err)
+	}
+	if !reflect.DeepEqual(got, compactTrustedPluginAllowlistPaths(paths)) {
+		t.Fatalf("repair input paths differ: got %d paths, want %d", len(got), len(paths))
+	}
+	if strings.Contains(trustedPluginPrefsRepairScript("2025"), paths[len(paths)-1]) {
+		t.Fatalf("repair command embeds a required path")
+	}
+}
+
+func TestRunSSHCommandOutputWithInputStreamsStdin(t *testing.T) {
+	dir := t.TempDir()
+	stdinPath := filepath.Join(dir, "stdin.txt")
+	sshPath := filepath.Join(dir, "fake-ssh-stdin")
+	script := fmt.Sprintf("#!/bin/sh\ncat > %s\nprintf 'ok'\n", shellQuote(stdinPath))
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake SSH: %v", err)
+	}
+	host := mayaHostConfig{SSH: sshConfig{Host: "maya-win-01", Binary: sshPath}}
+
+	raw, err := runSSHCommandOutputWithInput(host, []string{"ignored"}, "large-input-payload", sshCommandTimeout)
+	if err != nil {
+		t.Fatalf("run SSH with stdin: %v", err)
+	}
+	if string(raw) != "ok" {
+		t.Fatalf("SSH output = %q, want ok", string(raw))
+	}
+	got, err := os.ReadFile(stdinPath)
+	if err != nil {
+		t.Fatalf("read captured stdin: %v", err)
+	}
+	if string(got) != "large-input-payload" {
+		t.Fatalf("SSH stdin = %q", string(got))
 	}
 }
 

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -153,10 +154,16 @@ func validateMayaPrefsVersion(version string) error {
 
 func trustedPluginPrefs(host mayaHostConfig, version string, requiredPaths []string, repair bool) (trustedPluginPrefsProbe, error) {
 	script := trustedPluginPrefsReadScript(version)
+	input := ""
 	if repair {
-		script = trustedPluginPrefsRepairScript(version, requiredPaths)
+		script = trustedPluginPrefsRepairScript(version)
+		var err error
+		input, err = trustedPluginPrefsRepairInput(requiredPaths)
+		if err != nil {
+			return trustedPluginPrefsProbe{}, err
+		}
 	}
-	raw, err := runSSHCommandOutput(host, encodedPowerShellCommand(script), sshCommandTimeout)
+	raw, err := runSSHCommandOutputWithInput(host, encodedPowerShellCommand(script), input, sshCommandTimeout)
 	if err != nil {
 		return trustedPluginPrefsProbe{}, err
 	}
@@ -381,11 +388,12 @@ Write-Output (%s + $json)
 `, trustedPluginPrefsScriptPreamble(), powerShellSingleQuoted(version), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix))
 }
 
-func trustedPluginPrefsRepairScript(version string, requiredPaths []string) string {
+func trustedPluginPrefsRepairScript(version string) string {
 	return fmt.Sprintf(`$ErrorActionPreference = 'Stop'
 %s
 $prefs = MayaStall-PrefsPath %s
-$requiredPaths = @(%s)
+$requiredPathsJSON = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd()))
+$requiredPaths = @($requiredPathsJSON | ConvertFrom-Json)
 function Normalize-MayaStallPath([string]$value) {
   try {
     return ([System.IO.Path]::GetFullPath(($value -replace '/','\')) -replace '\\','/').TrimEnd('/').ToLowerInvariant()
@@ -447,15 +455,15 @@ if ($changed) {
 $content = [string](Get-Content -LiteralPath $prefs -Raw)
 $json = [pscustomobject]@{ exists = $true; content = $content; changed = $changed } | ConvertTo-Json -Compress
 Write-Output (%s + $json)
-`, trustedPluginPrefsScriptPreamble(), powerShellSingleQuoted(version), powerShellStringArray(compactTrustedPluginAllowlistPaths(requiredPaths)), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix))
+`, trustedPluginPrefsScriptPreamble(), powerShellSingleQuoted(version), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix))
 }
 
-func powerShellStringArray(values []string) string {
-	quoted := make([]string, 0, len(values))
-	for _, value := range values {
-		quoted = append(quoted, powerShellSingleQuoted(value))
+func trustedPluginPrefsRepairInput(requiredPaths []string) (string, error) {
+	data, err := json.Marshal(compactTrustedPluginAllowlistPaths(requiredPaths))
+	if err != nil {
+		return "", fmt.Errorf("encode trusted Plugin Artifact repair paths: %w", err)
 	}
-	return strings.Join(quoted, ",")
+	return base64.StdEncoding.EncodeToString(data), nil
 }
 
 func trustedPluginPrefsScriptPreamble() string {

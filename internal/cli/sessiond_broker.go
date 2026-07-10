@@ -1018,6 +1018,10 @@ func sessiondJSONFromFailedOutput(raw []byte) ([]byte, bool) {
 }
 
 func runSSHCommandOutput(host mayaHostConfig, remoteCommand []string, timeout time.Duration) ([]byte, error) {
+	return runSSHCommandOutputWithInput(host, remoteCommand, "", timeout)
+}
+
+func runSSHCommandOutputWithInput(host mayaHostConfig, remoteCommand []string, input string, timeout time.Duration) ([]byte, error) {
 	binary := host.SSH.Binary
 	if binary == "" {
 		binary = "ssh"
@@ -1028,6 +1032,9 @@ func runSSHCommandOutput(host mayaHostConfig, remoteCommand []string, timeout ti
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, binary, append(sshArgs(host), remoteCommand...)...)
+	if input != "" {
+		command.Stdin = strings.NewReader(input)
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	command.Stdout = &stdout

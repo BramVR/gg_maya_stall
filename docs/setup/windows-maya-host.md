@@ -194,8 +194,17 @@ Host-admin steps:
 - Create or allow Maya Stall to create the stable directory.
 - In Maya security preferences for the interactive Windows account, add that
   exact directory as a trusted plug-in location.
+- Or, after approving the host security-policy change, run
+  `maya-stall doctor --host-config <host-config.yaml> --target-profile <profile> --host <host-id> --repair-trusted-plugin-allowlist`.
+  The repair path backs up existing Maya preferences, preserves existing
+  trusted locations, appends only the configured root, requires Maya to be
+  stopped before repair, requires the target Maya version to have an existing
+  preferences file, and requires a clean Maya restart before proof.
 - Keep the value in host config, CI secret material, or runner-owned config,
   not in `.maya-stall.yaml`.
+- Declare the Maya version in host config `mayaVersions` or Scenario
+  `mayaVersion`; Maya Stall uses that version to locate the durable TrustCenter
+  preferences directory.
 - Keep the root separate from the run workspace tree; Maya Stall rejects roots
   that are `workRoot`, under `workRoot/runs`, or broad enough to contain
   `workRoot/runs`.
@@ -206,6 +215,9 @@ Run behavior:
   `workRoot/runs/<run-id>/payload/`.
 - Only declared `payload.pluginArtifacts` entries are also copied to
   `trustedPluginArtifactsRoot/<repo-relative-path>`.
+- Before staging Plugin Artifacts, `maya-stall run` validates that Maya's
+  durable `SafeModeAllowedlistPaths` preference contains
+  `trustedPluginArtifactsRoot`; missing trust fails before Scenario execution.
 - Each declared trusted destination is removed before upload, so directory
   Plugin Artifacts do not retain stale files.
 - Scenario scripts receive `MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT` and can
@@ -233,23 +245,33 @@ broker:
   python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
   repo: C:/maya-stall-src/GG_MayaSessiond
   mcpSource: C:/maya-stall-src/GG_MayaMCP
-  uiTask: MayaStallSessiondUI
+  recoveryTask: MayaStallSessiondUI
 ```
 
-`uiTask` is optional and defaults to the prepare script's
+`recoveryTask` is optional and defaults to the prepare script's
 `MayaStallSessiondUI` interactive scheduled task. Each Fresh Run stops an
-existing daemon session, starts that task, waits for a new ready broker session
-identity, and refuses to reuse the previous identity. A stopped Stop Policy
-stops that exact Maya UI Session; a kept policy retains its identity for
+existing daemon session, restarts that task, waits for a new ready broker
+session identity, and refuses to reuse the previous identity. The same task
+recovers commandPort health before a live Scenario starts. A stopped Stop
+Policy stops that exact Maya UI Session; a kept policy retains its identity for
 `status`, `attach`, and `stop`.
 
 Maya Stall invokes `gg_maya_sessiond.cli` on the Windows host through the same SSH transport. Runs stage declared payloads under `workRoot/runs/<run-id>/`, execute a staged wrapper with `script.execute`, download declared outputs from the remote workspace, and capture configured Visual Evidence from the interactive Windows desktop. Remote Scenario execution through `script.execute` is capped at 10 minutes. The Session Broker launcher must allow the staged wrapper directory; otherwise doctor fails the `session-broker` layer with a `script.execute` repair hint.
+
+`recoveryTask` names the host-managed interactive scheduled task Maya Stall may
+restart when `gg_mayasessiond` reports a commandPort-unhealthy state before a
+live Scenario starts. If omitted, Maya Stall uses the documented prepare-script
+default `MayaStallSessiondUI`. Recovery is limited to commandPort health
+reasons such as `command-port-not-ready` and `command-port-unreachable`;
+unrelated broker, host, config, or desktop failures fail at the
+`session-broker` layer with their own reason instead of being hidden as Scenario
+or plugin failures.
 
 Each `manifest.json` and `evidence.json` records the resolved runtime profile,
 host adapter, broker adapter, broker session identity, redacted broker config
 source, and whether the run is eligible for live product proof.
 
-`maya-stall doctor` also performs live broker probes for `gg_mayasessiond`: it runs daemon `doctor` and `status`, checks the Windows `maya.exe` session, stages a tiny probe script under `workRoot/runs/doctor-*`, executes it with `script.execute`, removes that probe directory, and checks `viewport.capture`. The local Host Lock gates these probes for Maya Stall runs from the same checkout, but operators should still treat doctor as a live diagnostic that briefly executes code in the active Maya session.
+`maya-stall doctor` also performs live broker probes for `gg_mayasessiond`: it runs daemon `doctor` and `status`, checks the Windows `maya.exe` session, stages a tiny probe script under `workRoot/runs/doctor-*`, executes it with `script.execute`, removes that probe directory, and checks `viewport.capture`. If the commandPort layer is unhealthy and the configured recovery task is available, doctor restarts that task and re-runs the broker probes before reporting success. The local Host Lock gates these probes for Maya Stall runs from the same checkout, but operators should still treat doctor as a live diagnostic that briefly executes code in the active Maya session.
 
 The Doctor CLI renders a Host Health report rather than independent text-only checks. Tests and live proof use the same report fields for layer status, Host Lock state, interactive desktop proof, and broker-backed Visual Evidence readiness.
 

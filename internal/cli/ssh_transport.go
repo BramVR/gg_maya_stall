@@ -62,6 +62,68 @@ Write-Output 'writable'`, powerShellSingleQuoted(host.WorkRoot))
 	return okCheck("work-root", "writable")
 }
 
+func probeInstalledMayaVersions(host mayaHostConfig) ([]string, error) {
+	raw, err := runSSHCommandOutput(host, encodedPowerShellCommand(installedMayaVersionsProbeScript()), sshCommandTimeout)
+	if err != nil {
+		return nil, err
+	}
+	var versions []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		value, ok := strings.CutPrefix(strings.TrimSpace(line), "maya-version:")
+		if ok {
+			versions = append(versions, value)
+		}
+	}
+	return normalizeMayaVersions(versions), nil
+}
+
+func installedMayaVersionsProbeScript() string {
+	return `$versions = New-Object 'System.Collections.Generic.HashSet[string]'
+function Add-MayaVersion([string]$version) {
+  if ($version -match '^\d{4}(?:\.\d+)?$') {
+    [void]$versions.Add($version)
+  }
+}
+$autodeskRoots = @()
+if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
+  $autodeskRoots += (Join-Path $env:ProgramFiles 'Autodesk')
+}
+if (-not [string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) {
+  $autodeskRoots += (Join-Path ${env:ProgramFiles(x86)} 'Autodesk')
+}
+$autodeskRoots | Select-Object -Unique | ForEach-Object {
+  Get-ChildItem -LiteralPath $_ -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($_.Name -match '^Maya(\d{4}(?:\.\d+)?)$') {
+      $mayaExe = Join-Path $_.FullName 'bin\maya.exe'
+      if (Test-Path -LiteralPath $mayaExe -PathType Leaf) {
+        Add-MayaVersion $Matches[1]
+      }
+    }
+  }
+}
+$registryRoots = @('HKLM:\SOFTWARE\Autodesk\Maya', 'HKLM:\SOFTWARE\WOW6432Node\Autodesk\Maya')
+$registryRoots | ForEach-Object {
+  Get-ChildItem -LiteralPath $_ -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($_.PSChildName -match '^\d{4}(?:\.\d+)?$') {
+      $version = $_.PSChildName
+      $installPathKey = Join-Path $_.PSPath 'Setup\InstallPath'
+      $props = Get-ItemProperty -LiteralPath $installPathKey -ErrorAction SilentlyContinue
+      if ($null -ne $props) {
+        $props.PSObject.Properties | ForEach-Object {
+          if ($_.Name -notlike 'PS*' -and -not [string]::IsNullOrWhiteSpace([string]$_.Value)) {
+            $mayaExe = Join-Path ([string]$_.Value) 'bin\maya.exe'
+            if (Test-Path -LiteralPath $mayaExe -PathType Leaf) {
+              Add-MayaVersion $version
+            }
+          }
+        }
+      }
+    }
+  }
+}
+$versions | Sort-Object | ForEach-Object { Write-Output ('maya-version:' + $_) }`
+}
+
 func validateRealSSHConfig(host mayaHostConfig) error {
 	if err := validateRealSSHConnection(host); err != nil {
 		return err
@@ -101,6 +163,10 @@ func runSSHCommand(host mayaHostConfig, remoteCommand []string) error {
 	if err := command.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("ssh command timed out after %s", sshCommandTimeout)
+		}
+		detail := firstUsefulStderrLine(stderr.String())
+		if detail != "" {
+			return fmt.Errorf("ssh command failed: %w: %s", err, detail)
 		}
 		return fmt.Errorf("ssh command failed: %w", err)
 	}
@@ -225,8 +291,11 @@ func (host realSSHHost) prepareTrustedPluginArtifactDestinations(payload []manif
 		builder.WriteString(powerShellSingleQuoted(path))
 	}
 	builder.WriteString(")) {\n")
-	builder.WriteString("  Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue\n")
+	builder.WriteString("  if (Test-Path -LiteralPath $path) {\n")
+	builder.WriteString("    Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop\n")
+	builder.WriteString("  }\n")
 	builder.WriteString("}\n")
+	builder.WriteString("exit 0\n")
 	if err := runSSHCommand(host.host, encodedPowerShellCommand(builder.String())); err != nil {
 		return fmt.Errorf("prepare trusted Plugin Artifact destination: %w", err)
 	}

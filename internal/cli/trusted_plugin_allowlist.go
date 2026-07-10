@@ -419,19 +419,17 @@ if ($exists) {
   return
 }
 $paths = New-Object System.Collections.Generic.List[string]
+$normalizedPaths = New-Object System.Collections.Generic.HashSet[string]
 foreach ($match in [regex]::Matches($content, '-(sva|sa)\s+"SafeModeAllowedlistPaths"(?:\s+"((?:\\.|[^"])*)")?')) {
   if ($match.Groups[1].Value -eq 'sa') {
     $paths.Clear()
+    $normalizedPaths.Clear()
   } else {
     $entry = (($match.Groups[2].Value -replace '\\"','"') -replace '\\\\','\')
-    if ($entry -and -not $paths.Contains($entry)) {
+    if ($entry -and $normalizedPaths.Add((Normalize-MayaStallPath $entry))) {
       $paths.Add($entry)
     }
   }
-}
-$normalizedPaths = New-Object System.Collections.Generic.HashSet[string]
-foreach ($entry in $paths) {
-  [void]$normalizedPaths.Add((Normalize-MayaStallPath $entry))
 }
 $changed = $false
 foreach ($requiredPath in $requiredPaths) {
@@ -447,12 +445,22 @@ if ($changed) {
     Copy-Item -LiteralPath $prefs -Destination ($prefs + '.maya-stall-' + $stamp + '.bak') -Force
   }
   $nl = [Environment]::NewLine
-  $block = $nl + '// Maya Stall trusted Plugin Artifact destinations' + $nl + 'optionVar -cat "Security"' + $nl + ' -sa "SafeModeAllowedlistPaths"'
+  $block = New-Object System.Text.StringBuilder
+  [void]$block.Append($nl)
+  [void]$block.Append('// Maya Stall trusted Plugin Artifact destinations')
+  [void]$block.Append($nl)
+  [void]$block.Append('optionVar -cat "Security"')
+  [void]$block.Append($nl)
+  [void]$block.Append(' -sa "SafeModeAllowedlistPaths"')
   foreach ($entry in $paths) {
-    $block += $nl + ' -sva "SafeModeAllowedlistPaths" "' + (Escape-MelString $entry) + '"'
+    [void]$block.Append($nl)
+    [void]$block.Append(' -sva "SafeModeAllowedlistPaths" "')
+    [void]$block.Append((Escape-MelString $entry))
+    [void]$block.Append('"')
   }
-  $block += ';' + $nl
-  Add-Content -LiteralPath $prefs -Value $block -Encoding UTF8
+  [void]$block.Append(';')
+  [void]$block.Append($nl)
+  Add-Content -LiteralPath $prefs -Value $block.ToString() -Encoding UTF8
 }
 $content = [string](Get-Content -LiteralPath $prefs -Raw)
 $json = [pscustomobject]@{ exists = $true; content = $content; changed = $changed } | ConvertTo-Json -Compress

@@ -1979,6 +1979,7 @@ func TestTrustedPluginPrefsRepairScriptDocumentsMutationSafety(t *testing.T) {
 		"Copy-Item -LiteralPath $prefs",
 		"[regex]::Matches($content",
 		"System.Collections.Generic.HashSet[string]",
+		"System.Text.StringBuilder",
 		"$normalizedPaths.Add($wanted)",
 		"$paths.Add($requiredPath)",
 		"Add-Content -LiteralPath $prefs",
@@ -1993,6 +1994,11 @@ func TestTrustedPluginPrefsRepairScriptDocumentsMutationSafety(t *testing.T) {
 	}
 	if strings.Contains(script, "C:/maya-stall/trusted-plugin-artifacts") {
 		t.Fatalf("repair script must receive required paths over stdin, not the command line:\n%s", script)
+	}
+	for _, quadratic := range []string{"$paths.Contains($entry)", "$block +="} {
+		if strings.Contains(script, quadratic) {
+			t.Fatalf("repair script contains quadratic operation %q:\n%s", quadratic, script)
+		}
 	}
 	requiredLoop := strings.Index(script, "foreach ($requiredPath in $requiredPaths)")
 	if requiredLoop < 0 {

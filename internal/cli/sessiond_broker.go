@@ -99,15 +99,24 @@ func (broker ggMayaSessiondBroker) StartFreshSession(context runContext, scenari
 		return brokerSessionIdentity{}, fmt.Errorf("inspect inherited gg_mayasessiond Maya UI Session: %w", err)
 	}
 	previousSessionID := status.State.SessionID
-	if err := broker.recoverSessionBroker("fresh-run"); err != nil {
+	if sessiondSessionLooksActive(status) {
+		if err := broker.stopSessiondSession(); err != nil {
+			return brokerSessionIdentity{}, fmt.Errorf("stop inherited gg_mayasessiond Maya UI Session: %w", err)
+		}
+	}
+	started := brokerSessionIdentity{BrokerAdapter: "gg-mayasessiond"}
+	if err := broker.restartSessionBrokerTask("fresh-run"); err != nil {
 		return brokerSessionIdentity{}, fmt.Errorf("restart gg_mayasessiond for a fresh Maya UI Session: %w", err)
 	}
 	identity, err := broker.awaitFreshSession(previousSessionID)
 	if err != nil {
-		return brokerSessionIdentity{}, err
+		if identity.BrokerAdapter == "" {
+			identity = started
+		}
+		return identity, err
 	}
 	if err := appendEvent(context.EventsPath, "broker.session.fresh", identity.SessionID); err != nil {
-		return brokerSessionIdentity{}, err
+		return identity, err
 	}
 	return identity, nil
 }
@@ -136,14 +145,18 @@ func sessiondSessionLooksActive(status sessiondStatusResult) bool {
 	if derived == "" {
 		derived = status.State.Status
 	}
-	return status.HasState && derived != "" && !strings.EqualFold(derived, "stopped")
+	return status.State.MayaAlive || status.State.MCPAlive || (status.HasState && derived != "" && !strings.EqualFold(derived, "stopped"))
 }
 
 func (broker ggMayaSessiondBroker) awaitFreshSession(previousSessionID string) (brokerSessionIdentity, error) {
 	deadline := time.Now().Add(sessiondSessionStartTimeout)
 	lastDetail := "gg_mayasessiond did not report a running session"
+	identity := brokerSessionIdentity{BrokerAdapter: "gg-mayasessiond"}
 	for {
 		status, err := broker.status()
+		if err == nil && status.State.SessionID != "" {
+			identity.SessionID = status.State.SessionID
+		}
 		switch {
 		case err != nil:
 			lastDetail = err.Error()
@@ -156,13 +169,10 @@ func (broker ggMayaSessiondBroker) awaitFreshSession(previousSessionID string) (
 		case previousSessionID != "" && status.State.SessionID == previousSessionID:
 			lastDetail = fmt.Sprintf("gg_mayasessiond still reports inherited session %s", previousSessionID)
 		default:
-			return brokerSessionIdentity{
-				BrokerAdapter: "gg-mayasessiond",
-				SessionID:     status.State.SessionID,
-			}, nil
+			return identity, nil
 		}
 		if !time.Now().Before(deadline) {
-			return brokerSessionIdentity{}, fmt.Errorf("fresh gg_mayasessiond Maya UI Session was not ready within %s: %s", sessiondSessionStartTimeout, lastDetail)
+			return identity, fmt.Errorf("fresh gg_mayasessiond Maya UI Session was not ready within %s: %s", sessiondSessionStartTimeout, lastDetail)
 		}
 		time.Sleep(sessiondSessionPollInterval)
 	}
@@ -290,6 +300,9 @@ func (broker ggMayaSessiondBroker) RetentionCapabilities() brokerCapabilities {
 }
 
 func (broker ggMayaSessiondBroker) RetainRun(context runContext, manifest runManifest, reason string) (retainedSessionRecord, error) {
+	if manifest.BrokerSession == nil || manifest.BrokerSession.SessionID == "" {
+		return retainedSessionRecord{}, fmt.Errorf("cannot retain run %s without its broker session identity", manifest.RunID)
+	}
 	status, err := broker.status()
 	if err != nil {
 		return retainedSessionRecord{}, err
@@ -297,9 +310,12 @@ func (broker ggMayaSessiondBroker) RetainRun(context runContext, manifest runMan
 	if status.DerivedStatus == "" {
 		status.DerivedStatus = status.State.Status
 	}
+	if status.State.SessionID != manifest.BrokerSession.SessionID {
+		return retainedSessionRecord{}, fmt.Errorf("gg_mayasessiond session id changed from %s to %s before retention; refusing to retain a session this run does not own", manifest.BrokerSession.SessionID, status.State.SessionID)
+	}
 	return retainedSessionRecord{
-		BrokerAdapter: "gg-mayasessiond",
-		SessionID:     status.State.SessionID,
+		BrokerAdapter: manifest.BrokerSession.BrokerAdapter,
+		SessionID:     manifest.BrokerSession.SessionID,
 		Status:        status.DerivedStatus,
 		Metadata: map[string]any{
 			"reason":             reason,
@@ -573,6 +589,40 @@ func (broker ggMayaSessiondBroker) recoverSessionBroker(reason string) error {
 		return fmt.Errorf("restart scheduled task %q: %w", taskName, err)
 	}
 	return nil
+}
+
+func (broker ggMayaSessiondBroker) restartSessionBrokerTask(reason string) error {
+	taskName := sessiondRecoveryTaskName(broker.host)
+	if _, err := runSSHCommandOutput(broker.host, encodedPowerShellCommand(sessiondTaskRestartScript(taskName, reason)), sessiondCommandTimeout+2*time.Minute); err != nil {
+		return fmt.Errorf("restart scheduled task %q: %w", taskName, err)
+	}
+	return nil
+}
+
+func sessiondTaskRestartScript(taskName string, reason string) string {
+	return fmt.Sprintf(`$ErrorActionPreference = 'Stop'
+$taskName = %s
+$task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+if ($task.State -eq 'Running') {
+  Stop-ScheduledTask -InputObject $task
+  $stopped = $false
+  for ($attempt = 0; $attempt -lt 90; $attempt++) {
+    Start-Sleep -Seconds 1
+    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+    if ($task.State -ne 'Running') {
+      $stopped = $true
+      break
+    }
+  }
+  if (-not $stopped) {
+    throw "scheduled task $taskName did not stop before restart"
+  }
+}
+Start-ScheduledTask -InputObject $task
+[pscustomobject]@{ok=$true; task=$taskName; reason=%s} | ConvertTo-Json -Compress`,
+		powerShellSingleQuoted(taskName),
+		powerShellSingleQuoted(reason),
+	)
 }
 
 func sessiondRecoveryScript(host mayaHostConfig, taskName string, reason string) string {

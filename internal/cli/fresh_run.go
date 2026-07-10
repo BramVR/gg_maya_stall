@@ -53,6 +53,7 @@ func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 		if run.sessionStarted && !run.sessionSettled {
 			if stopErr := run.runtime.Broker.StopSession(run.context, run.session); stopErr != nil {
 				err = errors.Join(err, fmt.Errorf("stop Maya UI Session for %s after run failure: %w", run.manifest.RunID, stopErr))
+				run.releaseHostLock = false
 			} else if syncErr := run.syncEvidenceEvents(); syncErr != nil {
 				err = errors.Join(err, syncErr)
 			}
@@ -190,6 +191,14 @@ func (run *freshRunLifecycle) setup() error {
 
 func (run *freshRunLifecycle) startFreshSession() error {
 	session, err := run.runtime.Broker.StartFreshSession(run.context, run.scenario.Config)
+	if session.BrokerAdapter != "" {
+		run.session = session
+		run.sessionStarted = true
+		run.manifest.BrokerSession = &session
+		if manifestErr := writeJSONFile(filepath.Join(run.context.StateDir, "manifest.json"), run.manifest); manifestErr != nil {
+			return errors.Join(err, manifestErr)
+		}
+	}
 	if err != nil {
 		if evidenceErr := ensureFailureLog(run.context, err); evidenceErr != nil {
 			return errors.Join(err, evidenceErr)
@@ -200,12 +209,6 @@ func (run *freshRunLifecycle) startFreshSession() error {
 		if evidenceErr := run.writeBrokerFailureEvidence(err); evidenceErr != nil {
 			return errors.Join(err, evidenceErr)
 		}
-		return err
-	}
-	run.session = session
-	run.sessionStarted = true
-	run.manifest.BrokerSession = &session
-	if err := writeJSONFile(filepath.Join(run.context.StateDir, "manifest.json"), run.manifest); err != nil {
 		return err
 	}
 	return nil
@@ -458,10 +461,12 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 		if err := markHostLockKept(run.repoDir, run.host.HostID, run.manifest.RunID); err != nil {
 			return runOutcome{}, err
 		}
-		run.releaseHostLock = false
 		session, err := retention.RetainRun(run.context, run.manifest, reason)
 		if err != nil {
 			return runOutcome{}, err
+		}
+		if session.BrokerAdapter != run.session.BrokerAdapter || session.SessionID != run.session.SessionID {
+			return runOutcome{}, fmt.Errorf("Session Broker retained a different Maya UI Session: started %s/%s, retained %s/%s", run.session.BrokerAdapter, run.session.SessionID, session.BrokerAdapter, session.SessionID)
 		}
 		record := newRunRetentionRecord(run.context, run.manifest, run.host.Config, "kept", reason)
 		record.BrokerCapabilities = retention.RetentionCapabilities()
@@ -470,6 +475,7 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 			return runOutcome{}, err
 		}
 		run.sessionSettled = true
+		run.releaseHostLock = false
 	} else if retention, ok := run.runtime.Broker.(runRetentionBroker); ok && retention.RetentionCapabilities().CleanupRetainedWorkspace {
 		if err := retention.CleanupRun(run.context); err != nil {
 			return runOutcome{}, fmt.Errorf("clean up remote run workspace for %s: %w", run.manifest.RunID, err)

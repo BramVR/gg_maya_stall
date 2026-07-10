@@ -481,6 +481,70 @@ func TestFreshRunFailsWhenSessionLifecycleFails(t *testing.T) {
 	})
 }
 
+func TestFreshRunStopsPartiallyStartedSession(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	runtime := defaultRunRuntime()
+	runtime.Broker = partialStartFailingSessionBroker{message: "fresh session readiness failed"}
+
+	_, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
+	if err == nil || !strings.Contains(err.Error(), "fresh session readiness failed") {
+		t.Fatalf("Fresh Run error = %v, want partial session start failure", err)
+	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	bundle := readEvidenceBundle(t, evidence)
+	if bundle.BrokerSession == nil || bundle.BrokerSession.SessionID != "fake-partial-session" {
+		t.Fatalf("partial-start Evidence Bundle broker session = %+v", bundle.BrokerSession)
+	}
+	events, readErr := os.ReadFile(filepath.Join(evidence, "events.jsonl"))
+	if readErr != nil {
+		t.Fatalf("read partial-start events: %v", readErr)
+	}
+	if !strings.Contains(string(events), `"detail":"fake-partial-session","event":"broker.session.stopped"`) {
+		t.Fatalf("partial-start events missing stopped session:\n%s", string(events))
+	}
+}
+
+func TestFreshRunRejectsRetainedSessionIdentityChange(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	runtime := defaultRunRuntime()
+	runtime.Broker = identityChangingRetentionBroker{
+		fakeSessionBroker: fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "fake Scenario completed"}},
+	}
+
+	_, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterNever}, runtime).Run()
+	if err == nil || !strings.Contains(err.Error(), "retained a different Maya UI Session") {
+		t.Fatalf("Fresh Run error = %v, want retained session identity mismatch", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")); !os.IsNotExist(statErr) {
+		t.Fatalf("identity-mismatch Host Lock = %v, want released", statErr)
+	}
+}
+
+func TestGGMayaSessiondFreshRunFailsClosedWhenInheritedSessionStopFails(t *testing.T) {
+	dir := t.TempDir()
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		sessiondStatusFixture("session-inherited"),
+		`@inherited-stop-fail:inherited session stop failed`,
+	})
+	eventsPath := filepath.Join(dir, "events.jsonl")
+	broker := ggMayaSessiondBroker{host: mayaHostConfig{
+		Transport: "ssh",
+		SSH:       sshConfig{Host: "maya-win-01", Binary: sshPath},
+		WorkRoot:  "C:/maya-stall",
+		Broker: brokerConfig{
+			Type:     "gg-mayasessiond",
+			StateDir: "C:/maya-stall/sessiond-ui",
+			Python:   "C:/maya-stall/sessiond-venv311/Scripts/python.exe",
+			Repo:     "C:/maya-stall/tools/GG_MayaSessiond",
+		},
+	}}
+
+	_, err := broker.StartFreshSession(runContext{EventsPath: eventsPath}, scenarioConfig{})
+	if err == nil || !strings.Contains(err.Error(), "stop inherited gg_mayasessiond Maya UI Session") || !strings.Contains(err.Error(), "inherited session stop failed") {
+		t.Fatalf("StartFreshSession error = %v, want inherited session stop failure", err)
+	}
+}
+
 func readRunManifestFile(t *testing.T, path string) runManifest {
 	t.Helper()
 	content, err := os.ReadFile(path)
@@ -523,6 +587,27 @@ func (broker startFailingSessionBroker) RunScenario(runContext, scenarioConfig) 
 type stopFailingSessionBroker struct {
 	fakeSessionBroker
 	message string
+}
+
+type partialStartFailingSessionBroker struct {
+	fakeSessionLifecycle
+	message string
+}
+
+func (broker partialStartFailingSessionBroker) StartFreshSession(runContext, scenarioConfig) (brokerSessionIdentity, error) {
+	return brokerSessionIdentity{BrokerAdapter: "fake", SessionID: "fake-partial-session"}, fmt.Errorf("%s", broker.message)
+}
+
+func (broker partialStartFailingSessionBroker) RunScenario(runContext, scenarioConfig) (ScenarioResult, error) {
+	return ScenarioResult{}, fmt.Errorf("RunScenario must not run after partial session start failure")
+}
+
+type identityChangingRetentionBroker struct {
+	fakeSessionBroker
+}
+
+func (broker identityChangingRetentionBroker) RetainRun(runContext, runManifest, string) (retainedSessionRecord, error) {
+	return retainedSessionRecord{BrokerAdapter: "fake", SessionID: "fake-other-session", Status: "running"}, nil
 }
 
 func (broker stopFailingSessionBroker) StopSession(runContext, brokerSessionIdentity) error {

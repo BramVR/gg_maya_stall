@@ -456,17 +456,18 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 			return runOutcome{}, fmt.Errorf("stop Maya UI Session for %s: %w", run.manifest.RunID, err)
 		}
 		run.sessionSettled = true
-		if err := run.syncEvidenceEvents(); err != nil {
-			return runOutcome{}, err
+		syncErr := run.syncEvidenceEvents()
+		cleanupErr := run.cleanupStoppedRun()
+		if cleanupErr != nil {
+			run.releaseHostLock = false
+		}
+		if syncErr != nil || cleanupErr != nil {
+			return runOutcome{}, errors.Join(syncErr, cleanupErr)
 		}
 	}
 	if run.stopPolicy == "kept" {
 		if err := run.retainSession(run.retentionReason()); err != nil {
 			return runOutcome{}, err
-		}
-	} else if retention, ok := run.runtime.Broker.(runRetentionBroker); ok && retention.RetentionCapabilities().CleanupRetainedWorkspace {
-		if err := retention.CleanupRun(run.context); err != nil {
-			return runOutcome{}, fmt.Errorf("clean up remote run workspace for %s: %w", run.manifest.RunID, err)
 		}
 	}
 	return run.currentOutcome(), nil

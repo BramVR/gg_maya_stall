@@ -327,6 +327,9 @@ func (broker ggMayaSessiondBroker) RetainRun(context runContext, manifest runMan
 	if status.State.SessionID != manifest.BrokerSession.SessionID {
 		return retainedSessionRecord{}, fmt.Errorf("gg_mayasessiond session id changed from %s to %s before retention; refusing to retain a session this run does not own", manifest.BrokerSession.SessionID, status.State.SessionID)
 	}
+	if !sessiondSessionLooksActive(status) {
+		return retainedSessionRecord{}, fmt.Errorf("gg_mayasessiond session %s is not active; refusing to report it as retained", manifest.BrokerSession.SessionID)
+	}
 	return retainedSessionRecord{
 		BrokerAdapter: manifest.BrokerSession.BrokerAdapter,
 		SessionID:     manifest.BrokerSession.SessionID,

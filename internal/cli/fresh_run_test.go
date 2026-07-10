@@ -652,6 +652,29 @@ func TestFreshRunDeferredStopRetainsStateWhenRemoteCleanupFails(t *testing.T) {
 	}
 }
 
+func TestFreshRunStopCleansStateWhenEvidenceSyncFails(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	broker := &syncFailingStopSessionBroker{fakeSessionBroker: fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "passed"}}}
+	runtime := defaultRunRuntime()
+	runtime.Broker = broker
+
+	_, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
+	if err == nil || !strings.Contains(err.Error(), "read run events after stopping run") {
+		t.Fatalf("Fresh Run error = %v, want evidence sync failure", err)
+	}
+	if broker.cleanupCalls != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", broker.cleanupCalls)
+	}
+	evidenceDir := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	runID := filepath.Base(evidenceDir)
+	if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "runs", runID)); !os.IsNotExist(statErr) {
+		t.Fatalf("sync-failure run state = %v, want removed", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")); !os.IsNotExist(statErr) {
+		t.Fatalf("sync-failure Host Lock = %v, want released", statErr)
+	}
+}
+
 func TestGGMayaSessiondFreshRunFailsClosedWhenInheritedSessionStopFails(t *testing.T) {
 	dir := t.TempDir()
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
@@ -698,6 +721,30 @@ func TestGGMayaSessiondStopSessionFailsClosedWithoutCurrentIdentity(t *testing.T
 	err := broker.StopSession(runContext{EventsPath: eventsPath}, brokerSessionIdentity{BrokerAdapter: "gg-mayasessiond", SessionID: "session-owned"})
 	if err == nil || !strings.Contains(err.Error(), "did not report a session id") {
 		t.Fatalf("StopSession error = %v, want missing current session identity", err)
+	}
+}
+
+func TestGGMayaSessiondRefusesToRetainInactiveOwnedSession(t *testing.T) {
+	dir := t.TempDir()
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		`{"has_state":true,"derived_status":"stopped","state":{"status":"stopped","session_id":"session-owned","maya_alive":false,"mcp_alive":false}}`,
+	})
+	broker := ggMayaSessiondBroker{host: mayaHostConfig{
+		Transport: "ssh",
+		SSH:       sshConfig{Host: "maya-win-01", Binary: sshPath},
+		WorkRoot:  "C:/maya-stall",
+		Broker: brokerConfig{
+			Type:     "gg-mayasessiond",
+			StateDir: "C:/maya-stall/sessiond-ui",
+			Python:   "C:/maya-stall/sessiond-venv311/Scripts/python.exe",
+			Repo:     "C:/maya-stall/tools/GG_MayaSessiond",
+		},
+	}}
+	manifest := runManifest{RunID: "run-owned", BrokerSession: &brokerSessionIdentity{BrokerAdapter: "gg-mayasessiond", SessionID: "session-owned"}}
+
+	_, err := broker.RetainRun(runContext{}, manifest, "keep-on-failure")
+	if err == nil || !strings.Contains(err.Error(), "is not active") {
+		t.Fatalf("RetainRun error = %v, want inactive session rejection", err)
 	}
 }
 
@@ -964,6 +1011,23 @@ type retryingStopSessionBroker struct {
 	stopCalls    int
 	cleanupCalls int
 	cleanupErr   error
+}
+
+type syncFailingStopSessionBroker struct {
+	fakeSessionBroker
+	cleanupCalls int
+}
+
+func (broker *syncFailingStopSessionBroker) StopSession(context runContext, session brokerSessionIdentity) error {
+	if err := broker.fakeSessionBroker.StopSession(context, session); err != nil {
+		return err
+	}
+	return os.Remove(context.EventsPath)
+}
+
+func (broker *syncFailingStopSessionBroker) CleanupRun(runContext) error {
+	broker.cleanupCalls++
+	return nil
 }
 
 func (broker *retryingStopSessionBroker) StopSession(context runContext, session brokerSessionIdentity) error {

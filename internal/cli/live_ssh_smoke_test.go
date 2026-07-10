@@ -436,8 +436,10 @@ func freshRunStoppedProofError(status sessiondStatusResult, session *brokerSessi
 		return fmt.Errorf("missing broker session identity")
 	}
 	if status.State.SessionID == "" {
-		if status.HasState || !strings.EqualFold(sessiondEffectiveStatus(status), "missing") {
-			return fmt.Errorf("session identity disappeared without a missing broker state")
+		missingState := !status.HasState && strings.EqualFold(sessiondEffectiveStatus(status), "missing")
+		stoppedTombstone := status.HasState && strings.EqualFold(status.DerivedStatus, "stopped") && strings.EqualFold(status.State.Status, "stopped")
+		if !missingState && !stoppedTombstone {
+			return fmt.Errorf("session identity disappeared without an inactive broker state")
 		}
 	} else if status.State.SessionID != session.SessionID {
 		return fmt.Errorf("evidence session %q does not match status session %q", session.SessionID, status.State.SessionID)
@@ -462,6 +464,10 @@ func TestFreshRunStoppedProof(t *testing.T) {
 		{
 			name:   "matching stopped tombstone",
 			status: stoppedSessiondStatus("session-owned"),
+		},
+		{
+			name:   "anonymous stopped tombstone",
+			status: stoppedSessiondStatus(""),
 		},
 		{
 			name:   "state removed after stop",

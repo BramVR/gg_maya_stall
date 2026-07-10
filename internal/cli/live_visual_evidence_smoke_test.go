@@ -1149,6 +1149,10 @@ func addLiveDesktopScreenshotForProofArtifact(t *testing.T, repoDir string, evid
 		t.Fatal(err)
 	}
 	context := runContext{
+		RunWorkspace: runWorkspace{
+			runID:          bundle.RunID,
+			remoteWorkRoot: remotePath(host.WorkRoot),
+		},
 		EvidenceDir: evidenceDir,
 		EventsPath:  filepath.Join(evidenceDir, evidenceEventsFileName),
 	}

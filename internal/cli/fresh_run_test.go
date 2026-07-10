@@ -478,6 +478,11 @@ func TestFreshRunFailsWhenSessionLifecycleFails(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "stop Maya UI Session") || !strings.Contains(err.Error(), "gg_mayasessiond stop failed") {
 			t.Fatalf("Fresh Run error = %v, want stop session failure", err)
 		}
+		evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+		bundle := readEvidenceBundle(t, evidence)
+		if bundle.Status != resultStatusPassed || bundle.BrokerSession == nil {
+			t.Fatalf("stop-failure Evidence Bundle = status %q session %+v, want completed run evidence", bundle.Status, bundle.BrokerSession)
+		}
 	})
 }
 
@@ -566,6 +571,33 @@ func TestGGMayaSessiondStopSessionFailsClosedWithoutCurrentIdentity(t *testing.T
 	err := broker.StopSession(runContext{EventsPath: eventsPath}, brokerSessionIdentity{BrokerAdapter: "gg-mayasessiond", SessionID: "session-owned"})
 	if err == nil || !strings.Contains(err.Error(), "did not report a session id") {
 		t.Fatalf("StopSession error = %v, want missing current session identity", err)
+	}
+}
+
+func TestGGMayaSessiondFreshRunReturnsPartialIdentityWhenTaskRestartIsAmbiguous(t *testing.T) {
+	dir := t.TempDir()
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		`{"has_state":false,"derived_status":"stopped","state":{"status":"stopped"}}`,
+		`@fresh-fail:ssh connection lost after task start`,
+	})
+	broker := ggMayaSessiondBroker{host: mayaHostConfig{
+		Transport: "ssh",
+		SSH:       sshConfig{Host: "maya-win-01", Binary: sshPath},
+		WorkRoot:  "C:/maya-stall",
+		Broker: brokerConfig{
+			Type:     "gg-mayasessiond",
+			StateDir: "C:/maya-stall/sessiond-ui",
+			Python:   "C:/maya-stall/sessiond-venv311/Scripts/python.exe",
+			Repo:     "C:/maya-stall/tools/GG_MayaSessiond",
+		},
+	}}
+
+	identity, err := broker.StartFreshSession(runContext{EventsPath: filepath.Join(dir, "events.jsonl")}, scenarioConfig{})
+	if err == nil || !strings.Contains(err.Error(), "ssh connection lost after task start") {
+		t.Fatalf("StartFreshSession error = %v, want ambiguous task restart failure", err)
+	}
+	if identity.BrokerAdapter != "gg-mayasessiond" {
+		t.Fatalf("partial identity = %+v, want gg-mayasessiond ownership marker", identity)
 	}
 }
 

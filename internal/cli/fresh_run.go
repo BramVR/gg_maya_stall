@@ -437,17 +437,20 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 			fmt.Sprintf("maya-stall stop %s", run.manifest.RunID),
 		)
 	}
-	if run.stopPolicy == "stopped" {
-		if err := run.runtime.Broker.StopSession(run.context, run.session); err != nil {
-			return runOutcome{}, fmt.Errorf("stop Maya UI Session for %s: %w", run.manifest.RunID, err)
-		}
-		run.sessionSettled = true
-	}
 	if err := appendEvent(run.context.EventsPath, "run.completed", run.result.Status); err != nil {
 		return runOutcome{}, err
 	}
 	if err := writeEvidenceBundle(run.context, run.manifest, run.scenario, run.result, run.visualEvidence, run.validatorResult); err != nil {
 		return runOutcome{}, err
+	}
+	if run.stopPolicy == "stopped" {
+		if err := run.runtime.Broker.StopSession(run.context, run.session); err != nil {
+			return runOutcome{}, fmt.Errorf("stop Maya UI Session for %s: %w", run.manifest.RunID, err)
+		}
+		run.sessionSettled = true
+		if err := run.syncEvidenceEvents(); err != nil {
+			return runOutcome{}, err
+		}
 	}
 	if run.stopPolicy == "kept" {
 		retention, ok := run.runtime.Broker.(runRetentionBroker)

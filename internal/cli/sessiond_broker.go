@@ -106,7 +106,7 @@ func (broker ggMayaSessiondBroker) StartFreshSession(context runContext, scenari
 	}
 	started := brokerSessionIdentity{BrokerAdapter: "gg-mayasessiond"}
 	if err := broker.restartSessionBrokerTask("fresh-run"); err != nil {
-		return brokerSessionIdentity{}, fmt.Errorf("restart gg_mayasessiond for a fresh Maya UI Session: %w", err)
+		return started, fmt.Errorf("restart gg_mayasessiond for a fresh Maya UI Session: %w", err)
 	}
 	identity, err := broker.awaitFreshSession(previousSessionID)
 	if err != nil {

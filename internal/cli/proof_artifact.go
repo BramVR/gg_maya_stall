@@ -1,11 +1,11 @@
 package cli
 
 import (
-	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -334,19 +334,16 @@ func requireBrokerCaptureProvenanceEvents(evidenceDir string, bundle evidenceBun
 	}()
 
 	var events []visualEvidenceProvenanceEvent
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		if strings.TrimSpace(scanner.Text()) == "" {
-			continue
-		}
+	decoder := json.NewDecoder(file)
+	for {
 		var event visualEvidenceProvenanceEvent
-		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+		if err := decoder.Decode(&event); err != nil {
+			if err == io.EOF {
+				break
+			}
 			return fmt.Errorf("parse Visual Evidence provenance event: %w", err)
 		}
 		events = append(events, event)
-	}
-	if err := scanner.Err(); err != nil {
-		return err
 	}
 
 	for _, artifact := range bundle.VisualEvidence {

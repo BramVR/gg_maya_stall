@@ -168,6 +168,11 @@ func TestRequireBrokerCaptureProvenanceEvents(t *testing.T) {
 				artifact.Path, artifact.Origin, artifact.Path, artifact.Origin, artifact.SHA256),
 		},
 		{
+			name: "large unrelated event detail",
+			events: fmt.Sprintf("{\"event\":\"run.failed\",\"detail\":%q}\n{\"event\":\"broker.screenshot.capture-requested\",\"detail\":%q,\"origin\":%q}\n{\"event\":\"broker.screenshot.captured\",\"detail\":%q,\"origin\":%q,\"sha256\":%q}\n",
+				strings.Repeat("x", 70*1024), artifact.Path, artifact.Origin, artifact.Path, artifact.Origin, artifact.SHA256),
+		},
+		{
 			name: "missing request",
 			events: fmt.Sprintf("{\"event\":\"broker.screenshot.captured\",\"detail\":%q,\"origin\":%q,\"sha256\":%q}\n",
 				artifact.Path, artifact.Origin, artifact.SHA256),

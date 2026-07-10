@@ -1148,24 +1148,13 @@ func addLiveDesktopScreenshotForProofArtifact(t *testing.T, repoDir string, evid
 	if err := requireConsoleMayaProcess(processes); err != nil {
 		t.Fatal(err)
 	}
-	remoteRoot := remoteJoin(host.WorkRoot, "artifacts", "live-visual-evidence-"+bundle.RunID)
-	defer func() {
-		_ = ggMayaSessiondBroker{host: host}.removeRemotePath(remoteRoot)
-	}()
 	context := runContext{
 		EvidenceDir: evidenceDir,
 		EventsPath:  filepath.Join(evidenceDir, evidenceEventsFileName),
 	}
-	if err := appendVisualEvidenceCaptureRequested(context, "screenshot", visualEvidenceOriginBrokerCapture, "desktop-screenshot.png"); err != nil {
-		t.Fatalf("record desktop screenshot capture request: %v", err)
-	}
-	screenshotBytes, err := captureWindowsDesktopScreenshot(sshWindowsDesktopTransport(host), remoteRoot)
+	screenshot, err := (ggMayaSessiondBroker{host: host}).CaptureScreenshot(context, screenshotRequest{Name: "desktop-screenshot.png"})
 	if err != nil {
-		t.Fatalf("capture desktop screenshot for proof artifact: %v", err)
-	}
-	screenshot, err := registerVisualEvidenceBytes(context, "screenshot", visualEvidenceOriginBrokerCapture, "desktop-screenshot.png", "image/png", screenshotBytes)
-	if err != nil {
-		t.Fatalf("register desktop screenshot for proof artifact: %v", err)
+		t.Fatalf("capture desktop screenshot through Session Broker for proof artifact: %v", err)
 	}
 	screenshot.TargetProfile = bundle.TargetProfile
 	screenshot.Host = bundle.Host

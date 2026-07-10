@@ -84,6 +84,52 @@ func TestFreshRunLifecycleSettlesStopPolicyAndFailures(t *testing.T) {
 		}
 	})
 
+	t.Run("broker error honors keep on failure", func(t *testing.T) {
+		dir := writeRunConfigFixture(t)
+		runtime := defaultRunRuntime()
+		runtime.Broker = failingRetainableSessionBroker{
+			fakeSessionBroker: fakeSessionBroker{},
+			message:           "broker disconnected before result",
+		}
+
+		outcome, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterSuccess}, runtime).Run()
+		if err == nil || !strings.Contains(err.Error(), "broker disconnected before result") {
+			t.Fatalf("Fresh Run error = %v, want broker disconnect", err)
+		}
+		if outcome.StopPolicy != "kept" || outcome.RunID == "" || len(outcome.FollowUpCommands) != 3 {
+			t.Fatalf("Fresh Run outcome = %+v, want kept failed run", outcome)
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")); statErr != nil {
+			t.Fatalf("kept broker-error Host Lock missing: %v", statErr)
+		}
+		record := readRunRetentionRecordFile(t, filepath.Join(outcome.StateDir, "run-record.json"))
+		if record.Status != "kept" || record.RemoteSession.SessionID != "fake-"+outcome.RunID {
+			t.Fatalf("broker-error retention record = %+v", record)
+		}
+	})
+
+	t.Run("broker error does not report kept when retention fails", func(t *testing.T) {
+		dir := writeRunConfigFixture(t)
+		runtime := defaultRunRuntime()
+		runtime.Broker = failingExecutionRetentionBroker{
+			failingRetainableSessionBroker: failingRetainableSessionBroker{
+				fakeSessionBroker: fakeSessionBroker{},
+				message:           "broker disconnected before result",
+			},
+		}
+
+		outcome, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterSuccess}, runtime).Run()
+		if err == nil || !strings.Contains(err.Error(), "retention failed") {
+			t.Fatalf("Fresh Run error = %v, want retention failure", err)
+		}
+		if outcome.RunID != "" || outcome.StopPolicy != "" {
+			t.Fatalf("retention-failure outcome = %+v, want no reported kept run", outcome)
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")); !os.IsNotExist(statErr) {
+			t.Fatalf("retention-failure Host Lock = %v, want released after session stop", statErr)
+		}
+	})
+
 	t.Run("broker success requires an owned session identity", func(t *testing.T) {
 		dir := writeRunConfigFixture(t)
 		runtime := defaultRunRuntime()
@@ -530,9 +576,12 @@ func TestFreshRunRejectsRetainedSessionIdentityChange(t *testing.T) {
 		fakeSessionBroker: fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "fake Scenario completed"}},
 	}
 
-	_, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterNever}, runtime).Run()
+	outcome, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterNever}, runtime).Run()
 	if err == nil || !strings.Contains(err.Error(), "retained a different Maya UI Session") {
 		t.Fatalf("Fresh Run error = %v, want retained session identity mismatch", err)
+	}
+	if outcome.RunID != "" || outcome.StopPolicy != "" {
+		t.Fatalf("identity-mismatch outcome = %+v, want no reported kept run", outcome)
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")); !os.IsNotExist(statErr) {
 		t.Fatalf("identity-mismatch Host Lock = %v, want released", statErr)
@@ -826,6 +875,26 @@ scenarios:
 type failingSessionBroker struct {
 	fakeSessionLifecycle
 	message string
+}
+
+type failingRetainableSessionBroker struct {
+	fakeSessionBroker
+	message string
+}
+
+type failingExecutionRetentionBroker struct {
+	failingRetainableSessionBroker
+}
+
+func (broker failingExecutionRetentionBroker) RetainRun(runContext, runManifest, string) (retainedSessionRecord, error) {
+	return retainedSessionRecord{}, fmt.Errorf("retention failed")
+}
+
+func (broker failingRetainableSessionBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
+	if err := appendEvent(context.EventsPath, "broker.session.started", scenario.MayaVersion); err != nil {
+		return ScenarioResult{}, err
+	}
+	return ScenarioResult{}, fmt.Errorf("%s", broker.message)
 }
 
 func (broker failingSessionBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {

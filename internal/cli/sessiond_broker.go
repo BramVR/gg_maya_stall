@@ -147,11 +147,19 @@ func (broker ggMayaSessiondBroker) StopSession(context runContext, session broke
 }
 
 func sessiondSessionLooksActive(status sessiondStatusResult) bool {
-	derived := status.DerivedStatus
-	if derived == "" {
-		derived = status.State.Status
-	}
+	derived := sessiondEffectiveStatus(status)
 	return status.State.MayaAlive || status.State.MCPAlive || (status.HasState && derived != "" && !strings.EqualFold(derived, "stopped"))
+}
+
+func sessiondEffectiveStatus(status sessiondStatusResult) string {
+	if status.DerivedStatus != "" {
+		return status.DerivedStatus
+	}
+	return status.State.Status
+}
+
+func sessiondFreshSessionReady(status sessiondStatusResult) bool {
+	return strings.EqualFold(sessiondEffectiveStatus(status), "running") && status.State.CallServerReady && status.State.SessionID != ""
 }
 
 func (broker ggMayaSessiondBroker) awaitFreshSession(previousSessionID string) (brokerSessionIdentity, error) {
@@ -166,15 +174,15 @@ func (broker ggMayaSessiondBroker) awaitFreshSession(previousSessionID string) (
 		switch {
 		case err != nil:
 			lastDetail = err.Error()
-		case !sessiondSessionLooksActive(status):
-			lastDetail = "gg_mayasessiond session is not running yet"
+		case !strings.EqualFold(sessiondEffectiveStatus(status), "running"):
+			lastDetail = fmt.Sprintf("gg_mayasessiond session status is %q, not running", sessiondEffectiveStatus(status))
 		case !status.State.CallServerReady:
 			lastDetail = "gg_mayasessiond call server is not ready yet"
 		case status.State.SessionID == "":
 			lastDetail = "gg_mayasessiond did not report a broker session id"
 		case previousSessionID != "" && status.State.SessionID == previousSessionID:
 			lastDetail = fmt.Sprintf("gg_mayasessiond still reports inherited session %s", previousSessionID)
-		default:
+		case sessiondFreshSessionReady(status):
 			return identity, nil
 		}
 		if !time.Now().Before(deadline) {
@@ -568,7 +576,11 @@ func (broker ggMayaSessiondBroker) sessionBrokerHealth() sessiondHealthResult {
 			reason = sessiondReasonCommandPortDown
 			hint = "Restart the interactive gg_mayasessiond broker so Maya commandPort localhost:7001 is reacquired. See docs/setup/windows-maya-host.md#session-broker."
 		}
-		if reason == sessiondReasonCommandPortDown {
+		if isKnownSessiondScriptExecuteTypeError(err) {
+			reason = "script-execute-invalid-response"
+			hint = "Restart the interactive gg_mayasessiond broker so script.execute returns a valid tool result. See docs/setup/windows-maya-host.md#session-broker."
+		}
+		if reason == sessiondReasonCommandPortDown || reason == "script-execute-invalid-response" {
 			return recoverableSessiondHealth(reason, err.Error(), hint)
 		}
 		return unrecoverableSessiondHealth(reason, err.Error(), hint)
@@ -587,6 +599,13 @@ func unrecoverableSessiondHealth(reason string, detail string, hint string) sess
 func isCommandPortError(err error) bool {
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "commandport") || strings.Contains(message, "localhost:7001")
+}
+
+// Older live broker sessions can retain a handler that returns an integer
+// instead of the expected tool-result object; restarting the session repairs it.
+func isKnownSessiondScriptExecuteTypeError(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "'int' object has no attribute 'get'")
 }
 
 func (broker ggMayaSessiondBroker) recoverSessionBroker(reason string) error {

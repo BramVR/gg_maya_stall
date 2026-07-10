@@ -191,6 +191,10 @@ func (run *freshRunLifecycle) setup() error {
 
 func (run *freshRunLifecycle) startFreshSession() error {
 	session, err := run.runtime.Broker.StartFreshSession(run.context, run.scenario.Config)
+	if err == nil && (session.BrokerAdapter == "" || session.SessionID == "") {
+		run.releaseHostLock = false
+		err = fmt.Errorf("session broker started without an owned session identity")
+	}
 	if session.BrokerAdapter != "" {
 		run.session = session
 		run.sessionStarted = true
@@ -507,10 +511,10 @@ func (run *freshRunLifecycle) syncEvidenceEvents() error {
 	}
 	events, err := os.ReadFile(run.context.EventsPath)
 	if err != nil {
-		return fmt.Errorf("read run events after stopping failed run: %w", err)
+		return fmt.Errorf("read run events after stopping run: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(run.context.EvidenceDir, evidenceEventsFileName), events, 0o644); err != nil {
-		return fmt.Errorf("update Evidence Bundle events after stopping failed run: %w", err)
+		return fmt.Errorf("update Evidence Bundle events after stopping run: %w", err)
 	}
 	return nil
 }

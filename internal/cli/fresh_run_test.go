@@ -84,6 +84,20 @@ func TestFreshRunLifecycleSettlesStopPolicyAndFailures(t *testing.T) {
 		}
 	})
 
+	t.Run("broker success requires an owned session identity", func(t *testing.T) {
+		dir := writeRunConfigFixture(t)
+		runtime := defaultRunRuntime()
+		runtime.Broker = emptyIdentitySessionBroker{fakeSessionLifecycle: fakeSessionLifecycle{}}
+
+		_, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
+		if err == nil || !strings.Contains(err.Error(), "without an owned session identity") {
+			t.Fatalf("Fresh Run error = %v, want missing owned session identity", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")); statErr != nil {
+			t.Fatalf("ambiguous broker session did not retain Host Lock: %v", statErr)
+		}
+	})
+
 	t.Run("broker error captures failure desktop evidence", func(t *testing.T) {
 		dir := writeFailureScreenshotRunConfigFixture(t)
 		runtime := defaultRunRuntime()
@@ -601,6 +615,28 @@ func TestGGMayaSessiondFreshRunReturnsPartialIdentityWhenTaskRestartIsAmbiguous(
 	}
 }
 
+func TestGGMayaSessiondFreshSessionReadinessRequiresRunningStatus(t *testing.T) {
+	status := sessiondStatusResult{DerivedStatus: "starting", HasState: true}
+	status.State.Status = "starting"
+	status.State.SessionID = "session-fresh"
+	status.State.MayaAlive = true
+	status.State.MCPAlive = true
+	status.State.CallServerReady = true
+	if sessiondFreshSessionReady(status) {
+		t.Fatal("starting gg_mayasessiond session reported ready")
+	}
+	status.DerivedStatus = "failed"
+	status.State.Status = "failed"
+	if sessiondFreshSessionReady(status) {
+		t.Fatal("failed gg_mayasessiond session reported ready")
+	}
+	status.DerivedStatus = "running"
+	status.State.Status = "running"
+	if !sessiondFreshSessionReady(status) {
+		t.Fatal("running gg_mayasessiond session did not report ready")
+	}
+}
+
 func readRunManifestFile(t *testing.T, path string) runManifest {
 	t.Helper()
 	content, err := os.ReadFile(path)
@@ -630,6 +666,18 @@ func readRunRetentionRecordFile(t *testing.T, path string) runRetentionRecord {
 type startFailingSessionBroker struct {
 	fakeSessionLifecycle
 	message string
+}
+
+type emptyIdentitySessionBroker struct {
+	fakeSessionLifecycle
+}
+
+func (broker emptyIdentitySessionBroker) StartFreshSession(runContext, scenarioConfig) (brokerSessionIdentity, error) {
+	return brokerSessionIdentity{}, nil
+}
+
+func (broker emptyIdentitySessionBroker) RunScenario(runContext, scenarioConfig) (ScenarioResult, error) {
+	return ScenarioResult{}, fmt.Errorf("RunScenario must not run after empty session identity")
 }
 
 func (broker startFailingSessionBroker) StartFreshSession(runContext, scenarioConfig) (brokerSessionIdentity, error) {

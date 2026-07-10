@@ -2532,6 +2532,67 @@ hostPools:
 	}
 }
 
+func TestDoctorGGMayaSessiondRecoversMalformedScriptExecuteResponse(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	useFakeFFmpegLookPath(t, dir)
+	sshLog := filepath.Join(dir, "ssh.log")
+	sftpPath := writeFakeSFTPCommand(t, dir, filepath.Join(dir, "sftp.log"))
+	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, []string{
+		``,
+		``,
+		`{"ok":true,"checks":[{"id":"state_dir","ok":true}]}`,
+		`{"derived_status":"running","state":{"status":"running","call_server_ready":true,"maya_alive":true,"mcp_alive":true}}`,
+		`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
+		`{"ok":false,"tool":"script.execute","error":"Error calling tool 'script.execute': 'int' object has no attribute 'get'"}`,
+		`removed`,
+		`{"ok":true,"task":"MayaStallSessiondUI","reason":"script-execute-invalid-response"}`,
+		`{"ok":true,"checks":[{"id":"state_dir","ok":true}]}`,
+		`{"derived_status":"running","state":{"status":"running","call_server_ready":true,"maya_alive":true,"mcp_alive":true}}`,
+		`{"ProcessId":1234,"SessionId":1,"Name":"maya.exe"}`,
+		`{"ok":true,"tool":"script.execute"}`,
+		`removed`,
+		`maya-version:2025`,
+		`{"ok":true,"tool":"viewport.capture","content":[{"type":"image","data":"` + base64.StdEncoding.EncodeToString([]byte("jpeg proof")) + `","mimeType":"image/jpeg"}]}`,
+		``,
+		``,
+		writeFakeSSHBinaryOutput(t, dir, "recording-frames.zip", zipFrameArchive(t)),
+		`removed`,
+	})
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        transport: ssh
+        ssh:
+          host: maya-win-01
+          binary: `+strconv.Quote(sshPath)+`
+          sftpBinary: `+strconv.Quote(sftpPath)+`
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv311/Scripts/python.exe
+          repo: C:/maya-stall/tools/GG_MayaSessiond
+          recoveryTask: MayaStallSessiondUI
+        visualEvidence: true
+`)
+
+	report := runDoctor(dir, doctorOptions{HostConfig: hostConfigPath, TargetProfile: "ci", HostPin: "alpha"})
+
+	if !report.Healthy {
+		t.Fatalf("Host Health healthy = false, checks: %+v", report.Layers)
+	}
+	broker := requireHostHealthLayer(t, report, "session-broker")
+	if broker.Status != "ok" || broker.State != "recovered" || !broker.InteractiveDesktop {
+		t.Fatalf("session-broker Host Health = %+v, want recovered interactive broker", broker)
+	}
+}
+
 func TestDoctorGGMayaSessiondReportsDaemonDoctorCheckIDs(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{

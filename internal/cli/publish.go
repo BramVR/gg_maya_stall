@@ -41,6 +41,8 @@ type publishedArtifact struct {
 	Path      string `json:"path"`
 	URL       string `json:"url"`
 	MediaType string `json:"mediaType,omitempty"`
+	Origin    string `json:"origin,omitempty"`
+	SHA256    string `json:"sha256,omitempty"`
 }
 
 func parseEvidencePublishArgs(args []string) (evidencePublishOptions, error) {
@@ -221,6 +223,8 @@ func buildPublishedArtifactManifest(publishedDir string, bundle evidenceBundle, 
 			Path:      filepath.ToSlash(clean),
 			URL:       artifactURL,
 			MediaType: mediaType,
+			Origin:    artifact.Origin,
+			SHA256:    artifact.SHA256,
 		})
 		return nil
 	}

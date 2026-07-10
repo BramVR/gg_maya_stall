@@ -60,9 +60,9 @@ func TestPublishLiveProofArtifactWritesManifestHashesAndSelectedContent(t *testi
 	evidenceDir := writeLiveVisualEvidenceProofBundle(t,
 		runtimeMetadata{Profile: "ssh-sessiond", HostAdapter: "ssh", BrokerAdapter: "gg-mayasessiond", LiveProofEligible: true},
 		[]visualEvidenceArtifact{
-			{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png"},
-			{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4"},
-			{Kind: "screenshot", Path: "screenshots/viewport.jpg", MediaType: "image/jpeg"},
+			{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(pngHeaderBytes())},
+			{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(mp4HeaderBytes())},
+			{Kind: "screenshot", Path: "screenshots/viewport.jpg", MediaType: "image/jpeg", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(jpegHeaderBytes())},
 		},
 		map[string][]byte{
 			"screenshots/desktop-screenshot.png": pngHeaderBytes(),
@@ -138,8 +138,8 @@ func TestPublishLiveProofArtifactRejectsMissingLiveArtifactPath(t *testing.T) {
 	evidenceDir := writeLiveVisualEvidenceProofBundle(t,
 		runtimeMetadata{Profile: "ssh-sessiond", HostAdapter: "ssh", BrokerAdapter: "gg-mayasessiond", LiveProofEligible: true},
 		[]visualEvidenceArtifact{
-			{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png"},
-			{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4"},
+			{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(pngHeaderBytes())},
+			{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(mp4HeaderBytes())},
 		},
 		map[string][]byte{
 			"screenshots/desktop-screenshot.png": pngHeaderBytes(),
@@ -182,8 +182,8 @@ func TestPublishLiveProofArtifactRejectsConfidentialHostAlias(t *testing.T) {
 	evidenceDir := writeLiveVisualEvidenceProofBundle(t,
 		runtimeMetadata{Profile: "ssh-sessiond", HostAdapter: "ssh", BrokerAdapter: "gg-mayasessiond", LiveProofEligible: true},
 		[]visualEvidenceArtifact{
-			{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png"},
-			{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4"},
+			{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(pngHeaderBytes())},
+			{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(mp4HeaderBytes())},
 		},
 		map[string][]byte{
 			"screenshots/desktop-screenshot.png": pngHeaderBytes(),
@@ -210,8 +210,8 @@ func TestPublishLiveProofArtifactRequiresReviewedMedia(t *testing.T) {
 	evidenceDir := writeLiveVisualEvidenceProofBundle(t,
 		runtimeMetadata{Profile: "ssh-sessiond", HostAdapter: "ssh", BrokerAdapter: "gg-mayasessiond", LiveProofEligible: true},
 		[]visualEvidenceArtifact{
-			{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png"},
-			{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4"},
+			{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(pngHeaderBytes())},
+			{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(mp4HeaderBytes())},
 		},
 		map[string][]byte{
 			"screenshots/desktop-screenshot.png": pngHeaderBytes(),
@@ -225,6 +225,68 @@ func TestPublishLiveProofArtifactRequiresReviewedMedia(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), liveProofMediaReviewedEnv) {
 		t.Fatalf("media review error = %v", err)
+	}
+}
+
+func TestPublishLiveProofArtifactRejectsNonBrokerProvenance(t *testing.T) {
+	cases := []struct {
+		name    string
+		visual  []visualEvidenceArtifact
+		wantErr string
+	}{
+		{
+			name: "discovered origin",
+			visual: []visualEvidenceArtifact{
+				{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png", Origin: visualEvidenceOriginDiscovered, SHA256: sha256HexOfBytes(pngHeaderBytes())},
+				{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(mp4HeaderBytes())},
+			},
+			wantErr: `origin "discovered"`,
+		},
+		{
+			name: "fake broker origin",
+			visual: []visualEvidenceArtifact{
+				{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png", Origin: visualEvidenceOriginFakeBrokerCapture, SHA256: sha256HexOfBytes(pngHeaderBytes())},
+				{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(mp4HeaderBytes())},
+			},
+			wantErr: `origin "fake-broker-capture"`,
+		},
+		{
+			name: "missing origin",
+			visual: []visualEvidenceArtifact{
+				{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png", SHA256: sha256HexOfBytes(pngHeaderBytes())},
+				{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(mp4HeaderBytes())},
+			},
+			wantErr: `origin "unknown"`,
+		},
+		{
+			name: "mismatched provenance hash",
+			visual: []visualEvidenceArtifact{
+				{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes([]byte("tampered"))},
+				{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(mp4HeaderBytes())},
+			},
+			wantErr: "does not match recorded provenance hash",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			evidenceDir := writeLiveVisualEvidenceProofBundle(t,
+				runtimeMetadata{Profile: "ssh-sessiond", HostAdapter: "ssh", BrokerAdapter: "gg-mayasessiond", LiveProofEligible: true},
+				tt.visual,
+				map[string][]byte{
+					"screenshots/desktop-screenshot.png": pngHeaderBytes(),
+					"recordings/desktop-recording.mp4":   mp4HeaderBytes(),
+				},
+			)
+			_, err := publishLiveVisualEvidenceProofArtifact(evidenceDir, liveVisualEvidenceProofArtifactOptions{
+				Enabled:         true,
+				Destination:     filepath.Join(t.TempDir(), "proof"),
+				PublicHostAlias: "maya-live-proof-host",
+				MediaReviewed:   true,
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("publish proof artifact error = %v, want containing %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 

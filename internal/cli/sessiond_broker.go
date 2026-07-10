@@ -263,7 +263,7 @@ func (broker ggMayaSessiondBroker) CaptureScreenshot(context runContext, request
 	if err != nil {
 		return visualEvidenceArtifact{}, err
 	}
-	return registerVisualEvidenceBytes(context, "screenshot", forceVisualEvidenceExtension(name, ".png"), "image/png", data)
+	return registerVisualEvidenceBytes(context, "screenshot", visualEvidenceOriginBrokerCapture, forceVisualEvidenceExtension(name, ".png"), "image/png", data)
 }
 
 func (broker ggMayaSessiondBroker) CaptureRecording(context runContext, request recordingRequest) (visualEvidenceArtifact, error) {
@@ -282,7 +282,7 @@ func (broker ggMayaSessiondBroker) CaptureRecording(context runContext, request 
 	if err != nil {
 		return visualEvidenceArtifact{}, err
 	}
-	artifact, err := registerVisualEvidenceBytes(context, "recording", forceVisualEvidenceExtension(name, ".mp4"), "video/mp4", data)
+	artifact, err := registerVisualEvidenceBytes(context, "recording", visualEvidenceOriginBrokerCapture, forceVisualEvidenceExtension(name, ".mp4"), "video/mp4", data)
 	if err != nil {
 		return visualEvidenceArtifact{}, err
 	}

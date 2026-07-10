@@ -143,6 +143,9 @@ func publishLiveVisualEvidenceProofArtifact(evidenceDir string, options liveVisu
 	if err != nil {
 		return "", err
 	}
+	if err := requireBrokerCapturedVisualEvidence(evidenceDir, bundle); err != nil {
+		return "", err
+	}
 	if !options.MediaReviewed {
 		return "", fmt.Errorf("live proof artifact requires reviewed desktop media; set %s=true only for a controlled public-proof desktop", liveProofMediaReviewedEnv)
 	}
@@ -276,6 +279,32 @@ func publishLiveVisualEvidenceProofArtifact(evidenceDir string, options liveVisu
 func requireLiveRuntime(runtime runtimeMetadata) error {
 	if runtime.Profile != "ssh-sessiond" || runtime.HostAdapter != "ssh" || runtime.BrokerAdapter != "gg-mayasessiond" || !runtime.LiveProofEligible {
 		return fmt.Errorf("visual evidence proof runtime = %+v, want live-proof-eligible ssh-sessiond", runtime)
+	}
+	return nil
+}
+
+func requireBrokerCapturedVisualEvidence(evidenceDir string, bundle evidenceBundle) error {
+	if len(bundle.VisualEvidence) == 0 {
+		return fmt.Errorf("live Visual Evidence proof requires Visual Evidence artifacts")
+	}
+	for _, artifact := range bundle.VisualEvidence {
+		clean := cleanEvidenceArtifactPath(artifact.Path)
+		if clean == "" {
+			return fmt.Errorf("Visual Evidence artifact path %q must stay inside the Evidence Bundle", artifact.Path)
+		}
+		if artifact.Origin != visualEvidenceOriginBrokerCapture {
+			return fmt.Errorf("live Visual Evidence proof requires Session Broker captured artifacts: %s has origin %q", clean, visualEvidenceOriginLabel(artifact.Origin))
+		}
+		if artifact.SHA256 == "" {
+			return fmt.Errorf("live Visual Evidence proof requires a sha256 provenance hash for %s", clean)
+		}
+		hash, err := fileSHA256Hex(filepath.Join(evidenceDir, filepath.FromSlash(clean)))
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(hash, artifact.SHA256) {
+			return fmt.Errorf("Visual Evidence artifact %s sha256 %s does not match recorded provenance hash %s", clean, hash, artifact.SHA256)
+		}
 	}
 	return nil
 }

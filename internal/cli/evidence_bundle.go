@@ -27,35 +27,39 @@ type evidenceArtifact struct {
 	Kind      string `json:"kind"`
 	Path      string `json:"path"`
 	MediaType string `json:"mediaType,omitempty"`
+	Origin    string `json:"origin,omitempty"`
+	SHA256    string `json:"sha256,omitempty"`
 }
 
 func buildEvidenceBundleCatalog(bundle evidenceBundle) []evidenceArtifact {
 	var artifacts []evidenceArtifact
-	add := func(label string, kind string, path string, mediaType string) {
-		clean := cleanEvidenceArtifactPath(path)
-		if clean == "" {
+	add := func(artifact evidenceArtifact) {
+		artifact.Path = cleanEvidenceArtifactPath(artifact.Path)
+		if artifact.Path == "" {
 			return
 		}
-		if mediaType == "" {
-			mediaType = mediaTypeForPath(clean)
+		if artifact.MediaType == "" {
+			artifact.MediaType = mediaTypeForPath(artifact.Path)
 		}
-		artifacts = append(artifacts, evidenceArtifact{
-			Label:     label,
-			Kind:      kind,
-			Path:      clean,
-			MediaType: mediaType,
+		artifacts = append(artifacts, artifact)
+	}
+	add(evidenceArtifact{Label: "metadata", Kind: "metadata", Path: evidenceBundleFileName, MediaType: "application/json"})
+	add(evidenceArtifact{Label: "metadata", Kind: "metadata", Path: bundle.Manifest, MediaType: "application/json"})
+	add(evidenceArtifact{Label: "metadata", Kind: "metadata", Path: bundle.ScenarioResult, MediaType: "application/json"})
+	add(evidenceArtifact{Label: "logs", Kind: "events", Path: bundle.Events, MediaType: "application/x-ndjson"})
+	add(evidenceArtifact{Label: "logs", Kind: "log", Path: bundle.Log, MediaType: "text/plain"})
+	for _, artifact := range bundle.VisualEvidence {
+		add(evidenceArtifact{
+			Label:     "Visual Evidence",
+			Kind:      artifact.Kind,
+			Path:      artifact.Path,
+			MediaType: artifact.MediaType,
+			Origin:    artifact.Origin,
+			SHA256:    artifact.SHA256,
 		})
 	}
-	add("metadata", "metadata", evidenceBundleFileName, "application/json")
-	add("metadata", "metadata", bundle.Manifest, "application/json")
-	add("metadata", "metadata", bundle.ScenarioResult, "application/json")
-	add("logs", "events", bundle.Events, "application/x-ndjson")
-	add("logs", "log", bundle.Log, "text/plain")
-	for _, artifact := range bundle.VisualEvidence {
-		add("Visual Evidence", artifact.Kind, artifact.Path, artifact.MediaType)
-	}
 	for _, output := range bundle.Outputs {
-		add("outputs", "output", output.Path, output.MediaType)
+		add(evidenceArtifact{Label: "outputs", Kind: "output", Path: output.Path, MediaType: output.MediaType})
 	}
 	return sortEvidenceArtifactCatalog(dedupeEvidenceArtifactCatalog(artifacts))
 }

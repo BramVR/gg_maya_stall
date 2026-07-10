@@ -120,6 +120,10 @@ _Avoid_: Results when only pass/fail status is meant
 Screenshots or screen recordings captured from the Maya UI Session during a run.
 _Avoid_: Evidence Bundle when non-visual logs and files are also meant
 
+**Visual Evidence Provenance**:
+The recorded origin (Session Broker capture, fake-broker capture, or discovered file) and SHA256 content hash of each Visual Evidence artifact in an Evidence Bundle.
+_Avoid_: Attestation, signature when only origin metadata and content hashes are meant
+
 **Review Comment**:
 A published summary that links an Evidence Bundle into a code review system.
 _Avoid_: PR comment when the hosting platform might not be GitHub

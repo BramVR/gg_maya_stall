@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -183,6 +184,8 @@ type visualEvidenceArtifact struct {
 	Kind            string  `json:"kind"`
 	Path            string  `json:"path"`
 	MediaType       string  `json:"mediaType"`
+	Origin          string  `json:"origin,omitempty"`
+	SHA256          string  `json:"sha256,omitempty"`
 	DurationSeconds float64 `json:"durationSeconds,omitempty"`
 	FPS             int     `json:"fps,omitempty"`
 	TargetProfile   string  `json:"targetProfile,omitempty"`
@@ -749,6 +752,24 @@ func numericArray(value any) ([]float64, bool) {
 	return numbers, true
 }
 
+func sha256HexOfBytes(content []byte) string {
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:])
+}
+
+func fileSHA256Hex(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
 func hasRegularFile(dir string) (bool, error) {
 	errFound := errors.New("found regular file")
 	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
@@ -811,6 +832,9 @@ func writeEvidenceBundle(context runContext, manifest runManifest, scenario scen
 		return err
 	}
 	visualEvidence = mergeVisualEvidence(capturedVisualEvidence, visualEvidence)
+	if err := rejectNonBrokerVisualEvidenceForLiveProof(manifest.Runtime, visualEvidence); err != nil {
+		return err
+	}
 	bundle := evidenceBundle{
 		RunID:          manifest.RunID,
 		Scenario:       manifest.Scenario,
@@ -830,6 +854,25 @@ func writeEvidenceBundle(context runContext, manifest runManifest, scenario scen
 	}
 	bundle.Artifacts = buildEvidenceBundleCatalog(bundle)
 	return writeJSONFile(filepath.Join(context.EvidenceDir, evidenceBundleFileName), bundle)
+}
+
+func rejectNonBrokerVisualEvidenceForLiveProof(runtime runtimeMetadata, artifacts []visualEvidenceArtifact) error {
+	if !runtime.LiveProofEligible {
+		return nil
+	}
+	for _, artifact := range artifacts {
+		if artifact.Origin != visualEvidenceOriginBrokerCapture {
+			return fmt.Errorf("live-proof-eligible Evidence Bundle requires Session Broker captured Visual Evidence: %s has origin %q", artifact.Path, visualEvidenceOriginLabel(artifact.Origin))
+		}
+	}
+	return nil
+}
+
+func visualEvidenceOriginLabel(origin string) string {
+	if origin == "" {
+		return "unknown"
+	}
+	return origin
 }
 
 func mergeVisualEvidence(preferred []visualEvidenceArtifact, discovered []visualEvidenceArtifact) []visualEvidenceArtifact {
@@ -986,10 +1029,16 @@ func discoverVisualEvidence(evidenceDir string) ([]visualEvidenceArtifact, error
 			if err != nil {
 				return err
 			}
+			hash, err := fileSHA256Hex(path)
+			if err != nil {
+				return err
+			}
 			artifacts = append(artifacts, visualEvidenceArtifact{
 				Kind:      spec.kind,
 				Path:      filepath.ToSlash(relative),
 				MediaType: visualEvidenceMediaType(spec.mediaType, relative),
+				Origin:    visualEvidenceOriginDiscovered,
+				SHA256:    hash,
 			})
 			return nil
 		})
@@ -1016,10 +1065,13 @@ func repoRelativePath(repoDir string, path string) string {
 }
 
 func appendEvent(path string, event string, detail string) error {
-	record := map[string]string{
+	return appendEventRecord(path, map[string]string{
 		"event":  event,
 		"detail": detail,
-	}
+	})
+}
+
+func appendEventRecord(path string, record map[string]string) error {
 	content, err := json.Marshal(record)
 	if err != nil {
 		return err
@@ -1211,7 +1263,7 @@ func (fakeSessionBroker) CaptureScreenshot(context runContext, request screensho
 	if name == "" {
 		name = evidenceDefaultScreenshotName
 	}
-	return registerVisualEvidenceBytes(context, "screenshot", name, "image/png", []byte("fake screenshot\n"))
+	return registerVisualEvidenceBytes(context, "screenshot", visualEvidenceOriginFakeBrokerCapture, name, "image/png", []byte("fake screenshot\n"))
 }
 
 func (fakeSessionBroker) CaptureRecording(context runContext, request recordingRequest) (visualEvidenceArtifact, error) {
@@ -1220,7 +1272,7 @@ func (fakeSessionBroker) CaptureRecording(context runContext, request recordingR
 		name = evidenceDefaultRecordingName
 	}
 	content := []byte{0, 0, 0, 24, 'f', 't', 'y', 'p', 'm', 'p', '4', '2', 'f', 'a', 'k', 'e', '\n'}
-	return registerVisualEvidenceBytes(context, "recording", name, "video/mp4", content)
+	return registerVisualEvidenceBytes(context, "recording", visualEvidenceOriginFakeBrokerCapture, name, "video/mp4", content)
 }
 
 func (fakeSessionBroker) ClickDesktop(desktopClickRequest) error {

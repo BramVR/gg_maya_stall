@@ -1915,6 +1915,22 @@ func TestTrustedPluginAllowlistRequiredPathsIncludeNestedPluginParents(t *testin
 	}
 }
 
+func TestTrustedPluginAllowlistRequiredPathsRejectTransportControlCharacters(t *testing.T) {
+	for index, nestedDir := range []string{"scripts\nbad", "bad\n", "\nbad"} {
+		t.Run(fmt.Sprintf("case-%d", index), func(t *testing.T) {
+			dir := t.TempDir()
+			mustWriteFile(t, filepath.Join(dir, "package", nestedDir, "plugin.py"), "# Python payload\n")
+			host := mayaHostConfig{TrustedPluginArtifactsRoot: "C:/maya-stall/trusted-plugin-artifacts"}
+			payload := []manifestPayload{{Kind: "pluginArtifacts", Source: "package"}}
+
+			_, err := trustedPluginAllowlistRequiredPaths(dir, host, payload)
+			if err == nil || !strings.Contains(err.Error(), "control characters") {
+				t.Fatalf("required allowlist paths error = %v, want transport control-character rejection", err)
+			}
+		})
+	}
+}
+
 func TestRunTrustedPluginAllowlistChecksAllHostMayaVersionsWhenScenarioUnpinned(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "build", "demo.mll"), "fake plugin artifact\n")
@@ -1962,6 +1978,8 @@ func TestTrustedPluginPrefsRepairScriptDocumentsMutationSafety(t *testing.T) {
 		"[System.IO.Path]::GetFullPath",
 		"Copy-Item -LiteralPath $prefs",
 		"[regex]::Matches($content",
+		"System.Collections.Generic.HashSet[string]",
+		"$normalizedPaths.Add($wanted)",
 		"$paths.Add($requiredPath)",
 		"Add-Content -LiteralPath $prefs",
 		"SafeModeAllowedlistPaths",
@@ -1975,6 +1993,14 @@ func TestTrustedPluginPrefsRepairScriptDocumentsMutationSafety(t *testing.T) {
 	}
 	if strings.Contains(script, "C:/maya-stall/trusted-plugin-artifacts") {
 		t.Fatalf("repair script must receive required paths over stdin, not the command line:\n%s", script)
+	}
+	requiredLoop := strings.Index(script, "foreach ($requiredPath in $requiredPaths)")
+	if requiredLoop < 0 {
+		t.Fatalf("repair script missing required-path loop:\n%s", script)
+	}
+	writeBlock := strings.Index(script[requiredLoop:], "if ($changed)")
+	if writeBlock < 0 || strings.Contains(script[requiredLoop:requiredLoop+writeBlock], "foreach ($entry in $paths)") {
+		t.Fatalf("repair script must not rescan every path for each requirement:\n%s", script)
 	}
 }
 

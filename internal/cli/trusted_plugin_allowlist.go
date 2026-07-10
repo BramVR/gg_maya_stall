@@ -299,6 +299,11 @@ func trustedPluginAllowlistRequiredPaths(repoDir string, host mayaHostConfig, pa
 			return nil, fmt.Errorf("inspect Plugin Artifact %s: %w", item.Source, err)
 		}
 	}
+	for _, destination := range required {
+		if err := rejectSFTPBatchUnsafePath(destination); err != nil {
+			return nil, fmt.Errorf("inspect trusted Plugin Artifact destination %q: %w", destination, err)
+		}
+	}
 	return compactTrustedPluginAllowlistPaths(required), nil
 }
 
@@ -424,17 +429,14 @@ foreach ($match in [regex]::Matches($content, '-(sva|sa)\s+"SafeModeAllowedlistP
     }
   }
 }
+$normalizedPaths = New-Object System.Collections.Generic.HashSet[string]
+foreach ($entry in $paths) {
+  [void]$normalizedPaths.Add((Normalize-MayaStallPath $entry))
+}
 $changed = $false
 foreach ($requiredPath in $requiredPaths) {
   $wanted = Normalize-MayaStallPath $requiredPath
-  $found = $false
-  foreach ($entry in $paths) {
-    if ((Normalize-MayaStallPath $entry) -eq $wanted) {
-      $found = $true
-      break
-    }
-  }
-  if (-not $found) {
+  if ($normalizedPaths.Add($wanted)) {
     $paths.Add($requiredPath)
     $changed = $true
   }

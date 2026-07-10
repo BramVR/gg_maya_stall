@@ -425,6 +425,9 @@ func assertLiveFreshRunSessionStopped(t *testing.T, host mayaHostConfig, session
 	if err != nil {
 		t.Fatalf("query gg_mayasessiond after stopped Fresh Run %q: %v", session.SessionID, err)
 	}
+	if status.State.SessionID != session.SessionID {
+		t.Fatalf("stopped Fresh Run evidence session %q does not match gg_mayasessiond status session %q", session.SessionID, status.State.SessionID)
+	}
 	if sessiondSessionLooksActive(status) {
 		t.Fatalf("stopped Fresh Run %q left gg_mayasessiond active with session %q and status %q", session.SessionID, status.State.SessionID, status.DerivedStatus)
 	}

@@ -545,6 +545,30 @@ func TestGGMayaSessiondFreshRunFailsClosedWhenInheritedSessionStopFails(t *testi
 	}
 }
 
+func TestGGMayaSessiondStopSessionFailsClosedWithoutCurrentIdentity(t *testing.T) {
+	dir := t.TempDir()
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		`{"has_state":true,"derived_status":"running","state":{"status":"running","maya_alive":true,"mcp_alive":true,"call_server_ready":true}}`,
+	})
+	eventsPath := filepath.Join(dir, "events.jsonl")
+	broker := ggMayaSessiondBroker{host: mayaHostConfig{
+		Transport: "ssh",
+		SSH:       sshConfig{Host: "maya-win-01", Binary: sshPath},
+		WorkRoot:  "C:/maya-stall",
+		Broker: brokerConfig{
+			Type:     "gg-mayasessiond",
+			StateDir: "C:/maya-stall/sessiond-ui",
+			Python:   "C:/maya-stall/sessiond-venv311/Scripts/python.exe",
+			Repo:     "C:/maya-stall/tools/GG_MayaSessiond",
+		},
+	}}
+
+	err := broker.StopSession(runContext{EventsPath: eventsPath}, brokerSessionIdentity{BrokerAdapter: "gg-mayasessiond", SessionID: "session-owned"})
+	if err == nil || !strings.Contains(err.Error(), "did not report a session id") {
+		t.Fatalf("StopSession error = %v, want missing current session identity", err)
+	}
+}
+
 func readRunManifestFile(t *testing.T, path string) runManifest {
 	t.Helper()
 	content, err := os.ReadFile(path)

@@ -129,10 +129,16 @@ func (broker ggMayaSessiondBroker) StopSession(context runContext, session broke
 	if err != nil {
 		return err
 	}
+	if session.SessionID == "" {
+		return fmt.Errorf("refusing to stop gg_mayasessiond without this Fresh Run's session id")
+	}
+	if status.State.SessionID == "" {
+		return fmt.Errorf("gg_mayasessiond did not report a session id; refusing to stop a session this run cannot prove it owns")
+	}
+	if status.State.SessionID != session.SessionID {
+		return fmt.Errorf("gg_mayasessiond session id changed from %s to %s since this Fresh Run started; refusing to stop a session this run does not own", session.SessionID, status.State.SessionID)
+	}
 	if sessiondSessionLooksActive(status) {
-		if session.SessionID != "" && status.State.SessionID != "" && status.State.SessionID != session.SessionID {
-			return fmt.Errorf("gg_mayasessiond session id changed from %s to %s since this Fresh Run started; refusing to stop a session this run does not own", session.SessionID, status.State.SessionID)
-		}
 		if err := broker.stopSessiondSession(); err != nil {
 			return err
 		}

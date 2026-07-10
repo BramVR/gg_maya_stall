@@ -637,6 +637,23 @@ func TestGGMayaSessiondFreshSessionReadinessRequiresRunningStatus(t *testing.T) 
 	}
 }
 
+func TestKnownSessiondScriptExecuteResponseErrors(t *testing.T) {
+	for _, message := range []string{
+		"Error calling tool 'script.execute': 'int' object has no attribute 'get'",
+		"Error calling tool 'script.execute': Expecting value: line 1 column 1 (char 0)",
+	} {
+		if !isKnownSessiondScriptExecuteResponseError(fmt.Errorf("%s", message)) {
+			t.Fatalf("known stale broker error was not recoverable: %s", message)
+		}
+	}
+	if isKnownSessiondScriptExecuteResponseError(fmt.Errorf("script.execute path is not allowed")) {
+		t.Fatal("unrelated script.execute failure was classified as recoverable")
+	}
+	if isKnownSessiondScriptExecuteResponseError(fmt.Errorf("Expecting value: line 1 column 1 (char 5)")) {
+		t.Fatal("non-empty malformed response was classified as recoverable")
+	}
+}
+
 func readRunManifestFile(t *testing.T, path string) runManifest {
 	t.Helper()
 	content, err := os.ReadFile(path)

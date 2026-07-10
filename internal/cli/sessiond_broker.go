@@ -576,7 +576,7 @@ func (broker ggMayaSessiondBroker) sessionBrokerHealth() sessiondHealthResult {
 			reason = sessiondReasonCommandPortDown
 			hint = "Restart the interactive gg_mayasessiond broker so Maya commandPort localhost:7001 is reacquired. See docs/setup/windows-maya-host.md#session-broker."
 		}
-		if isKnownSessiondScriptExecuteTypeError(err) {
+		if isKnownSessiondScriptExecuteResponseError(err) {
 			reason = "script-execute-invalid-response"
 			hint = "Restart the interactive gg_mayasessiond broker so script.execute returns a valid tool result. See docs/setup/windows-maya-host.md#session-broker."
 		}
@@ -601,11 +601,12 @@ func isCommandPortError(err error) bool {
 	return strings.Contains(message, "commandport") || strings.Contains(message, "localhost:7001")
 }
 
-// Older live broker sessions can retain a handler that returns an integer
-// instead of the expected tool-result object; restarting the session repairs it.
-func isKnownSessiondScriptExecuteTypeError(err error) bool {
+// Older live broker sessions can retain a handler that returns a malformed
+// tool result instead of the expected object; restarting the session repairs it.
+func isKnownSessiondScriptExecuteResponseError(err error) bool {
 	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "'int' object has no attribute 'get'")
+	return strings.Contains(message, "'int' object has no attribute 'get'") ||
+		strings.Contains(message, "expecting value: line 1 column 1 (char 0)")
 }
 
 func (broker ggMayaSessiondBroker) recoverSessionBroker(reason string) error {

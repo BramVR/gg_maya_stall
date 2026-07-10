@@ -1,11 +1,11 @@
 # Maya Stall
 
-Maya Stall is the shared language for real Autodesk Maya desktop UI end-to-end testing from external repositories. It exists to keep Maya UI test orchestration separate from any one plugin repo.
+Maya Stall is the shared release-qualification system and language for real Autodesk Maya desktop UI end-to-end testing from external repositories. It exists to keep Maya UI test orchestration separate from any one plug-in repo.
 
 ## Language
 
 **Maya Stall**:
-A reusable test harness for running real Maya UI end-to-end checks on a target Windows machine.
+A release-qualification system for running and proving real Maya UI end-to-end checks across owned Windows Maya Hosts.
 _Avoid_: Plugin test code, batch test runner, gg_klv_push test harness
 
 **maya-stall**:
@@ -24,6 +24,10 @@ _Avoid_: Host, machine, profile when only one part of the target is meant
 A set of Maya Hosts that a Target Profile may choose from for a run.
 _Avoid_: Target profile when referring to the individual selectable machines
 
+**Control Plane**:
+The shared Maya Stall service that records submitted runs, schedules them across Host Pools, owns shared Host Locks, and keeps run history.
+_Avoid_: Session Broker, Maya Host
+
 **Repo Run Config**:
 Non-secret configuration supplied by a consuming repo for Maya Stall runs.
 _Avoid_: Secrets config, user config
@@ -36,8 +40,12 @@ _Avoid_: Test when referring to the configured end-to-end flow
 Secrets and identity material needed to reach or use a Maya Host.
 _Avoid_: Target profile, repo config
 
+**Windows Host Agent**:
+The Maya Stall-owned service on a Maya Host that enforces the Host Lock, prepares run workspaces, monitors work, transfers evidence, and coordinates cleanup with the Session Broker.
+_Avoid_: Session Broker when referring to Maya UI Session ownership
+
 **Maya Host**:
-A local or network Windows machine that has Autodesk Maya installed and can run an interactive Maya UI session for Maya Stall.
+A local, network, or virtual Windows machine with one isolated interactive desktop, Autodesk Maya, and the services needed to provide one Maya Stall execution slot.
 _Avoid_: Cloud runner, headless worker
 
 **Maya Version Requirement**:
@@ -45,8 +53,8 @@ The Autodesk Maya version a Scenario needs in order to run correctly.
 _Avoid_: Host capability when referring specifically to Maya version compatibility
 
 **Host Lock**:
-A claim that prevents more than one active Fresh Run from using the same Maya Host at the same time.
-_Avoid_: Session lock when the machine-level run claim is meant
+A shared claim with a unique lock token that prevents more than one active or kept Maya UI run from using the same Maya Host at the same time.
+_Avoid_: Repo-local lock, session lock when the machine-level run claim is meant
 
 **Host Health**:
 The readiness of a Maya Host to accept a run, checked in layers such as SSH, workspace access, Session Broker, Maya UI, Visual Evidence, and Scenario inputs.
@@ -59,6 +67,10 @@ _Avoid_: Batch session, headless session
 **Fresh Run**:
 A Maya Stall run that starts from a clean Maya UI Session.
 _Avoid_: Reused session, warm session
+
+**Run ID**:
+The stable identity created for a submitted Scenario before config validation, host selection, or remote preflight.
+_Avoid_: Maya process ID, workspace path
 
 **Debug Attach**:
 A Maya Stall run that intentionally reuses an existing Maya UI Session for investigation.

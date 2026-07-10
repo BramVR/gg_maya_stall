@@ -940,7 +940,6 @@ type recordingRunHost struct {
 }
 
 type stageFailingRunHost struct {
-	fakeHost
 	message string
 }
 

@@ -221,20 +221,6 @@ func (broker ggMayaSessiondBroker) RunScenario(context runContext, scenario scen
 	return ScenarioResult{Status: resultStatusPassed, Summary: "gg_mayasessiond Scenario completed"}, nil
 }
 
-func (broker ggMayaSessiondBroker) PrepareForRun() error {
-	health, err := broker.ensureRunPreflight()
-	if err != nil {
-		return fmt.Errorf("session-broker preflight failed: %w", err)
-	}
-	if health.OK {
-		return nil
-	}
-	if health.Reason != "" {
-		return fmt.Errorf("session-broker preflight failed (%s): %s", health.Reason, health.Detail)
-	}
-	return fmt.Errorf("session-broker preflight failed: %s", health.Detail)
-}
-
 func (broker ggMayaSessiondBroker) CaptureScreenshot(context runContext, request screenshotRequest) (visualEvidenceArtifact, error) {
 	if err := broker.validate(); err != nil {
 		return visualEvidenceArtifact{}, err
@@ -506,53 +492,6 @@ func (broker ggMayaSessiondBroker) ensureReady() (sessiondHealthResult, error) {
 	}
 	health.Detail = fmt.Sprintf("%s; automatic recovery did not restore gg_mayasessiond commandPort health", health.Detail)
 	return health, nil
-}
-
-func (broker ggMayaSessiondBroker) ensureRunPreflight() (sessiondHealthResult, error) {
-	health := broker.runPreflightHealth()
-	if health.OK || !health.Recoverable {
-		return health, nil
-	}
-	if err := broker.recoverSessionBroker(health.Reason); err != nil {
-		health.Detail = fmt.Sprintf("%s; automatic recovery failed: %v", health.Detail, err)
-		return health, nil
-	}
-	deadline := time.Now().Add(sessiondRecoveryTimeout)
-	var last sessiondHealthResult
-	for time.Now().Before(deadline) {
-		last = broker.runPreflightHealth()
-		if last.OK {
-			last.Recovered = true
-			return last, nil
-		}
-		time.Sleep(time.Second)
-	}
-	if last.Detail != "" {
-		health = last
-	}
-	health.Detail = fmt.Sprintf("%s; automatic recovery did not restore gg_mayasessiond commandPort health", health.Detail)
-	return health, nil
-}
-
-func (broker ggMayaSessiondBroker) runPreflightHealth() sessiondHealthResult {
-	if err := broker.validate(); err != nil {
-		return unrecoverableSessiondHealth("broker-config-invalid", err.Error(), "Configure gg_mayasessiond paths in host config. See docs/setup/windows-maya-host.md#session-broker.")
-	}
-	status, err := broker.status()
-	if err != nil {
-		return unrecoverableSessiondHealth("sessiond-status-unavailable", err.Error(), "Start or repair gg_mayasessiond on this Maya Host. See docs/setup/windows-maya-host.md#session-broker.")
-	}
-	effectiveStatus := status.DerivedStatus
-	if effectiveStatus == "" {
-		effectiveStatus = status.State.Status
-	}
-	if effectiveStatus != "running" {
-		return unrecoverableSessiondHealth("sessiond-not-running", "gg_mayasessiond is not running", "Start the interactive gg_mayasessiond broker. See docs/setup/windows-maya-host.md#session-broker.")
-	}
-	if !status.State.CallServerReady {
-		return recoverableSessiondHealth("command-port-not-ready", "gg_mayasessiond commandPort call server is not ready", "Restart the interactive gg_mayasessiond broker so Maya commandPort localhost:7001 is reacquired. See docs/setup/windows-maya-host.md#session-broker.")
-	}
-	return sessiondHealthResult{OK: true, Detail: "gg_mayasessiond commandPort ready"}
 }
 
 func (broker ggMayaSessiondBroker) sessionBrokerHealth() sessiondHealthResult {

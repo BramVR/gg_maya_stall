@@ -65,10 +65,6 @@ type brokerSessionIdentity struct {
 	SessionID     string `json:"sessionId,omitempty"`
 }
 
-type sessionBrokerPreflighter interface {
-	PrepareForRun() error
-}
-
 type runRetentionBroker interface {
 	RetentionCapabilities() brokerCapabilities
 	RetainRun(runContext, runManifest, string) (retainedSessionRecord, error)

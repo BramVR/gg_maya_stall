@@ -132,11 +132,6 @@ func (run *freshRunLifecycle) setup() error {
 	if err := rejectUnsupportedEvidenceConfig(run.runtime.Broker, scenario.Config); err != nil {
 		return err
 	}
-	if preflighter, ok := run.runtime.Broker.(sessionBrokerPreflighter); ok {
-		if err := preflighter.PrepareForRun(); err != nil {
-			return err
-		}
-	}
 	if err := ensureTrustedPluginArtifactsAllowlistedForRun(host.Config, scenario); err != nil {
 		return err
 	}
@@ -165,9 +160,6 @@ func (run *freshRunLifecycle) setup() error {
 	if err := createCleanRunDirs(run.context); err != nil {
 		return err
 	}
-	if err := run.runtime.Host.StagePayload(run.context, scenario.Payload); err != nil {
-		return err
-	}
 
 	run.manifest = runManifest{
 		RunID:         runID,
@@ -187,13 +179,22 @@ func (run *freshRunLifecycle) setup() error {
 	if err := markHostLockActive(run.repoDir, run.host.HostID, run.manifest.RunID); err != nil {
 		return err
 	}
-	return appendEvent(run.context.EventsPath, "run.started", scenario.Name)
+	if err := appendEvent(run.context.EventsPath, "run.started", scenario.Name); err != nil {
+		return err
+	}
+	if err := run.startFreshSession(); err != nil {
+		return err
+	}
+	return run.runtime.Host.StagePayload(run.context, scenario.Payload)
 }
 
-func (run *freshRunLifecycle) execute() error {
+func (run *freshRunLifecycle) startFreshSession() error {
 	session, err := run.runtime.Broker.StartFreshSession(run.context, run.scenario.Config)
 	if err != nil {
-		if evidenceErr := run.collectBrokerFailureArtifacts(err); evidenceErr != nil {
+		if evidenceErr := ensureFailureLog(run.context, err); evidenceErr != nil {
+			return errors.Join(err, evidenceErr)
+		}
+		if evidenceErr := appendEvent(run.context.EventsPath, "run.failed-before-result-collection", err.Error()); evidenceErr != nil {
 			return errors.Join(err, evidenceErr)
 		}
 		if evidenceErr := run.writeBrokerFailureEvidence(err); evidenceErr != nil {
@@ -207,6 +208,10 @@ func (run *freshRunLifecycle) execute() error {
 	if err := writeJSONFile(filepath.Join(run.context.StateDir, "manifest.json"), run.manifest); err != nil {
 		return err
 	}
+	return nil
+}
+
+func (run *freshRunLifecycle) execute() error {
 	result, err := run.runtime.Broker.RunScenario(run.context, run.scenario.Config)
 	if err != nil {
 		if evidenceErr := run.collectBrokerFailureArtifacts(err); evidenceErr != nil {

@@ -26,9 +26,9 @@ settle flow:
    provided.
 4. Resolve the Host/Broker runtime contract.
 5. Acquire a Host Lock.
-6. Stage only declared Run Payload paths.
-7. Provide `MAYA_STALL_SCENARIO_RESULT` to the Scenario.
-8. Ask the Session Broker to stop any inherited Maya UI Session and start a new identified Maya UI Session.
+6. Ask the Session Broker to stop any inherited Maya UI Session and start a new identified Maya UI Session.
+7. Stage only declared Run Payload paths.
+8. Provide `MAYA_STALL_SCENARIO_RESULT` to the Scenario.
 9. Run through the resolved fake-local or ssh-sessiond runtime.
 10. Collect outputs, logs, runtime metadata, broker session identity, Scenario Result, and Visual Evidence into an
    Evidence Bundle.

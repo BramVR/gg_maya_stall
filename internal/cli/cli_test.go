@@ -3503,13 +3503,13 @@ func TestRunScenarioRealSSHUploadsPluginArtifactsToTrustedRoot(t *testing.T) {
 	sftpLog := filepath.Join(dir, "sftp.log")
 	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
-		sessiondStatusFixture("session-alpha"),
 		trustedPluginPrefsProbeOutput(`// Security
 optionVar -cat "Security"
  -sa "SafeModeAllowedlistPaths"
  -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts";
 `),
 		`{"ok":true,"tool":"trusted-plugin-cleanup"}`,
+		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
 		sessiondStatusFixture("session-alpha"),
 	})
@@ -4130,8 +4130,8 @@ hostPools:
 	if err != nil {
 		t.Fatalf("read ssh log: %v", err)
 	}
-	if got := strings.Count(string(sshBytes), "CALL "); got != 5 {
-		t.Fatalf("missing-session-id stop made %d SSH calls, want status plus cleanup but no broker stop:\n%s", got, string(sshBytes))
+	if got := strings.Count(string(sshBytes), "CALL "); got != 6 {
+		t.Fatalf("missing-session-id stop made %d SSH calls, want Fresh Run lifecycle plus status and cleanup but no retained broker stop:\n%s", got, string(sshBytes))
 	}
 }
 
@@ -4693,7 +4693,7 @@ func TestRunScenarioRealSSHPreflightFailsBeforeStagingWhenCommandPortRecoveryUna
 	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		`{"derived_status":"running","state":{"status":"running","call_server_ready":false,"maya_alive":true,"mcp_alive":true}}`,
-		`@fail:Cannot find scheduled task MayaStallSessiondUI`,
+		`@fresh-fail:Cannot find scheduled task MayaStallSessiondUI`,
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
 	mustWriteFile(t, hostConfigPath, `version: 1
@@ -4723,8 +4723,8 @@ hostPools:
 		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
 	for _, want := range []string{
-		"session-broker preflight failed (command-port-not-ready)",
-		"automatic recovery failed",
+		"restart gg_mayasessiond for a fresh Maya UI Session",
+		"restart scheduled task",
 		"MayaStallSessiondUI",
 	} {
 		if !strings.Contains(stderr.String(), want) {
@@ -4741,7 +4741,6 @@ func TestRunScenarioRealSSHFailsBeforeStagingWhenTrustedPluginAllowlistMissing(t
 	sftpLog := filepath.Join(dir, "sftp.log")
 	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
-		sessiondStatusFixture("session-alpha"),
 		trustedPluginPrefsProbeOutput(`// Security
 optionVar -cat "Security"
  -sa "SafeModeAllowedlistPaths"
@@ -5325,6 +5324,8 @@ func TestRunScenarioRealSSHRequiresDownloadedScenarioResult(t *testing.T) {
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
+		sessiondStatusFixture("session-fresh"),
+		`{"ok":true,"status":"stopped"}`,
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
 	mustWriteFile(t, hostConfigPath, `version: 1
@@ -5391,6 +5392,8 @@ func TestRunScenarioRealSSHAcceptsCollectedCompletionAfterBrokerDisconnect(t *te
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		sessiondStatusFixture("session-alpha"),
 		`{"ok":false,"tool":"script.execute","error":"Cannot connect to Maya commandPort at localhost:7001"}`,
+		sessiondStatusFixture("session-fresh"),
+		`{"ok":true,"status":"stopped"}`,
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
 	mustWriteFile(t, hostConfigPath, `version: 1
@@ -5603,6 +5606,8 @@ func TestRunScenarioRealSSHDownloadsValidatorOnlyOutputs(t *testing.T) {
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		sessiondStatusFixture("session-alpha"),
 		`{"ok":true,"tool":"script.execute"}`,
+		sessiondStatusFixture("session-fresh"),
+		`{"ok":true,"status":"stopped"}`,
 	})
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
 	mustWriteFile(t, hostConfigPath, `version: 1
@@ -7396,9 +7401,16 @@ func writeSequencedFakeSSHCommand(t *testing.T, dir string, logPath string, outp
 	t.Helper()
 	path := filepath.Join(dir, "fake-ssh-sequenced")
 	countPath := filepath.Join(dir, "fake-ssh-sequenced.count")
+	lifecyclePath := filepath.Join(dir, "fake-ssh-sequenced.lifecycle")
+	decodedCommandPath := filepath.Join(dir, "fake-ssh-sequenced.command")
 	var cases strings.Builder
+	freshRunFailure := ""
 	for index, output := range outputs {
 		if output == "" {
+			continue
+		}
+		if message, ok := strings.CutPrefix(output, "@fresh-fail:"); ok {
+			freshRunFailure = message
 			continue
 		}
 		if path, ok := strings.CutPrefix(output, "@file:"); ok {
@@ -7412,6 +7424,40 @@ func writeSequencedFakeSSHCommand(t *testing.T, dir string, logPath string, outp
 		fmt.Fprintf(&cases, "%d) cat <<'JSON'\n%s\nJSON\n;;\n", index+1, output)
 	}
 	content := fmt.Sprintf(`#!/bin/sh
+encoded=""
+for argument in "$@"; do
+  encoded="$argument"
+done
+if ! printf '%%s' "$encoded" | base64 --decode > %[5]s 2>/dev/null; then
+  printf '%%s' "$encoded" | base64 -D > %[5]s 2>/dev/null || true
+fi
+decoded=$(iconv -f UTF-16LE -t UTF-8 %[5]s 2>/dev/null || true)
+if printf '%%s' "$decoded" | grep -q "fresh-run"; then
+  fresh_failure=%[6]s
+  if [ -n "$fresh_failure" ]; then
+    printf '%%s\n' "$fresh_failure" >&2
+    exit 1
+  fi
+  printf '1\n' > %[4]s
+  printf '%%s\n' '{"ok":true,"task":"MayaStallSessiondUI","reason":"fresh-run"}'
+  exit 0
+fi
+if [ -f %[4]s ] && printf '%%s' "$decoded" | grep -q "'status'"; then
+  remaining=$(cat %[4]s)
+  remaining=$((remaining - 1))
+  if [ "$remaining" -gt 0 ]; then
+    printf '%%s\n' "$remaining" > %[4]s
+  else
+    rm -f %[4]s
+  fi
+  printf '%%s\n' '{"state_dir":"C:/maya-stall/sessiond-ui","has_state":true,"derived_status":"running","state":{"status":"running","session_id":"session-fresh","call_server_ready":true}}'
+  exit 0
+fi
+if [ -f %[4]s ] && printf '%%s' "$decoded" | grep -q "'stop'"; then
+  rm -f %[4]s
+  printf '%%s\n' '{"ok":true}'
+  exit 0
+fi
 count=0
 if [ -f %[1]s ]; then
   count=$(cat %[1]s)
@@ -7423,7 +7469,7 @@ case "$count" in
 %[3]s
 esac
 exit 0
-`, shellQuote(countPath), shellQuote(logPath), cases.String())
+`, shellQuote(countPath), shellQuote(logPath), cases.String(), shellQuote(lifecyclePath), shellQuote(decodedCommandPath), shellQuote(freshRunFailure))
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("write sequenced fake ssh command: %v", err)
 	}
@@ -7434,6 +7480,8 @@ func writeMissingTrustedPluginDestinationFakeSSHCommand(t *testing.T, dir string
 	t.Helper()
 	path := filepath.Join(dir, "fake-ssh-missing-trusted-plugin")
 	countPath := filepath.Join(dir, "fake-ssh-missing-trusted-plugin.count")
+	lifecyclePath := filepath.Join(dir, "fake-ssh-missing-trusted-plugin.lifecycle")
+	decodedCommandPath := filepath.Join(dir, "fake-ssh-missing-trusted-plugin.command")
 	expectedScript := "$ErrorActionPreference = 'Stop'\n" +
 		"foreach ($path in @(" + powerShellSingleQuoted(missingDestination) + ")) {\n" +
 		"  if (Test-Path -LiteralPath $path) {\n" +
@@ -7443,6 +7491,35 @@ func writeMissingTrustedPluginDestinationFakeSSHCommand(t *testing.T, dir string
 		"exit 0\n"
 	expectedCommand := strings.Join(encodedPowerShellCommand(expectedScript), " ")
 	content := fmt.Sprintf(`#!/bin/sh
+encoded=""
+for argument in "$@"; do
+  encoded="$argument"
+done
+if ! printf '%%s' "$encoded" | base64 --decode > %[7]s 2>/dev/null; then
+  printf '%%s' "$encoded" | base64 -D > %[7]s 2>/dev/null || true
+fi
+decoded=$(iconv -f UTF-16LE -t UTF-8 %[7]s 2>/dev/null || true)
+if printf '%%s' "$decoded" | grep -q "fresh-run"; then
+  printf '1\n' > %[6]s
+  printf '%%s\n' '{"ok":true,"task":"MayaStallSessiondUI","reason":"fresh-run"}'
+  exit 0
+fi
+if [ -f %[6]s ] && printf '%%s' "$decoded" | grep -q "'status'"; then
+  remaining=$(cat %[6]s)
+  remaining=$((remaining - 1))
+  if [ "$remaining" -gt 0 ]; then
+    printf '%%s\n' "$remaining" > %[6]s
+  else
+    rm -f %[6]s
+  fi
+  printf '%%s\n' '{"state_dir":"C:/maya-stall/sessiond-ui","has_state":true,"derived_status":"running","state":{"status":"running","session_id":"session-fresh","call_server_ready":true}}'
+  exit 0
+fi
+if [ -f %[6]s ] && printf '%%s' "$decoded" | grep -q "'stop'"; then
+  rm -f %[6]s
+  printf '%%s\n' '{"ok":true}'
+  exit 0
+fi
 count=0
 if [ -f %[1]s ]; then
   count=$(cat %[1]s)
@@ -7453,12 +7530,12 @@ printf 'CALL %%s %%s\n' "$count" "$*" >> %[2]s
 case "$count" in
 1)
 	cat <<'JSON'
-%[4]s
+%[5]s
 JSON
 	;;
 2)
 	cat <<'JSON'
-%[5]s
+%[4]s
 JSON
 	;;
 3)
@@ -7489,7 +7566,7 @@ exit 0
 optionVar -cat "Security"
  -sa "SafeModeAllowedlistPaths"
  -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts";
-`))
+`), shellQuote(lifecyclePath), shellQuote(decodedCommandPath))
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("write missing trusted Plugin Artifact destination fake ssh command: %v", err)
 	}
@@ -7500,6 +7577,8 @@ func writeFailingTrustedPluginDestinationRemovalFakeSSHCommand(t *testing.T, dir
 	t.Helper()
 	path := filepath.Join(dir, "fake-ssh-failing-trusted-plugin-removal")
 	countPath := filepath.Join(dir, "fake-ssh-failing-trusted-plugin-removal.count")
+	lifecyclePath := filepath.Join(dir, "fake-ssh-failing-trusted-plugin-removal.lifecycle")
+	decodedCommandPath := filepath.Join(dir, "fake-ssh-failing-trusted-plugin-removal.command")
 	expectedScript := "$ErrorActionPreference = 'Stop'\n" +
 		"foreach ($path in @(" + powerShellSingleQuoted(destination) + ")) {\n" +
 		"  if (Test-Path -LiteralPath $path) {\n" +
@@ -7509,6 +7588,24 @@ func writeFailingTrustedPluginDestinationRemovalFakeSSHCommand(t *testing.T, dir
 		"exit 0\n"
 	expectedCommand := strings.Join(encodedPowerShellCommand(expectedScript), " ")
 	content := fmt.Sprintf(`#!/bin/sh
+encoded=""
+for argument in "$@"; do
+  encoded="$argument"
+done
+if ! printf '%%s' "$encoded" | base64 --decode > %[7]s 2>/dev/null; then
+  printf '%%s' "$encoded" | base64 -D > %[7]s 2>/dev/null || true
+fi
+decoded=$(iconv -f UTF-16LE -t UTF-8 %[7]s 2>/dev/null || true)
+if printf '%%s' "$decoded" | grep -q "fresh-run"; then
+  printf '1\n' > %[6]s
+  printf '%%s\n' '{"ok":true,"task":"MayaStallSessiondUI","reason":"fresh-run"}'
+  exit 0
+fi
+if [ -f %[6]s ] && printf '%%s' "$decoded" | grep -q "'status'"; then
+  rm -f %[6]s
+  printf '%%s\n' '{"state_dir":"C:/maya-stall/sessiond-ui","has_state":true,"derived_status":"running","state":{"status":"running","session_id":"session-fresh","call_server_ready":true}}'
+  exit 0
+fi
 count=0
 if [ -f %[1]s ]; then
   count=$(cat %[1]s)
@@ -7519,12 +7616,12 @@ printf 'CALL %%s %%s\n' "$count" "$*" >> %[2]s
 case "$count" in
 1)
 	cat <<'JSON'
-%[4]s
+%[5]s
 JSON
 	;;
 2)
 	cat <<'JSON'
-%[5]s
+%[4]s
 JSON
 	;;
 3)
@@ -7549,7 +7646,7 @@ esac
 optionVar -cat "Security"
  -sa "SafeModeAllowedlistPaths"
  -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts";
-`))
+`), shellQuote(lifecyclePath), shellQuote(decodedCommandPath))
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("write failing trusted Plugin Artifact removal fake ssh command: %v", err)
 	}

@@ -30,8 +30,8 @@ func TestFreshRunLifecycleOrdersSetupExecuteAndSettle(t *testing.T) {
 	}
 
 	recorder.requireOrder(t,
-		"setup.stage-payload",
 		"execute.start-session",
+		"setup.stage-payload",
 		"execute.run-scenario",
 		"settle.collect-artifacts",
 		"settle.stop-session",

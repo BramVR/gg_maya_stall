@@ -9,7 +9,8 @@ const policyPath = path.resolve(root, args.policy ?? defaultPolicyPath);
 const outputPath = path.resolve(root, args.output ?? path.join("artifacts", "proof", "proof-manifest.json"));
 const policies = [readJSON(policyPath)];
 if (args.additional_policy) policies.push(readJSON(path.resolve(root, args.additional_policy)));
-const changedFiles = uniqueChangedFiles(readChangedFiles(args));
+const rawChangedFiles = readChangedFiles(args);
+const changedFiles = args.changed_files_json ? uniqueStructuredPaths(rawChangedFiles) : uniqueChangedFiles(rawChangedFiles);
 const liveReasons = uniqueLiveReasons(policies.flatMap((policy) => selectLiveReasons(policy, changedFiles)));
 const liveRequired = liveReasons.length > 0;
 
@@ -133,6 +134,19 @@ function uniqueChangedFiles(lines) {
         seen.add(file);
         files.push(file);
       }
+    }
+  }
+  return files;
+}
+
+function uniqueStructuredPaths(paths) {
+  const seen = new Set();
+  const files = [];
+  for (const file of paths) {
+    const normalized = file.replaceAll("\\", "/").replace(/^\.\/+/, "");
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      files.push(normalized);
     }
   }
   return files;

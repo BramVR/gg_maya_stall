@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize, ready_for_review]
+    types: [edited, opened, reopened, synchronize, ready_for_review]
   push:
     branches: [main]
 
@@ -438,7 +438,7 @@ jobs:
       - name: Publish stable required Check Run
         uses: actions/github-script@v7
         env:
-          HEAD_SHA: ${{ needs.evaluate.outputs.head_sha || github.sha }}
+          HEAD_SHA: ${{ needs.evaluate.outputs.head_sha || github.event.pull_request.head.sha || github.sha }}
           HOSTED_OK: ${{ needs.go_tests.result == 'success' && needs.lint.result == 'success' && needs.docs.result == 'success' && needs.proof_scripts.result == 'success' }}
           CURRENT_HEAD: ${{ needs.evaluate.outputs.current_head }}
           LIVE_REQUIRED: ${{ needs.evaluate.outputs.live_maya_required }}

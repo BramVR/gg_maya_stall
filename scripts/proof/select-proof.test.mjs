@@ -150,13 +150,13 @@ test("selector preserves untrusted filenames through JSON input", () => {
   const dir = tempDir();
   const changed = path.join(dir, "changed.json");
   const manifestPath = path.join(dir, "proof-manifest.json");
-  fs.writeFileSync(changed, JSON.stringify(["internal/cli/live\nname.go"]));
+  fs.writeFileSync(changed, JSON.stringify(["internal/cli/\tlive.go"]));
 
   execFileSync("node", [selectScript, "--changed-files-json", changed, "--output", manifestPath], { cwd: root });
 
   const manifest = readJSON(manifestPath);
   assert.equal(manifest.live_maya_required, true);
-  assert.deepEqual(manifest.changed_files, ["internal/cli/live\nname.go"]);
+  assert.deepEqual(manifest.changed_files, ["internal/cli/\tlive.go"]);
 });
 
 test("assert-live-proof fails closed when required live proof has no host config", () => {

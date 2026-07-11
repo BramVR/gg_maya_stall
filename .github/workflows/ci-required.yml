@@ -86,7 +86,7 @@ jobs:
               });
               const pr = response.data;
               baseSha = pr.base.sha;
-              headSha = pr.head.sha === run.head_sha ? run.head_sha : run.head_sha;
+              headSha = run.head_sha;
               pullNumber = String(pr.number);
               trustedHead = pr.head.repo?.full_name === `${context.repo.owner}/${context.repo.repo}`;
               currentHead = pr.state === "open" && pr.head.sha === run.head_sha;

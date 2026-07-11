@@ -14,7 +14,7 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: ci-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_branch }}
+  group: ci-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
   cancel-in-progress: true
 
 jobs:
@@ -327,8 +327,8 @@ jobs:
           }
           NODE
           node trusted/scripts/proof/assert-public-artifact-confidentiality.mjs \
-            --path candidate/artifacts/live-visual-evidence-proof \
-            --path candidate/artifacts/proof/proof-manifest.json
+            --path "${{ github.workspace }}/candidate/artifacts/live-visual-evidence-proof" \
+            --path "${{ github.workspace }}/candidate/artifacts/proof/proof-manifest.json"
 
       - name: Upload live Visual Evidence proof
         id: upload_visual_proof
@@ -408,9 +408,12 @@ jobs:
           script: |
             let conclusion = "success";
             let summary = "All required hosted checks passed; live Maya proof was not required.";
-            if (process.env.CURRENT_HEAD !== "true") {
+            if (process.env.CURRENT_HEAD === "false") {
               conclusion = "neutral";
               summary = "This workflow run no longer targets the current PR or branch head.";
+            } else if (process.env.CURRENT_HEAD !== "true") {
+              conclusion = "failure";
+              summary = "Trusted run-context evaluation did not complete.";
             } else if (process.env.HOSTED_OK !== "true") {
               conclusion = "failure";
               summary = "One or more required hosted checks failed, skipped, or were cancelled.";

@@ -33,6 +33,7 @@ test("four hosted jobs are parallel, credentialless, cacheless, and cancelable",
   assert.doesNotMatch(hosted, /persist-credentials: true/);
   assert.doesNotMatch(hosted, /(?:^|[\s,{])cache: true/m);
   assert.match(hosted, /skip-cache: true/);
+  assert.match(hosted, /--new-from-rev=\$\{\{ steps\.lint_base\.outputs\.base_sha \}\}/);
 });
 
 test("trusted default-branch workflow verifies hosted results and current head", () => {

@@ -86,4 +86,6 @@ descriptive; code is the source-backed check when behavior claims disagree.
   `scripts/proof/select-proof.mjs`, `scripts/proof/assert-live-proof.mjs`
 - Restricted hosted workflow: `.github/workflows/ci-hosted.yml`
 - Trusted classification, live proof, and required-result workflow: `.github/workflows/ci-required.yml`
+- CI topology, timing method, and measured baseline: `docs/agents/pr-merge.md`,
+  `docs/ci-performance.md`
 - PR closeout and merge proof docs: `docs/agents/pr-merge.md`

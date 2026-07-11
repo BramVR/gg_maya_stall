@@ -228,12 +228,12 @@ jobs:
           }
           fs.writeFileSync(process.env.RUNNER_TEMP + "/live-changed-files.json", JSON.stringify(files));
           NODE
-          extra_policy=()
-          if [ -z "${{ needs.evaluate.outputs.pull_request_number }}" ]; then
+          if [ -n "${{ needs.evaluate.outputs.pull_request_number }}" ]; then
+            node trusted/scripts/proof/select-proof.mjs --changed-files-json "$RUNNER_TEMP/live-changed-files.json" --base "$BASE_SHA" --head "$HEAD_SHA" --output "$PROOF_MANIFEST"
+          else
             git -C trusted show "$BASE_SHA:proof/live-maya-policy.json" > "$RUNNER_TEMP/base-live-maya-policy.json"
-            extra_policy=(--additional-policy "$RUNNER_TEMP/base-live-maya-policy.json")
+            node trusted/scripts/proof/select-proof.mjs --changed-files-json "$RUNNER_TEMP/live-changed-files.json" --base "$BASE_SHA" --head "$HEAD_SHA" --additional-policy "$RUNNER_TEMP/base-live-maya-policy.json" --output "$PROOF_MANIFEST"
           fi
-          node trusted/scripts/proof/select-proof.mjs --changed-files-json "$RUNNER_TEMP/live-changed-files.json" --base "$BASE_SHA" --head "$HEAD_SHA" "${extra_policy[@]}" --output "$PROOF_MANIFEST"
           node trusted/scripts/proof/mark-gate.mjs --manifest "$PROOF_MANIFEST" --gate local --status passed --command "go test -race ./..."
           node trusted/scripts/proof/mark-gate.mjs --manifest "$PROOF_MANIFEST" --gate docs --status passed --command "scripts/check-docs.sh"
           node trusted/scripts/proof/mark-gate.mjs --manifest "$PROOF_MANIFEST" --gate artifacts --status passed --command "node --test scripts/proof/*.test.mjs scripts/windows/*.test.mjs"
@@ -316,6 +316,8 @@ jobs:
           MAYA_STALL_LIVE_PROOF_MEDIA_REVIEWED: "true"
         run: |
           set -euo pipefail
+          # Persistent self-hosted runners can retain a partially written macOS test binary after cancellation.
+          go clean -cache -testcache
           go test -json ./internal/cli -run '^(TestOptInRealVisualEvidenceSmoke|TestOptInRealDesktopControlModalSmoke|TestOptInRealSSHDoctorSmoke|TestOptInRealSSHConsumingRepoSmoke|TestOptInRealSSHRunSmoke|TestOptInRealRunScopedDesktopOpsSmoke)$' -count=1 -parallel=1 -timeout=20m | tee artifacts/proof/live-smoke.jsonl
 
       - name: Public artifact confidentiality gate

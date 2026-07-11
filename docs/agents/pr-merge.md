@@ -35,13 +35,13 @@ task before proof starts and retained-stop smokes restore it again before the
 next proof step:
 
 ```sh
-go test -json ./internal/cli -run '^(TestOptInRealVisualEvidenceSmoke|TestOptInRealDesktopControlModalSmoke|TestOptInRealSSHDoctorSmoke|TestOptInRealSSHConsumingRepoSmoke|TestOptInRealSSHRunSmoke|TestOptInRealRunScopedDesktopOpsSmoke)$' -count=1 -parallel=1 -timeout=20m
+go test ./internal/cli -run TestOptInRealVisualEvidenceSmoke -count=1
+go test ./internal/cli -run TestOptInRealDesktopControlModalSmoke -count=1
+go test ./internal/cli -run TestOptInRealSSHDoctorSmoke -count=1
+go test ./internal/cli -run TestOptInRealSSHConsumingRepoSmoke -count=1
+go test ./internal/cli -run TestOptInRealSSHRunSmoke -count=1
+go test ./internal/cli -run TestOptInRealRunScopedDesktopOpsSmoke -count=1
 ```
-
-The single Go process compiles and initializes the package once. All six named
-tests must report individual passes; skips fail the live gate. `-parallel=1`
-keeps the one interactive Windows desktop serialized, while `-timeout=20m`
-leaves five minutes of the job budget for setup and proof publication.
 
 That opt-in smoke runs `maya-stall doctor --scenario smoke`, then one real
 `maya-stall run smoke` through `gg_mayasessiond`, and asserts the Evidence
@@ -62,77 +62,42 @@ run-scoped desktop screenshot, and clears a controlled modal with
 Non-live-only changes may merge with local gates plus a manifest saying
 `live_maya_required=false`.
 
-## CI Topology
-
-`.github/workflows/ci-hosted.yml` runs candidate code under the restricted
-`pull_request` token: four parallel jobs cover race-enabled Go tests, lint,
-documentation, and proof-policy/Windows-helper tests. It persists no checkout
-credentials, exposes no secrets or self-hosted runner, and disables tool caches.
-
-After that run completes, `.github/workflows/ci-required.yml` runs from its
-trusted default-branch copy on `workflow_run`. It verifies the exact hosted job
-set, classifies the immutable PR diff, and owns one ref concurrency group with
-`cancel-in-progress: true`. A new push cancels obsolete classification and live
-work. Before secrets are decoded and again immediately before the Maya smoke,
-the live job asks GitHub whether its exact SHA is still the current PR or `main`
-head. A stale SHA fails without touching the Maya Host.
-
-A non-live-sensitive diff never schedules the self-hosted runner. A trusted
-live-sensitive diff reaches the serialized `Live Maya Proof` job only after all
-hosted gates pass. A live-sensitive fork gets neither secrets nor self-hosted
-runner access; `CI / Required` reports action required until a maintainer
-promotes the commit to a same-repository ref.
-
-`CI / Required` is the only stable branch-protection status. A dedicated
-repository-scoped GitHub App publishes it, so candidate-controlled GitHub
-Actions jobs cannot spoof the required identity. It always runs and
-accepts a non-live change only after every hosted result succeeds; a live change
-also needs successful real-Maya proof. Classification failure, cancellation,
-skip, fork promotion, or missing required live proof all fail the aggregate.
-
 ## Branch Protection
+
+The live Maya proof gate is only non-skippable when GitHub branch protection
+marks the proof checks as required on `main`. This cannot be verified from the
+repository contents; confirm it against the GitHub API when auditing:
+
+```sh
+gh api repos/<owner>/<repo>/branches/main/protection \
+  -q '{enforce_admins: .enforce_admins.enabled, contexts: .required_status_checks.contexts, allow_force_pushes: .allow_force_pushes.enabled, allow_deletions: .allow_deletions.enabled}'
+```
 
 Required configuration:
 
-- Required status check on `main`: `CI / Required`, pinned to the dedicated CI Required GitHub App.
-- `enforce_admins` enabled.
-- Force pushes and branch deletion disabled.
+- Required status checks on `main`: `Proof Manifest, Local Gates`,
+  `Live Maya Gate`, and `golangci-lint`.
+- `enforce_admins` enabled, so the gate cannot be bypassed by direct pushes.
+- No force pushes or branch deletion.
 
-The CI Required GitHub App must be installed only on this repository, with
-metadata read and Checks read/write permissions, and no active webhook. Store
-its app ID as repository variable `CI_REQUIRED_APP_ID` and its private
-key as repository secret `CI_REQUIRED_APP_PRIVATE_KEY`. The hosted candidate
-workflow receives neither value.
-
-Audit the live repository without printing secrets or configuration values:
-
-```sh
-node scripts/proof/audit-main-protection.mjs --repository <owner>/<repo> --app-id <ci-required-app-id>
-```
-
-The script reads the existing branch protection and verifies the contract. It
-does not mutate or replace review requirements, push restrictions, or other
-rules.
-
-## Timing CI
-
-Fetch the linked hosted and trusted runs, then report hosted feedback,
-live-runner queue, and live execution separately:
+`Live Maya Gate` reports `skipped` for non-live changes, which satisfies the
+required check; live-required changes wait on the `maya-live-proof` environment
+approval, so an unapproved live PR cannot merge. Add the required contexts and
+admin enforcement without replacing existing checks, review requirements, or
+push restrictions:
 
 ```sh
-hosted_run_id=<ci-hosted-run-id>
-trusted_run_id=<ci-required-run-id>
-gh api "repos/<owner>/<repo>/actions/runs/$hosted_run_id" > /tmp/maya-stall-hosted-run.json
-gh api "repos/<owner>/<repo>/actions/runs/$hosted_run_id/jobs?filter=latest" > /tmp/maya-stall-hosted-jobs.json
-gh api "repos/<owner>/<repo>/actions/runs/$trusted_run_id/jobs?filter=latest" > /tmp/maya-stall-trusted-jobs.json
-node scripts/proof/report-ci-timing.mjs \
-  --hosted-input /tmp/maya-stall-hosted-jobs.json \
-  --trusted-input /tmp/maya-stall-trusted-jobs.json \
-  --hosted-run-created-at "$(jq -r .created_at /tmp/maya-stall-hosted-run.json)"
+gh api -X POST repos/<owner>/<repo>/branches/main/protection/required_status_checks/contexts --input - <<'JSON'
+{
+  "contexts": ["Proof Manifest, Local Gates", "Live Maya Gate", "golangci-lint"]
+}
+JSON
+gh api -X POST repos/<owner>/<repo>/branches/main/protection/enforce_admins
 ```
 
-Hosted feedback should remain under 90 seconds. Treat Maya runner queue and live
-execution as separate capacity/proof measurements rather than hosted latency.
+These additive endpoints require branch protection to exist already. If the
+audit reports force pushes or deletion as enabled, disable those settings in
+the repository branch-protection rule without replacing its other controls.
 
 Policy path coverage is audited automatically: `scripts/proof/audit-live-policy.mjs`
 verifies every `proof/live-maya-policy.json` rule path still exists, every prefix

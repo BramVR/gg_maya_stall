@@ -6,7 +6,6 @@ Release history starts with `v0.1.0`.
 
 ## Unreleased
 
-- Replaced the serial lint/proof workflows with one trusted, cancelable CI pipeline that parallelizes hosted gates, schedules live Maya proof only for sensitive same-repository changes, and publishes one stable required check.
 - Changed Fresh Runs to start a new broker-owned Maya UI Session, record its identity in evidence, and stop that exact session for stopped Stop Policy outcomes instead of only cleaning the run workspace.
 - Fixed Host Health recovery to restart a stale interactive broker session when `script.execute` returns its known malformed tool result, then re-probe before a Fresh Run.
 - Fixed `--keep-on-failure` and `--stop-after never` to retain the owned Maya UI Session, Host Lock, and follow-up commands when a post-start setup or Session Broker execution failure occurs before a Scenario Result is recovered.

@@ -32,7 +32,7 @@ test("selector requires live Maya proof for live product behavior paths", () => 
   ]);
   assert.equal(manifest.live_maya_reasons[0].rule, "session-broker");
   assert.equal(manifest.gates.live_maya.status, "required");
-  assert.equal(manifest.gates.live_maya.command, "go test ./internal/cli -run TestOptInRealVisualEvidenceSmoke -count=1 && go test ./internal/cli -run TestOptInRealDesktopControlModalSmoke -count=1 && go test ./internal/cli -run TestOptInRealSSHDoctorSmoke -count=1 && go test ./internal/cli -run TestOptInRealSSHConsumingRepoSmoke -count=1 && go test ./internal/cli -run TestOptInRealSSHRunSmoke -count=1 && go test ./internal/cli -run TestOptInRealRunScopedDesktopOpsSmoke -count=1");
+  assert.equal(manifest.gates.live_maya.command, "go test -json ./internal/cli -run '^(TestOptInRealVisualEvidenceSmoke|TestOptInRealDesktopControlModalSmoke|TestOptInRealSSHDoctorSmoke|TestOptInRealSSHConsumingRepoSmoke|TestOptInRealSSHRunSmoke|TestOptInRealRunScopedDesktopOpsSmoke)$' -count=1 -parallel=1");
   assert.equal(manifest.gates.local.status, "pending");
   assert.equal(manifest.gates.docs.status, "pending");
   assert.equal(manifest.gates.artifacts.status, "pending");
@@ -118,6 +118,45 @@ test("selector requires live Maya proof for new files under live source prefixes
   const manifest = readJSON(manifestPath);
   assert.equal(manifest.live_maya_required, true);
   assert.equal(manifest.live_maya_reasons[0].rule, "live-product-source");
+});
+
+test("selector cannot weaken the trusted base policy in the changed head", () => {
+  const dir = tempDir();
+  const changed = path.join(dir, "changed.txt");
+  const manifestPath = path.join(dir, "proof-manifest.json");
+  const headPolicy = path.join(dir, "head-policy.json");
+  const basePolicy = path.join(dir, "base-policy.json");
+  fs.writeFileSync(changed, "internal/cli/sessiond_broker.go\n");
+  fs.writeFileSync(headPolicy, JSON.stringify({ schema_version: 1, rules: [] }));
+  fs.writeFileSync(basePolicy, JSON.stringify({
+    schema_version: 1,
+    rules: [{ id: "trusted", reason: "trusted base policy", paths: ["internal/cli/sessiond_broker.go"] }],
+  }));
+
+  execFileSync("node", [
+    selectScript,
+    "--changed-files", changed,
+    "--policy", headPolicy,
+    "--additional-policy", basePolicy,
+    "--output", manifestPath,
+  ], { cwd: root });
+
+  const manifest = readJSON(manifestPath);
+  assert.equal(manifest.live_maya_required, true);
+  assert.equal(manifest.live_maya_reasons[0].rule, "trusted");
+});
+
+test("selector preserves untrusted filenames through JSON input", () => {
+  const dir = tempDir();
+  const changed = path.join(dir, "changed.json");
+  const manifestPath = path.join(dir, "proof-manifest.json");
+  fs.writeFileSync(changed, JSON.stringify(["internal/cli/live\nname.go"]));
+
+  execFileSync("node", [selectScript, "--changed-files-json", changed, "--output", manifestPath], { cwd: root });
+
+  const manifest = readJSON(manifestPath);
+  assert.equal(manifest.live_maya_required, true);
+  assert.deepEqual(manifest.changed_files, ["internal/cli/live\nname.go"]);
 });
 
 test("assert-live-proof fails closed when required live proof has no host config", () => {

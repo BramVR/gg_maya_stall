@@ -26,7 +26,7 @@ jobs:
       head_branch: ${{ steps.context.outputs.head_branch }}
       trusted_head: ${{ steps.context.outputs.trusted_head }}
       current_head: ${{ steps.context.outputs.current_head }}
-      live_maya_required: ${{ steps.select.outputs.live_maya_required }}
+      live_maya_required: ${{ steps.select_pr.outputs.live_maya_required || steps.select_push.outputs.live_maya_required }}
     steps:
       - name: Checkout trusted default branch
         uses: actions/checkout@v4
@@ -75,22 +75,27 @@ jobs:
               return;
             }
             fs.mkdirSync("artifacts/proof", { recursive: true });
-            if (eventPull) fs.writeFileSync("artifacts/proof/changed-files.txt", `${[...new Set(paths)].join("\n")}\n`);
+            if (eventPull) fs.writeFileSync("artifacts/proof/changed-files.json", `${JSON.stringify([...new Set(paths)])}\n`);
             core.setOutput("base_sha", baseSha);
             core.setOutput("head_sha", headSha);
             core.setOutput("pull_request_number", pullNumber);
             core.setOutput("head_branch", headBranch);
             core.setOutput("trusted_head", String(trustedHead));
             core.setOutput("current_head", String(currentHead));
-      - name: Record exact push changed files
+      - name: Classify trusted PR diff
+        id: select_pr
+        if: github.event_name == 'pull_request_target'
+        env:
+          BASE_SHA: ${{ steps.context.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.context.outputs.head_sha }}
+        run: node scripts/proof/select-proof.mjs --changed-files-json artifacts/proof/changed-files.json --base "$BASE_SHA" --head "$HEAD_SHA" --output artifacts/proof/proof-manifest.json
+      - name: Classify exact trusted push diff
+        id: select_push
         if: github.event_name == 'push'
         env:
           BASE_SHA: ${{ steps.context.outputs.base_sha }}
           HEAD_SHA: ${{ steps.context.outputs.head_sha }}
-        run: git diff --name-status --diff-filter=ACDMRT "$BASE_SHA" "$HEAD_SHA" > artifacts/proof/changed-files.txt
-      - name: Classify with trusted policy
-        id: select
-        run: node scripts/proof/select-proof.mjs --changed-files artifacts/proof/changed-files.txt --output artifacts/proof/proof-manifest.json
+        run: node scripts/proof/select-proof.mjs --base "$BASE_SHA" --head "$HEAD_SHA" --diff-mode exact --output artifacts/proof/proof-manifest.json
       - name: Upload trusted classification
         if: always()
         uses: actions/upload-artifact@v4
@@ -226,12 +231,23 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p candidate/artifacts/proof
-          if [ -n "${{ needs.evaluate.outputs.pull_request_number }}" ]; then
-            git -C candidate diff --name-status --diff-filter=ACDMRT "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/live-changed-files.txt"
-          else
-            git -C candidate diff --name-status --diff-filter=ACDMRT "$BASE_SHA" "$HEAD_SHA" > "$RUNNER_TEMP/live-changed-files.txt"
-          fi
-          node trusted/scripts/proof/select-proof.mjs --changed-files "$RUNNER_TEMP/live-changed-files.txt" --output "$PROOF_MANIFEST"
+          PR_NUMBER="${{ needs.evaluate.outputs.pull_request_number }}" node - <<'NODE'
+          const fs = require("node:fs");
+          const { execFileSync } = require("node:child_process");
+          const base = process.env.BASE_SHA;
+          const head = process.env.HEAD_SHA;
+          const range = process.env.PR_NUMBER ? `${base}...${head}` : null;
+          const args = ["diff", "--name-status", "-z", "--diff-filter=ACDMRT", ...(range ? [range] : [base, head])];
+          const fields = execFileSync("git", args, { cwd: "candidate" }).toString("utf8").split("\0");
+          const files = [];
+          for (let i = 0; i < fields.length && fields[i];) {
+            const status = fields[i++];
+            if (/^[RC]\d*/.test(status)) files.push(fields[i++], fields[i++]);
+            else files.push(fields[i++]);
+          }
+          fs.writeFileSync(process.env.RUNNER_TEMP + "/live-changed-files.json", JSON.stringify(files));
+          NODE
+          node trusted/scripts/proof/select-proof.mjs --changed-files-json "$RUNNER_TEMP/live-changed-files.json" --base "$BASE_SHA" --head "$HEAD_SHA" --output "$PROOF_MANIFEST"
           node trusted/scripts/proof/mark-gate.mjs --manifest "$PROOF_MANIFEST" --gate local --status passed --command "go test -race ./..."
           node trusted/scripts/proof/mark-gate.mjs --manifest "$PROOF_MANIFEST" --gate docs --status passed --command "scripts/check-docs.sh"
           node trusted/scripts/proof/mark-gate.mjs --manifest "$PROOF_MANIFEST" --gate artifacts --status passed --command "node --test scripts/proof/*.test.mjs scripts/windows/*.test.mjs"

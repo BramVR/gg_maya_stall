@@ -284,7 +284,7 @@ func TestLiveVisualEvidenceProofRejectsInvalidProofShapes(t *testing.T) {
 }
 
 func TestLiveVisualEvidenceProofWorkflowRequiresSmokePass(t *testing.T) {
-	content, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "proof.yml"))
+	content, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "ci-required.yml"))
 	if err != nil {
 		t.Fatalf("read proof workflow: %v", err)
 	}
@@ -292,16 +292,16 @@ func TestLiveVisualEvidenceProofWorkflowRequiresSmokePass(t *testing.T) {
 	for _, want := range []string{
 		"TestOptInRealVisualEvidenceSmoke",
 		"TestOptInRealDesktopControlModalSmoke",
-		"run TestOptInRealVisualEvidenceSmoke -count=1",
-		"run TestOptInRealDesktopControlModalSmoke -count=1",
-		"run TestOptInRealSSHDoctorSmoke -count=1",
-		"run TestOptInRealSSHConsumingRepoSmoke -count=1",
-		"run TestOptInRealSSHRunSmoke -count=1",
-		"run TestOptInRealRunScopedDesktopOpsSmoke -count=1",
+		"TestOptInRealSSHDoctorSmoke",
+		"TestOptInRealSSHConsumingRepoSmoke",
+		"TestOptInRealSSHRunSmoke",
+		"TestOptInRealRunScopedDesktopOpsSmoke",
+		"-count=1 -parallel=1 -timeout=20m",
 		"MAYA_STALL_LIVE_PROOF_ARTIFACT_ENABLED",
 		"MAYA_STALL_LIVE_PROOF_MEDIA_REVIEWED",
 		"live-visual-evidence-proof",
 		"assert-public-artifact-confidentiality.mjs",
+		"all six individual live smoke tests must pass without skips",
 		"failed_missing_visual_evidence_proof_artifact",
 		"failed_visual_evidence_proof_confidentiality",
 		"failed_visual_evidence_proof_upload",
@@ -310,6 +310,9 @@ func TestLiveVisualEvidenceProofWorkflowRequiresSmokePass(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("proof workflow missing %q", want)
 		}
+	}
+	if got := strings.Count(text, "go test -json ./internal/cli -run"); got != 1 {
+		t.Fatalf("live smoke Go test process count = %d, want 1", got)
 	}
 }
 

@@ -95,7 +95,9 @@ jobs:
         env:
           BASE_SHA: ${{ steps.context.outputs.base_sha }}
           HEAD_SHA: ${{ steps.context.outputs.head_sha }}
-        run: node scripts/proof/select-proof.mjs --base "$BASE_SHA" --head "$HEAD_SHA" --diff-mode exact --output artifacts/proof/proof-manifest.json
+        run: |
+          git show "$BASE_SHA:proof/live-maya-policy.json" > "$RUNNER_TEMP/base-live-maya-policy.json"
+          node scripts/proof/select-proof.mjs --base "$BASE_SHA" --head "$HEAD_SHA" --diff-mode exact --additional-policy "$RUNNER_TEMP/base-live-maya-policy.json" --output artifacts/proof/proof-manifest.json
       - name: Upload trusted classification
         if: always()
         uses: actions/upload-artifact@v4
@@ -176,6 +178,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: trusted
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Checkout exact candidate head
@@ -248,7 +251,12 @@ jobs:
           }
           fs.writeFileSync(process.env.RUNNER_TEMP + "/live-changed-files.json", JSON.stringify(files));
           NODE
-          node trusted/scripts/proof/select-proof.mjs --changed-files-json "$RUNNER_TEMP/live-changed-files.json" --base "$BASE_SHA" --head "$HEAD_SHA" --output "$PROOF_MANIFEST"
+          extra_policy=()
+          if [ -z "${{ needs.evaluate.outputs.pull_request_number }}" ]; then
+            git -C trusted show "$BASE_SHA:proof/live-maya-policy.json" > "$RUNNER_TEMP/base-live-maya-policy.json"
+            extra_policy=(--additional-policy "$RUNNER_TEMP/base-live-maya-policy.json")
+          fi
+          node trusted/scripts/proof/select-proof.mjs --changed-files-json "$RUNNER_TEMP/live-changed-files.json" --base "$BASE_SHA" --head "$HEAD_SHA" "${extra_policy[@]}" --output "$PROOF_MANIFEST"
           node trusted/scripts/proof/mark-gate.mjs --manifest "$PROOF_MANIFEST" --gate local --status passed --command "go test -race ./..."
           node trusted/scripts/proof/mark-gate.mjs --manifest "$PROOF_MANIFEST" --gate docs --status passed --command "scripts/check-docs.sh"
           node trusted/scripts/proof/mark-gate.mjs --manifest "$PROOF_MANIFEST" --gate artifacts --status passed --command "node --test scripts/proof/*.test.mjs scripts/windows/*.test.mjs"

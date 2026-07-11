@@ -10,7 +10,7 @@ const outputPath = path.resolve(root, args.output ?? path.join("artifacts", "pro
 const policies = [readJSON(policyPath)];
 if (args.additional_policy) policies.push(readJSON(path.resolve(root, args.additional_policy)));
 const rawChangedFiles = readChangedFiles(args);
-const changedFiles = args.changed_files_json ? uniqueStructuredPaths(rawChangedFiles) : uniqueChangedFiles(rawChangedFiles);
+const changedFiles = args.changed_files_json || args.diff_mode === "exact" ? uniqueStructuredPaths(rawChangedFiles) : uniqueChangedFiles(rawChangedFiles);
 const liveReasons = uniqueLiveReasons(policies.flatMap((policy) => selectLiveReasons(policy, changedFiles)));
 const liveRequired = liveReasons.length > 0;
 

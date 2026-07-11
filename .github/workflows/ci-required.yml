@@ -166,10 +166,10 @@ jobs:
           path: candidate
           persist-credentials: false
 
-      - name: Setup Go from candidate go.mod
+      - name: Setup live-runner Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: candidate/go.mod
+          go-version: "1.26.4"
           cache: false
 
       - name: Guard current PR or main head

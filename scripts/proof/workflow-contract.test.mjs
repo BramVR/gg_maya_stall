@@ -61,6 +61,8 @@ test("one same-repository live job is serialized behind verified hosted gates", 
 test("all six live smokes run serially in one bounded Go test process", () => {
   assert.equal((required.match(/go test -json \.\/internal\/cli -run/g) ?? []).length, 1);
   assert.match(required, /-parallel=1 -timeout=20m/);
+  assert.match(required, /go clean -cache -testcache/);
+  assert.doesNotMatch(required, /extra_policy\[@\]/);
   for (const name of [
     "TestOptInRealVisualEvidenceSmoke",
     "TestOptInRealDesktopControlModalSmoke",

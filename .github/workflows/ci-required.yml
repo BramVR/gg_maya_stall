@@ -1,0 +1,397 @@
+name: CI Required Dispatcher
+
+on:
+  workflow_run:
+    workflows:
+      - CI Hosted
+    types:
+      - completed
+
+permissions:
+  actions: read
+  checks: write
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ci-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
+jobs:
+  evaluate:
+    name: Evaluate Hosted Proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      base_sha: ${{ steps.context.outputs.base_sha }}
+      head_sha: ${{ steps.context.outputs.head_sha }}
+      pull_request_number: ${{ steps.context.outputs.pull_request_number }}
+      trusted_head: ${{ steps.context.outputs.trusted_head }}
+      current_head: ${{ steps.context.outputs.current_head }}
+      hosted_ok: ${{ steps.context.outputs.hosted_ok }}
+      live_maya_required: ${{ steps.select.outputs.live_maya_required }}
+    steps:
+      - name: Checkout trusted default branch
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Resolve trusted run context and changed files
+        id: context
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("node:fs");
+            const run = context.payload.workflow_run;
+            const pull = run.pull_requests?.[0];
+            let baseSha;
+            let headSha = run.head_sha;
+            let pullNumber = "";
+            let trustedHead = true;
+            let currentHead = true;
+            if (pull) {
+              const response = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pull.number,
+              });
+              const pr = response.data;
+              baseSha = pr.base.sha;
+              headSha = pr.head.sha === run.head_sha ? run.head_sha : run.head_sha;
+              pullNumber = String(pr.number);
+              trustedHead = pr.head.repo?.full_name === `${context.repo.owner}/${context.repo.repo}`;
+              currentHead = pr.state === "open" && pr.head.sha === run.head_sha;
+            } else {
+              const commit = await github.rest.repos.getCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: headSha,
+              });
+              baseSha = commit.data.parents?.[0]?.sha;
+              const branch = await github.rest.repos.getBranch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                branch: run.head_branch,
+              });
+              currentHead = branch.data.commit.sha === headSha;
+            }
+            if (!/^[0-9a-f]{40}$/i.test(baseSha || "") || /^0{40}$/.test(baseSha)) {
+              core.setFailed("trusted dispatcher could not resolve a valid non-zero base SHA");
+              return;
+            }
+            if (!/^[0-9a-f]{40}$/i.test(headSha || "") || /^0{40}$/.test(headSha)) {
+              core.setFailed("trusted dispatcher could not resolve a valid non-zero head SHA");
+              return;
+            }
+            const comparison = await github.rest.repos.compareCommitsWithBasehead({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              basehead: `${baseSha}...${headSha}`,
+              per_page: 100,
+            });
+            if ((comparison.data.files?.length || 0) >= 300) {
+              core.setFailed("changed-file comparison reached the API page limit; refusing incomplete classification");
+              return;
+            }
+            const paths = [];
+            for (const file of comparison.data.files || []) {
+              if (file.previous_filename) paths.push(file.previous_filename);
+              paths.push(file.filename);
+            }
+            fs.mkdirSync("artifacts/proof", { recursive: true });
+            fs.writeFileSync("artifacts/proof/changed-files.txt", `${[...new Set(paths)].join("\n")}\n`);
+            core.setOutput("base_sha", baseSha);
+            core.setOutput("head_sha", headSha);
+            core.setOutput("pull_request_number", pullNumber);
+            core.setOutput("trusted_head", String(trustedHead));
+            core.setOutput("current_head", String(currentHead));
+            core.setOutput("hosted_ok", String(run.conclusion === "success"));
+
+      - name: Classify with trusted policy and selector
+        id: select
+        run: >-
+          node scripts/proof/select-proof.mjs
+          --changed-files artifacts/proof/changed-files.txt
+          --output artifacts/proof/proof-manifest.json
+
+      - name: Upload trusted classification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trusted-proof-classification-${{ github.event.workflow_run.id }}
+          path: artifacts/proof/
+          if-no-files-found: error
+          retention-days: 7
+
+  live_maya:
+    name: Live Maya Proof
+    needs: evaluate
+    if: needs.evaluate.outputs.hosted_ok == 'true' && needs.evaluate.outputs.current_head == 'true' && needs.evaluate.outputs.live_maya_required == 'true' && needs.evaluate.outputs.trusted_head == 'true'
+    runs-on: [self-hosted, maya-live-proof]
+    environment: maya-live-proof
+    timeout-minutes: 25
+    env:
+      PROOF_MANIFEST: ${{ github.workspace }}/candidate/artifacts/proof/proof-manifest.json
+      LIVE_PROOF_ARTIFACT_DIR: ${{ github.workspace }}/candidate/artifacts/live-visual-evidence-proof
+      LIVE_PROOF_RETENTION_DAYS: ${{ vars.MAYA_STALL_LIVE_PROOF_RETENTION_DAYS || '3' }}
+      LIVE_PROOF_PUBLIC_HOST_ALIAS: ${{ vars.MAYA_STALL_LIVE_PROOF_PUBLIC_HOST_ALIAS || 'maya-live-proof-host' }}
+    steps:
+      - name: Checkout trusted default branch
+        uses: actions/checkout@v4
+        with:
+          path: trusted
+
+      - name: Checkout exact candidate head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.evaluate.outputs.head_sha }}
+          fetch-depth: 0
+          path: candidate
+
+      - name: Setup Go from candidate go.mod
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: candidate/go.mod
+
+      - name: Guard current PR or main head
+        uses: actions/github-script@v7
+        env:
+          EXPECTED_SHA: ${{ needs.evaluate.outputs.head_sha }}
+          PULL_REQUEST_NUMBER: ${{ needs.evaluate.outputs.pull_request_number }}
+          EXPECTED_BASE_SHA: ${{ needs.evaluate.outputs.base_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        with:
+          script: |
+            if (process.env.PULL_REQUEST_NUMBER) {
+              const response = await github.rest.pulls.get({ owner: context.repo.owner, repo: context.repo.repo, pull_number: Number(process.env.PULL_REQUEST_NUMBER) });
+              const pr = response.data;
+              if (pr.state !== "open" || pr.head.sha !== process.env.EXPECTED_SHA || pr.base.sha !== process.env.EXPECTED_BASE_SHA) {
+                core.setFailed("refusing stale or closed PR live proof");
+              }
+            } else {
+              const response = await github.rest.repos.getBranch({ owner: context.repo.owner, repo: context.repo.repo, branch: process.env.HEAD_BRANCH });
+              if (response.data.commit.sha !== process.env.EXPECTED_SHA) core.setFailed("refusing stale branch live proof");
+            }
+
+      - name: Check live runner Python
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import ensurepip
+          import sys
+          import venv
+          if sys.version_info < (3, 10):
+              raise SystemExit("python3 >= 3.10 is required for the consuming repo local gate")
+          print(f"python: {sys.version.split()[0]}")
+          print(f"venv: {venv.__name__}; ensurepip: {ensurepip.__name__}")
+          PY
+
+      - name: Create trusted live Proof Manifest
+        env:
+          BASE_SHA: ${{ needs.evaluate.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.evaluate.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p candidate/artifacts/proof
+          git -C candidate diff --name-status --diff-filter=ACDMRT "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/live-changed-files.txt"
+          node trusted/scripts/proof/select-proof.mjs --changed-files "$RUNNER_TEMP/live-changed-files.txt" --output "$PROOF_MANIFEST"
+          node trusted/scripts/proof/mark-gate.mjs --manifest "$PROOF_MANIFEST" --gate local --status passed --command "go test -race ./..."
+          node trusted/scripts/proof/mark-gate.mjs --manifest "$PROOF_MANIFEST" --gate docs --status passed --command "scripts/check-docs.sh"
+          node trusted/scripts/proof/mark-gate.mjs --manifest "$PROOF_MANIFEST" --gate artifacts --status passed --command "node --test scripts/proof/*.test.mjs scripts/windows/*.test.mjs"
+
+      - name: Prepare live Maya host config
+        id: live_config
+        env:
+          HOST_CONFIG_B64: ${{ secrets.MAYA_STALL_LIVE_HOST_CONFIG_B64 }}
+        run: |
+          if [ -n "$HOST_CONFIG_B64" ]; then
+            mkdir -p "$RUNNER_TEMP/maya-stall"
+            printf '%s' "$HOST_CONFIG_B64" | base64 --decode > "$RUNNER_TEMP/maya-stall/live-hosts.yaml"
+            echo "state=present" >> "$GITHUB_OUTPUT"
+            echo "path=$RUNNER_TEMP/maya-stall/live-hosts.yaml" >> "$GITHUB_OUTPUT"
+          else
+            echo "state=missing" >> "$GITHUB_OUTPUT"
+            echo "path=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare consuming repo smoke
+        id: consumer_repo
+        env:
+          SOURCE_REPO: ${{ secrets.MAYA_STALL_LIVE_CONSUMING_REPO_SMOKE_DIR || vars.MAYA_STALL_LIVE_CONSUMING_REPO_SMOKE_DIR }}
+        run: |
+          if [ -z "$SOURCE_REPO" ]; then
+            echo "::error::MAYA_STALL_LIVE_CONSUMING_REPO_SMOKE_DIR is required for live Maya proof"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/maya-stall/consuming-repo"
+          git -C "$SOURCE_REPO" archive --format=tar HEAD | tar -x -C "$RUNNER_TEMP/maya-stall/consuming-repo"
+          echo "path=$RUNNER_TEMP/maya-stall/consuming-repo" >> "$GITHUB_OUTPUT"
+
+      - name: Consuming repo build and test proof
+        run: |
+          set -euo pipefail
+          consumer_repo="${{ steps.consumer_repo.outputs.path }}"
+          python3 -m venv "$RUNNER_TEMP/maya-stall/consumer-venv"
+          . "$RUNNER_TEMP/maya-stall/consumer-venv/bin/activate"
+          python -m pip install --upgrade pip
+          python -m pip install -e "$consumer_repo" pytest build
+          (cd "$consumer_repo" && python -m pytest -q)
+          python -m build "$consumer_repo" --wheel --outdir "$RUNNER_TEMP/maya-stall/consumer-dist"
+
+      - name: Recheck current PR or main head before Maya host use
+        uses: actions/github-script@v7
+        env:
+          EXPECTED_SHA: ${{ needs.evaluate.outputs.head_sha }}
+          PULL_REQUEST_NUMBER: ${{ needs.evaluate.outputs.pull_request_number }}
+          EXPECTED_BASE_SHA: ${{ needs.evaluate.outputs.base_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        with:
+          script: |
+            if (process.env.PULL_REQUEST_NUMBER) {
+              const response = await github.rest.pulls.get({ owner: context.repo.owner, repo: context.repo.repo, pull_number: Number(process.env.PULL_REQUEST_NUMBER) });
+              const pr = response.data;
+              if (pr.state !== "open" || pr.head.sha !== process.env.EXPECTED_SHA || pr.base.sha !== process.env.EXPECTED_BASE_SHA) {
+                core.setFailed("refusing stale or closed PR live proof");
+              }
+            } else {
+              const response = await github.rest.repos.getBranch({ owner: context.repo.owner, repo: context.repo.repo, branch: process.env.HEAD_BRANCH });
+              if (response.data.commit.sha !== process.env.EXPECTED_SHA) core.setFailed("refusing stale branch live proof");
+            }
+
+      - name: Run all live Maya smokes serially in one process
+        id: live_smoke
+        if: steps.live_config.outputs.state == 'present'
+        continue-on-error: true
+        working-directory: candidate
+        env:
+          MAYA_STALL_SMOKE_HOST_CONFIG: ${{ steps.live_config.outputs.path }}
+          MAYA_STALL_SMOKE_TARGET_PROFILE: ${{ vars.MAYA_STALL_LIVE_TARGET_PROFILE }}
+          MAYA_STALL_SMOKE_HOST: ${{ vars.MAYA_STALL_LIVE_HOST }}
+          MAYA_STALL_CONSUMING_REPO_SMOKE_DIR: ${{ steps.consumer_repo.outputs.path }}
+          MAYA_STALL_LIVE_PROOF_ARTIFACT_ENABLED: "true"
+          MAYA_STALL_LIVE_PROOF_ARTIFACT_DIR: ${{ env.LIVE_PROOF_ARTIFACT_DIR }}
+          MAYA_STALL_LIVE_PROOF_RETENTION_DAYS: ${{ env.LIVE_PROOF_RETENTION_DAYS }}
+          MAYA_STALL_LIVE_PROOF_PUBLIC_HOST_ALIAS: ${{ env.LIVE_PROOF_PUBLIC_HOST_ALIAS }}
+          MAYA_STALL_LIVE_PROOF_MEDIA_REVIEWED: "true"
+        run: |
+          set -euo pipefail
+          go test -json ./internal/cli -run '^(TestOptInRealVisualEvidenceSmoke|TestOptInRealDesktopControlModalSmoke|TestOptInRealSSHDoctorSmoke|TestOptInRealSSHConsumingRepoSmoke|TestOptInRealSSHRunSmoke|TestOptInRealRunScopedDesktopOpsSmoke)$' -count=1 -parallel=1 | tee artifacts/proof/live-smoke.jsonl
+
+      - name: Public artifact confidentiality gate
+        id: confidentiality
+        if: steps.live_smoke.outcome == 'success'
+        run: >-
+          node trusted/scripts/proof/assert-public-artifact-confidentiality.mjs
+          --path candidate/artifacts/live-visual-evidence-proof
+          --path candidate/artifacts/proof/proof-manifest.json
+
+      - name: Upload live Visual Evidence proof
+        id: upload_visual_proof
+        if: steps.live_smoke.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-visual-evidence-proof-${{ github.event.workflow_run.id }}
+          path: candidate/artifacts/live-visual-evidence-proof/
+          if-no-files-found: error
+          retention-days: ${{ env.LIVE_PROOF_RETENTION_DAYS }}
+
+      - name: Assert all live proof
+        if: always()
+        env:
+          HOST_CONFIG_STATE: ${{ steps.live_config.outputs.state }}
+          LIVE_OUTCOME: ${{ steps.live_smoke.outcome }}
+          CONFIDENTIALITY_OUTCOME: ${{ steps.confidentiality.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.upload_visual_proof.outcome }}
+        run: |
+          node - "$PROOF_MANIFEST" "${HOST_CONFIG_STATE:-missing}" "${LIVE_OUTCOME:-skipped}" "${CONFIDENTIALITY_OUTCOME:-skipped}" "${UPLOAD_OUTCOME:-skipped}" <<'NODE'
+          const fs = require("node:fs");
+          const [manifestPath, hostConfigState, liveOutcome, confidentialityOutcome, uploadOutcome] = process.argv.slice(2);
+          const smokePath = "candidate/artifacts/proof/live-smoke.jsonl";
+          const artifactManifest = "candidate/artifacts/live-visual-evidence-proof/proof-artifact-manifest.json";
+          const expected = new Set(["TestOptInRealVisualEvidenceSmoke", "TestOptInRealDesktopControlModalSmoke", "TestOptInRealSSHDoctorSmoke", "TestOptInRealSSHConsumingRepoSmoke", "TestOptInRealSSHRunSmoke", "TestOptInRealRunScopedDesktopOpsSmoke"]);
+          const passed = new Set();
+          const skipped = new Set();
+          if (fs.existsSync(smokePath)) for (const line of fs.readFileSync(smokePath, "utf8").split(/\r?\n/)) {
+            if (!line.trim()) continue;
+            const event = JSON.parse(line);
+            if (event.Action === "pass" && expected.has(event.Test)) passed.add(event.Test);
+            if (event.Action === "skip" && expected.has(event.Test)) skipped.add(event.Test);
+          }
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+          let status = "passed";
+          let detail = "all six live smoke tests passed in one process";
+          if (hostConfigState !== "present") [status, detail] = ["failed_missing_host_config", "live Maya host config missing"];
+          else if (liveOutcome !== "success") [status, detail] = [`failed_${liveOutcome}`, "live smoke command failed"];
+          else if (passed.size !== expected.size || skipped.size) [status, detail] = ["failed_missing_smoke_tests", "all six individual live smoke tests must pass without skips"];
+          else if (!fs.existsSync(artifactManifest)) [status, detail] = ["failed_missing_visual_evidence_proof_artifact", "live Visual Evidence proof artifact manifest missing"];
+          else if (confidentialityOutcome !== "success") [status, detail] = ["failed_visual_evidence_proof_confidentiality", "live Visual Evidence proof confidentiality failed"];
+          else if (uploadOutcome !== "success") [status, detail] = ["failed_visual_evidence_proof_upload", "live Visual Evidence proof upload failed"];
+          manifest.gates.live_maya = { ...manifest.gates.live_maya, status, detail, host_config_state: hostConfigState, fail_closed: true };
+          fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+          if (status !== "passed") {
+            console.error(detail);
+            process.exit(1);
+          }
+          NODE
+
+      - name: Upload final live Proof Manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-manifest-final-${{ github.event.workflow_run.id }}
+          path: candidate/artifacts/proof/proof-manifest.json
+          if-no-files-found: error
+          retention-days: 7
+
+  required:
+    name: Publish CI Required
+    if: always()
+    needs: [evaluate, live_maya]
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Publish stable required Check Run
+        uses: actions/github-script@v7
+        env:
+          HEAD_SHA: ${{ needs.evaluate.outputs.head_sha || github.event.workflow_run.head_sha }}
+          HOSTED_OK: ${{ needs.evaluate.outputs.hosted_ok }}
+          CURRENT_HEAD: ${{ needs.evaluate.outputs.current_head }}
+          LIVE_REQUIRED: ${{ needs.evaluate.outputs.live_maya_required }}
+          TRUSTED_HEAD: ${{ needs.evaluate.outputs.trusted_head }}
+          LIVE_RESULT: ${{ needs.live_maya.result }}
+        with:
+          script: |
+            let conclusion = "success";
+            let summary = "All required hosted checks passed; live Maya proof was not required.";
+            if (process.env.CURRENT_HEAD !== "true") {
+              conclusion = "stale";
+              summary = "This workflow run no longer targets the current PR or branch head.";
+            } else if (process.env.HOSTED_OK !== "true") {
+              conclusion = "failure";
+              summary = "One or more required hosted checks failed, skipped, or were cancelled.";
+            } else if (process.env.LIVE_REQUIRED !== "true" && process.env.LIVE_REQUIRED !== "false") {
+              conclusion = "failure";
+              summary = "Trusted live-proof classification did not complete.";
+            } else if (process.env.LIVE_REQUIRED === "true" && process.env.TRUSTED_HEAD !== "true") {
+              conclusion = "action_required";
+              summary = "Live-sensitive fork change requires promotion to a trusted same-repository ref; no secrets or self-hosted runner were exposed.";
+            } else if (process.env.LIVE_REQUIRED === "true" && process.env.LIVE_RESULT !== "success") {
+              conclusion = "failure";
+              summary = `Required live Maya proof result: ${process.env.LIVE_RESULT || "missing"}.`;
+            } else if (process.env.LIVE_REQUIRED === "true") {
+              summary = "All required hosted checks and real live Maya proof passed.";
+            }
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: "CI / Required",
+              head_sha: process.env.HEAD_SHA,
+              status: "completed",
+              conclusion,
+              output: { title: "Maya Stall CI required result", summary },
+              details_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
+            if (!["success", "stale"].includes(conclusion)) core.setFailed(summary);

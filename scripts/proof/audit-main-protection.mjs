@@ -21,7 +21,7 @@ if (findings.length > 0) {
   for (const finding of findings) console.error(`- ${finding}`);
   process.exit(1);
 }
-console.log("main protection audit passed: CI / Required pinned to GitHub Actions; admins enforced; force pushes and deletion disabled");
+console.log(`main protection audit passed: CI / Required pinned to app ${appId}; admins enforced; force pushes and deletion disabled`);
 
 function parseArgs(argv) {
   const parsed = {};

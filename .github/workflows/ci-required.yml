@@ -46,7 +46,22 @@ jobs:
           script: |
             const fs = require("node:fs");
             const run = context.payload.workflow_run;
-            const pull = run.pull_requests?.[0];
+            let pull = run.pull_requests?.[0];
+            if (!pull && run.event === "pull_request") {
+              const associated = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: run.head_sha,
+              });
+              pull = associated.data.find((candidate) =>
+                candidate.base.repo.full_name === `${context.repo.owner}/${context.repo.repo}` &&
+                candidate.head.sha === run.head_sha
+              );
+              if (!pull) {
+                core.setFailed("trusted dispatcher could not associate the fork head with a pull request");
+                return;
+              }
+            }
             let baseSha;
             let headSha = run.head_sha;
             let pullNumber = "";
@@ -283,10 +298,37 @@ jobs:
       - name: Public artifact confidentiality gate
         id: confidentiality
         if: steps.live_smoke.outcome == 'success'
-        run: >-
-          node trusted/scripts/proof/assert-public-artifact-confidentiality.mjs
-          --path candidate/artifacts/live-visual-evidence-proof
-          --path candidate/artifacts/proof/proof-manifest.json
+        run: |
+          node - <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const root = "candidate/artifacts/live-visual-evidence-proof";
+          const allowed = new Set([
+            "evidence-metadata.json",
+            "media-review.json",
+            "proof-artifact-manifest.json",
+            "recordings/recording.mp4",
+            "screenshots/desktop-screenshot.png",
+          ]);
+          const found = [];
+          function walk(dir) {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const full = path.join(dir, entry.name);
+              if (entry.isDirectory()) walk(full);
+              else found.push(path.relative(root, full).replaceAll(path.sep, "/"));
+            }
+          }
+          walk(root);
+          const unexpected = found.filter((file) => !allowed.has(file));
+          const missing = [...allowed].filter((file) => !found.includes(file));
+          if (unexpected.length || missing.length) {
+            console.error("public proof artifact file allowlist failed");
+            process.exit(1);
+          }
+          NODE
+          node trusted/scripts/proof/assert-public-artifact-confidentiality.mjs \
+            --path candidate/artifacts/live-visual-evidence-proof \
+            --path candidate/artifacts/proof/proof-manifest.json
 
       - name: Upload live Visual Evidence proof
         id: upload_visual_proof
@@ -367,7 +409,7 @@ jobs:
             let conclusion = "success";
             let summary = "All required hosted checks passed; live Maya proof was not required.";
             if (process.env.CURRENT_HEAD !== "true") {
-              conclusion = "stale";
+              conclusion = "neutral";
               summary = "This workflow run no longer targets the current PR or branch head.";
             } else if (process.env.HOSTED_OK !== "true") {
               conclusion = "failure";
@@ -394,4 +436,4 @@ jobs:
               output: { title: "Maya Stall CI required result", summary },
               details_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
             });
-            if (!["success", "stale"].includes(conclusion)) core.setFailed(summary);
+            if (!["success", "neutral"].includes(conclusion)) core.setFailed(summary);

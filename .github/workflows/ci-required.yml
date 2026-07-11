@@ -46,6 +46,15 @@ jobs:
           script: |
             const fs = require("node:fs");
             const run = context.payload.workflow_run;
+            const sourceRun = await github.rest.actions.getWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: run.id,
+            });
+            if (sourceRun.data.path !== ".github/workflows/ci.yml" || !["pull_request", "push"].includes(sourceRun.data.event)) {
+              core.setFailed("refusing an unexpected hosted workflow path or event");
+              return;
+            }
             let pull = run.pull_requests?.[0];
             if (!pull && run.event === "pull_request") {
               const associated = await github.rest.repos.listPullRequestsAssociatedWithCommit({
@@ -290,6 +299,8 @@ jobs:
           MAYA_STALL_LIVE_PROOF_ARTIFACT_DIR: ${{ env.LIVE_PROOF_ARTIFACT_DIR }}
           MAYA_STALL_LIVE_PROOF_RETENTION_DAYS: ${{ env.LIVE_PROOF_RETENTION_DAYS }}
           MAYA_STALL_LIVE_PROOF_PUBLIC_HOST_ALIAS: ${{ env.LIVE_PROOF_PUBLIC_HOST_ALIAS }}
+          # Approval of the protected environment attests this is the controlled public-proof desktop.
+          # A trusted post-capture allowlist and confidentiality gate still run before publication.
           MAYA_STALL_LIVE_PROOF_MEDIA_REVIEWED: "true"
         run: |
           set -euo pipefail

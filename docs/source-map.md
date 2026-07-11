@@ -84,5 +84,6 @@ descriptive; code is the source-backed check when behavior claims disagree.
 - Changed-path live Maya proof policy: `proof/live-maya-policy.json`
 - Proof Manifest selector and fail-closed live assertion:
   `scripts/proof/select-proof.mjs`, `scripts/proof/assert-live-proof.mjs`
-- Proof workflow: `.github/workflows/proof.yml`
+- Restricted hosted workflow: `.github/workflows/ci-hosted.yml`
+- Trusted classification, live proof, and required-result workflow: `.github/workflows/ci-required.yml`
 - PR closeout and merge proof docs: `docs/agents/pr-merge.md`

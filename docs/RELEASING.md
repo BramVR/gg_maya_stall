@@ -48,10 +48,9 @@ enough.
 
 Before tagging, verify the exact release head has green GitHub Actions:
 
-- Lint: `.github/workflows/golangci-lint.yml`.
-- Proof: `.github/workflows/proof.yml`.
+- CI: `.github/workflows/ci-required.yml`; `CI / Required` is the stable required check.
 
-If the proof policy requires live Maya proof, the protected Live Maya Gate must
+If the proof policy requires live Maya proof, the protected Live Maya Proof job must
 pass against a configured owned Windows Maya Host. Skipped, missing, fake-only,
 or fork-withheld live proof blocks the release.
 

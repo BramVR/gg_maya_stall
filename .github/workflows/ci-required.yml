@@ -40,6 +40,15 @@ jobs:
         with:
           node-version: 22
 
+      - name: Download trusted push context
+        if: github.event.workflow_run.event == 'push'
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-source-context
+          path: artifacts/source
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+
       - name: Resolve trusted run context and changed files
         id: context
         uses: actions/github-script@v7
@@ -54,6 +63,10 @@ jobs:
             });
             if (sourceRun.data.path !== ".github/workflows/ci.yml" || !["pull_request", "push"].includes(sourceRun.data.event)) {
               core.setFailed("refusing an unexpected hosted workflow path or event");
+              return;
+            }
+            if (sourceRun.data.event === "push" && (sourceRun.data.head_branch !== context.payload.repository.default_branch || sourceRun.data.head_repository.full_name !== `${context.repo.owner}/${context.repo.repo}`)) {
+              core.setFailed("refusing a push run outside the trusted default branch");
               return;
             }
             let pull = run.pull_requests?.[0];
@@ -93,12 +106,12 @@ jobs:
               if (sourceBaseSha && pr.base.sha !== sourceBaseSha) currentHead = false;
               if (sourceBaseSha) baseSha = sourceBaseSha;
             } else {
-              const commit = await github.rest.repos.getCommit({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                ref: headSha,
-              });
-              baseSha = commit.data.parents?.[0]?.sha;
+              const pushContext = JSON.parse(fs.readFileSync("artifacts/source/context.json", "utf8"));
+              if (pushContext.head_sha !== headSha) {
+                core.setFailed("trusted push context does not match the source run head");
+                return;
+              }
+              baseSha = pushContext.base_sha;
               const branch = await github.rest.repos.getBranch({
                 owner: context.repo.owner,
                 repo: context.repo.repo,

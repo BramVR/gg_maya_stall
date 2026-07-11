@@ -71,7 +71,8 @@ credentials, exposes no secrets or self-hosted runner, and disables tool caches.
 
 After that run completes, `.github/workflows/ci-required.yml` runs from its
 trusted default-branch copy on `workflow_run`. It verifies the exact hosted job
-set, classifies the immutable PR diff, and owns one ref concurrency group with
+set (rejecting missing, duplicate, or extra job names), classifies the immutable
+PR diff, and owns one ref concurrency group with
 `cancel-in-progress: true`. A new push cancels obsolete classification and live
 work. Before secrets are decoded and again immediately before the Maya smoke,
 the live job asks GitHub whether its exact SHA is still the current PR or `main`

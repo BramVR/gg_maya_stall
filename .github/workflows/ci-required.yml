@@ -1,176 +1,163 @@
-name: CI Required Dispatcher
+name: CI
 
 on:
-  workflow_run:
-    workflows:
-      - CI Hosted
-    types:
-      - completed
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+  push:
+    branches: [main]
 
 permissions:
-  actions: read
   contents: read
   pull-requests: read
 
 concurrency:
-  group: ci-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  group: ci-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
   evaluate:
-    name: Evaluate Hosted Proof
+    name: Classify Proof
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       base_sha: ${{ steps.context.outputs.base_sha }}
       head_sha: ${{ steps.context.outputs.head_sha }}
       pull_request_number: ${{ steps.context.outputs.pull_request_number }}
+      head_branch: ${{ steps.context.outputs.head_branch }}
       trusted_head: ${{ steps.context.outputs.trusted_head }}
       current_head: ${{ steps.context.outputs.current_head }}
-      hosted_ok: ${{ steps.context.outputs.hosted_ok }}
       live_maya_required: ${{ steps.select.outputs.live_maya_required }}
     steps:
       - name: Checkout trusted default branch
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
-
-      - name: Download trusted push context
-        if: github.event.workflow_run.event == 'push'
-        uses: actions/download-artifact@v4
-        with:
-          name: ci-source-context
-          path: artifacts/source
-          github-token: ${{ github.token }}
-          run-id: ${{ github.event.workflow_run.id }}
-
-      - name: Resolve trusted run context and changed files
+      - name: Resolve trusted context
         id: context
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require("node:fs");
-            const run = context.payload.workflow_run;
-            const sourceRun = await github.rest.actions.getWorkflowRun({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              run_id: run.id,
-            });
-            if (sourceRun.data.path !== ".github/workflows/ci.yml" || !["pull_request", "push"].includes(sourceRun.data.event)) {
-              core.setFailed("refusing an unexpected hosted workflow path or event");
-              return;
-            }
-            if (sourceRun.data.event === "push" && (sourceRun.data.head_branch !== context.payload.repository.default_branch || sourceRun.data.head_repository.full_name !== `${context.repo.owner}/${context.repo.repo}`)) {
-              core.setFailed("refusing a push run outside the trusted default branch");
-              return;
-            }
-            let pull = run.pull_requests?.[0];
-            const sourceBaseSha = pull?.base?.sha || "";
-            if (!pull && run.event === "pull_request") {
-              const associated = await github.rest.repos.listPullRequestsAssociatedWithCommit({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                commit_sha: run.head_sha,
-              });
-              pull = associated.data.find((candidate) =>
-                candidate.base.repo.full_name === `${context.repo.owner}/${context.repo.repo}` &&
-                candidate.head.sha === run.head_sha
-              );
-              if (!pull) {
-                core.setFailed("trusted dispatcher could not associate the fork head with a pull request");
-                return;
-              }
-            }
-            let baseSha;
-            let headSha = run.head_sha;
+            const eventPull = context.payload.pull_request;
+            let baseSha = eventPull?.base?.sha || context.payload.before;
+            let headSha = eventPull?.head?.sha || context.sha;
             let pullNumber = "";
+            let headBranch = context.ref.replace("refs/heads/", "");
             let trustedHead = true;
             let currentHead = true;
-            if (pull) {
-              const response = await github.rest.pulls.get({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: pull.number,
-              });
+            const paths = [];
+            if (eventPull) {
+              const response = await github.rest.pulls.get({ owner: context.repo.owner, repo: context.repo.repo, pull_number: eventPull.number });
               const pr = response.data;
-              baseSha = pr.base.sha;
-              headSha = run.head_sha;
               pullNumber = String(pr.number);
+              headBranch = pr.head.ref;
               trustedHead = pr.head.repo?.full_name === `${context.repo.owner}/${context.repo.repo}`;
-              currentHead = pr.state === "open" && pr.head.sha === run.head_sha;
-              if (sourceBaseSha && pr.base.sha !== sourceBaseSha) currentHead = false;
-              if (sourceBaseSha) baseSha = sourceBaseSha;
-            } else {
-              const pushContext = JSON.parse(fs.readFileSync("artifacts/source/context.json", "utf8"));
-              if (pushContext.head_sha !== headSha) {
-                core.setFailed("trusted push context does not match the source run head");
+              currentHead = pr.state === "open" && pr.head.sha === headSha && pr.base.sha === baseSha;
+              const comparison = await github.rest.repos.compareCommitsWithBasehead({ owner: context.repo.owner, repo: context.repo.repo, basehead: `${baseSha}...${headSha}`, per_page: 100 });
+              if ((comparison.data.files?.length || 0) >= 300) {
+                core.setFailed("changed-file comparison reached the API limit; refusing incomplete classification");
                 return;
               }
-              baseSha = pushContext.base_sha;
-              const branch = await github.rest.repos.getBranch({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                branch: run.head_branch,
-              });
+              for (const file of comparison.data.files || []) {
+                if (file.previous_filename) paths.push(file.previous_filename);
+                paths.push(file.filename);
+              }
+            } else {
+              const branch = await github.rest.repos.getBranch({ owner: context.repo.owner, repo: context.repo.repo, branch: headBranch });
               currentHead = branch.data.commit.sha === headSha;
             }
-            if (!/^[0-9a-f]{40}$/i.test(baseSha || "") || /^0{40}$/.test(baseSha)) {
-              core.setFailed("trusted dispatcher could not resolve a valid non-zero base SHA");
+            if (!/^[0-9a-f]{40}$/i.test(baseSha || "") || /^0{40}$/.test(baseSha) || !/^[0-9a-f]{40}$/i.test(headSha || "") || /^0{40}$/.test(headSha)) {
+              core.setFailed("trusted CI context requires valid non-zero base and head SHAs");
               return;
-            }
-            if (!/^[0-9a-f]{40}$/i.test(headSha || "") || /^0{40}$/.test(headSha)) {
-              core.setFailed("trusted dispatcher could not resolve a valid non-zero head SHA");
-              return;
-            }
-            const comparison = await github.rest.repos.compareCommitsWithBasehead({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              basehead: `${baseSha}...${headSha}`,
-              per_page: 100,
-            });
-            if ((comparison.data.files?.length || 0) >= 300) {
-              core.setFailed("changed-file comparison reached the API page limit; refusing incomplete classification");
-              return;
-            }
-            const paths = [];
-            for (const file of comparison.data.files || []) {
-              if (file.previous_filename) paths.push(file.previous_filename);
-              paths.push(file.filename);
             }
             fs.mkdirSync("artifacts/proof", { recursive: true });
-            fs.writeFileSync("artifacts/proof/changed-files.txt", `${[...new Set(paths)].join("\n")}\n`);
+            if (eventPull) fs.writeFileSync("artifacts/proof/changed-files.txt", `${[...new Set(paths)].join("\n")}\n`);
             core.setOutput("base_sha", baseSha);
             core.setOutput("head_sha", headSha);
             core.setOutput("pull_request_number", pullNumber);
+            core.setOutput("head_branch", headBranch);
             core.setOutput("trusted_head", String(trustedHead));
             core.setOutput("current_head", String(currentHead));
-            core.setOutput("hosted_ok", String(run.conclusion === "success"));
-
-      - name: Classify with trusted policy and selector
+      - name: Record exact push changed files
+        if: github.event_name == 'push'
+        env:
+          BASE_SHA: ${{ steps.context.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.context.outputs.head_sha }}
+        run: git diff --name-status --diff-filter=ACDMRT "$BASE_SHA" "$HEAD_SHA" > artifacts/proof/changed-files.txt
+      - name: Classify with trusted policy
         id: select
-        run: >-
-          node scripts/proof/select-proof.mjs
-          --changed-files artifacts/proof/changed-files.txt
-          --output artifacts/proof/proof-manifest.json
-
+        run: node scripts/proof/select-proof.mjs --changed-files artifacts/proof/changed-files.txt --output artifacts/proof/proof-manifest.json
       - name: Upload trusted classification
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: trusted-proof-classification-${{ github.event.workflow_run.id }}
+          name: trusted-proof-classification-${{ github.run_id }}
           path: artifacts/proof/
           if-no-files-found: error
           retention-days: 7
 
+  go_tests:
+    name: Go Tests
+    needs: evaluate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ needs.evaluate.outputs.head_sha }}", persist-credentials: false}
+      - uses: actions/setup-go@v5
+        with: {go-version-file: go.mod}
+      - run: go test -race ./...
+
+  lint:
+    name: Lint
+    needs: evaluate
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ needs.evaluate.outputs.head_sha }}", fetch-depth: 0, persist-credentials: false}
+      - uses: actions/setup-go@v5
+        with: {go-version-file: go.mod}
+      - uses: golangci/golangci-lint-action@v9.3.0
+        with: {version: v2.12.2}
+
+  docs:
+    name: Documentation
+    needs: evaluate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ needs.evaluate.outputs.head_sha }}", persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: 22}
+      - run: scripts/check-docs.sh
+
+  proof_scripts:
+    name: Proof Policy And Helpers
+    needs: evaluate
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ needs.evaluate.outputs.head_sha }}", persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: 22}
+      - uses: actions/setup-go@v5
+        with: {go-version-file: go.mod}
+      - run: |
+          node --test scripts/proof/*.test.mjs scripts/windows/*.test.mjs
+          node scripts/proof/audit-live-policy.mjs
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/*.yml
+
   live_maya:
     name: Live Maya Proof
-    needs: evaluate
-    if: needs.evaluate.outputs.hosted_ok == 'true' && needs.evaluate.outputs.current_head == 'true' && needs.evaluate.outputs.live_maya_required == 'true' && needs.evaluate.outputs.trusted_head == 'true'
+    needs: [evaluate, go_tests, lint, docs, proof_scripts]
+    if: needs.evaluate.outputs.current_head == 'true' && needs.evaluate.outputs.live_maya_required == 'true' && needs.evaluate.outputs.trusted_head == 'true'
     runs-on: [self-hosted, maya-live-proof]
     environment: maya-live-proof
     timeout-minutes: 25
@@ -205,7 +192,7 @@ jobs:
           EXPECTED_SHA: ${{ needs.evaluate.outputs.head_sha }}
           PULL_REQUEST_NUMBER: ${{ needs.evaluate.outputs.pull_request_number }}
           EXPECTED_BASE_SHA: ${{ needs.evaluate.outputs.base_sha }}
-          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_BRANCH: ${{ needs.evaluate.outputs.head_branch }}
         with:
           script: |
             if (process.env.PULL_REQUEST_NUMBER) {
@@ -239,7 +226,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p candidate/artifacts/proof
-          git -C candidate diff --name-status --diff-filter=ACDMRT "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/live-changed-files.txt"
+          if [ -n "${{ needs.evaluate.outputs.pull_request_number }}" ]; then
+            git -C candidate diff --name-status --diff-filter=ACDMRT "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/live-changed-files.txt"
+          else
+            git -C candidate diff --name-status --diff-filter=ACDMRT "$BASE_SHA" "$HEAD_SHA" > "$RUNNER_TEMP/live-changed-files.txt"
+          fi
           node trusted/scripts/proof/select-proof.mjs --changed-files "$RUNNER_TEMP/live-changed-files.txt" --output "$PROOF_MANIFEST"
           node trusted/scripts/proof/mark-gate.mjs --manifest "$PROOF_MANIFEST" --gate local --status passed --command "go test -race ./..."
           node trusted/scripts/proof/mark-gate.mjs --manifest "$PROOF_MANIFEST" --gate docs --status passed --command "scripts/check-docs.sh"
@@ -290,7 +281,7 @@ jobs:
           EXPECTED_SHA: ${{ needs.evaluate.outputs.head_sha }}
           PULL_REQUEST_NUMBER: ${{ needs.evaluate.outputs.pull_request_number }}
           EXPECTED_BASE_SHA: ${{ needs.evaluate.outputs.base_sha }}
-          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_BRANCH: ${{ needs.evaluate.outputs.head_branch }}
         with:
           script: |
             if (process.env.PULL_REQUEST_NUMBER) {
@@ -365,7 +356,7 @@ jobs:
         if: steps.live_smoke.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: live-visual-evidence-proof-${{ github.event.workflow_run.id }}
+          name: live-visual-evidence-proof-${{ github.run_id }}
           path: candidate/artifacts/live-visual-evidence-proof/
           if-no-files-found: error
           retention-days: ${{ env.LIVE_PROOF_RETENTION_DAYS }}
@@ -413,7 +404,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: proof-manifest-final-${{ github.event.workflow_run.id }}
+          name: proof-manifest-final-${{ github.run_id }}
           path: candidate/artifacts/proof/proof-manifest.json
           if-no-files-found: error
           retention-days: 7
@@ -421,7 +412,7 @@ jobs:
   required:
     name: Publish CI Required
     if: always()
-    needs: [evaluate, live_maya]
+    needs: [evaluate, go_tests, lint, docs, proof_scripts, live_maya]
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -431,8 +422,8 @@ jobs:
       - name: Publish stable required Check Run
         uses: actions/github-script@v7
         env:
-          HEAD_SHA: ${{ needs.evaluate.outputs.head_sha || github.event.workflow_run.head_sha }}
-          HOSTED_OK: ${{ needs.evaluate.outputs.hosted_ok }}
+          HEAD_SHA: ${{ needs.evaluate.outputs.head_sha || github.sha }}
+          HOSTED_OK: ${{ needs.go_tests.result == 'success' && needs.lint.result == 'success' && needs.docs.result == 'success' && needs.proof_scripts.result == 'success' }}
           CURRENT_HEAD: ${{ needs.evaluate.outputs.current_head }}
           LIVE_REQUIRED: ${{ needs.evaluate.outputs.live_maya_required }}
           TRUSTED_HEAD: ${{ needs.evaluate.outputs.trusted_head }}

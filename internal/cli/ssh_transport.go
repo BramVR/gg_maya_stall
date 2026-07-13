@@ -331,12 +331,6 @@ func validateTrustedPluginArtifactsRoot(host mayaHostConfig) error {
 	if normalizedRoot == "." || strings.Trim(normalizedRoot, "/") == "" {
 		return fmt.Errorf("trustedPluginArtifactsRoot must resolve to a non-root directory")
 	}
-	if hasWin32TrimmedPathComponent(host.TrustedPluginArtifactsRoot) {
-		return fmt.Errorf("trustedPluginArtifactsRoot must not contain Windows path components ending in a space or period")
-	}
-	if hasInvalidWin32PathComponent(host.TrustedPluginArtifactsRoot) {
-		return fmt.Errorf("trustedPluginArtifactsRoot contains an invalid Windows path component")
-	}
 	trustedRoot, trustedVolume, absolute, traversesRoot := canonicalWindowsPathForComparison(root)
 	if traversesRoot {
 		return fmt.Errorf("trustedPluginArtifactsRoot must not traverse above its Windows volume root")
@@ -344,21 +338,27 @@ func validateTrustedPluginArtifactsRoot(host mayaHostConfig) error {
 	if !absolute {
 		return fmt.Errorf("trustedPluginArtifactsRoot must be an absolute Windows path")
 	}
+	if hasWin32TrimmedPathComponent(host.TrustedPluginArtifactsRoot) {
+		return fmt.Errorf("trustedPluginArtifactsRoot must not contain Windows path components ending in a space or period")
+	}
+	if hasInvalidWin32PathComponent(host.TrustedPluginArtifactsRoot) {
+		return fmt.Errorf("trustedPluginArtifactsRoot contains an invalid Windows path component")
+	}
 	if trustedRoot == trustedVolume {
 		return fmt.Errorf("trustedPluginArtifactsRoot must resolve to a non-root directory")
 	}
 	if strings.TrimSpace(host.WorkRoot) == "" {
 		return nil
 	}
+	workRoot, _, workRootAbsolute, workRootTraversesRoot := canonicalWindowsPathForComparison(host.WorkRoot)
+	if workRootTraversesRoot || !workRootAbsolute {
+		return fmt.Errorf("workRoot must be an absolute Windows path without above-root traversal when trustedPluginArtifactsRoot is configured")
+	}
 	if hasWin32TrimmedPathComponent(host.WorkRoot) {
 		return fmt.Errorf("workRoot must not contain Windows path components ending in a space or period when trustedPluginArtifactsRoot is configured")
 	}
 	if hasInvalidWin32PathComponent(host.WorkRoot) {
 		return fmt.Errorf("workRoot contains an invalid Windows path component when trustedPluginArtifactsRoot is configured")
-	}
-	workRoot, _, workRootAbsolute, workRootTraversesRoot := canonicalWindowsPathForComparison(host.WorkRoot)
-	if workRootTraversesRoot || !workRootAbsolute {
-		return fmt.Errorf("workRoot must be an absolute Windows path without above-root traversal when trustedPluginArtifactsRoot is configured")
 	}
 	runsRoot := remoteJoin(workRoot, "runs")
 	if trustedRoot == workRoot || trustedRoot == runsRoot || strings.HasPrefix(trustedRoot, runsRoot+"/") {

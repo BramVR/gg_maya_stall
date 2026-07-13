@@ -261,7 +261,25 @@ func verifyRemoteHostLockForRun(host mayaHostConfig, runID string) error {
 	if result.Error != "" {
 		return remoteHostLockError(result.Error)
 	}
-	if result.KeptRun != runID && result.ActiveRun != runID {
+	if result.KeptRun != runID && (result.ActiveRun != runID || result.LeaseExpired) {
+		return fmt.Errorf("%w on Maya Host", errHostLockOwnershipChanged)
+	}
+	return nil
+}
+
+func verifyKeptRemoteHostLockForRun(host mayaHostConfig, runID string) error {
+	lockPath, err := remoteHostLockPath(host)
+	if err != nil {
+		return err
+	}
+	result, err := runRemoteHostLockScript(host, remoteHostLockStateScript(lockPath))
+	if err != nil {
+		return err
+	}
+	if result.Error != "" {
+		return remoteHostLockError(result.Error)
+	}
+	if result.KeptRun != runID {
 		return fmt.Errorf("%w on Maya Host", errHostLockOwnershipChanged)
 	}
 	return nil

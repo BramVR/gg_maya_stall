@@ -171,7 +171,7 @@ func stopRun(repoDir string, runID string) error {
 	}
 	if record.HostLockAuthoritative {
 		if record.StopPhase == "" {
-			if err := verifyHostSideLockForRun(record.HostConfig, runID); err != nil {
+			if err := verifyKeptHostSideLockForRun(record.HostConfig, runID); err != nil {
 				return err
 			}
 		}
@@ -371,7 +371,7 @@ func readKeptRunState(repoDir string, runID string) (keptRun, error) {
 		return keptRun{}, err
 	}
 	if record.HostLockAuthoritative {
-		if err := verifyHostSideLockForRun(record.HostConfig, runID); err != nil {
+		if err := verifyKeptHostSideLockForRun(record.HostConfig, runID); err != nil {
 			return keptRun{}, err
 		}
 	}

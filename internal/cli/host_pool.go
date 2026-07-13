@@ -630,24 +630,41 @@ func releaseHostSideLock(host mayaHostConfig, runID string) error {
 func verifyHostSideLockForRun(host mayaHostConfig, runID string) error {
 	if host.usesRealSSH() {
 		if lockDir, ok := fakeSSHHostSideLockDir(host); ok {
-			return verifyHostSideLockForRunAtDir(lockDir, "host", runID)
+			return verifyHostSideLockForRunAtDir(lockDir, "host", runID, false)
 		}
 		return verifyRemoteHostLockForRun(host, runID)
 	}
 	if lockDir, ok := fakeHostSideLockDir(host); ok {
-		return verifyHostSideLockForRunAtDir(lockDir, host.ID, runID)
+		return verifyHostSideLockForRunAtDir(lockDir, host.ID, runID, false)
 	}
 	return nil
 }
 
-func verifyHostSideLockForRunAtDir(lockDir string, hostID string, runID string) error {
+func verifyKeptHostSideLockForRun(host mayaHostConfig, runID string) error {
+	if host.usesRealSSH() {
+		if lockDir, ok := fakeSSHHostSideLockDir(host); ok {
+			return verifyHostSideLockForRunAtDir(lockDir, "host", runID, true)
+		}
+		return verifyKeptRemoteHostLockForRun(host, runID)
+	}
+	if lockDir, ok := fakeHostSideLockDir(host); ok {
+		return verifyHostSideLockForRunAtDir(lockDir, host.ID, runID, true)
+	}
+	return nil
+}
+
+func verifyHostSideLockForRunAtDir(lockDir string, hostID string, runID string, requireKept bool) error {
 	return withLocalHostSideMutex(lockDir, hostID, func() error {
-		content, err := os.ReadFile(filepath.Join(lockDir, hostID+".lock"))
+		lockPath := filepath.Join(lockDir, hostID+".lock")
+		content, err := os.ReadFile(lockPath)
 		if err != nil {
 			return err
 		}
 		owner := parseHostLockOwner(string(content))
-		if owner.ActiveRun != runID && owner.KeptRun != runID {
+		if owner.KeptRun == runID {
+			return nil
+		}
+		if requireKept || owner.ActiveRun != runID || isStaleHostSideOwner(owner) {
 			return fmt.Errorf("%w for %s", errHostLockOwnershipChanged, hostID)
 		}
 		return nil

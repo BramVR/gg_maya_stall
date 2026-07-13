@@ -438,6 +438,33 @@ func TestAttachRunScreenshotUsesAuthoritativeHostLockWithoutLocalMirror(t *testi
 	}
 }
 
+func TestAttachRunScreenshotRejectsExpiredAuthoritativeActiveLease(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostRoot := t.TempDir()
+	hostConfigPath := writeSingleHealthyHostConfigWithWorkRoot(t, dir, hostRoot)
+	runtime := defaultRunRuntime()
+	runtime.Broker = fakeSessionBroker{Result: ScenarioResult{Status: "failed", Summary: "keep for inspection"}}
+	var stdout, stderr bytes.Buffer
+
+	code := RunWithRuntime([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--keep-on-failure", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("kept run exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+	hostLockPath := filepath.Join(hostRoot, "state", "locks", "hosts", "alpha.lock")
+	mustWriteFile(t, hostLockPath, fmt.Sprintf("host: alpha\nlockToken: expired-owner\nactiveRun: %s\nleaseExpiresAt: %s\nleaseDurationSeconds: 30\n", runID, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)))
+	if err := os.Remove(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")); err != nil {
+		t.Fatalf("remove compatibility Host Lock mirror: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"attach", runID, "screenshot"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("expired active attach screenshot exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+}
+
 func TestAttachRunControlClickRequiresOwnedHostLock(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	var stdout, stderr bytes.Buffer
@@ -7272,6 +7299,32 @@ func TestStopReleasesKeptHostSideLock(t *testing.T) {
 	}
 	if _, err := os.Stat(hostLockPath); !os.IsNotExist(err) {
 		t.Fatalf("host-side Host Lock after stop = %v, want missing", err)
+	}
+}
+
+func TestStopRejectsAuthoritativeActiveHostLock(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostRoot := t.TempDir()
+	hostConfigPath := writeSingleHealthyHostConfigWithWorkRoot(t, dir, hostRoot)
+	runtime := defaultRunRuntime()
+	runtime.Broker = fakeSessionBroker{Result: ScenarioResult{Status: "failed", Summary: "keep for inspection"}}
+	var stdout, stderr bytes.Buffer
+	code := RunWithRuntime([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--keep-on-failure", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("kept run exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+	hostLockPath := filepath.Join(hostRoot, "state", "locks", "hosts", "alpha.lock")
+	mustWriteFile(t, hostLockPath, fmt.Sprintf("host: alpha\nlockToken: active-owner\nactiveRun: %s\nleaseExpiresAt: %s\nleaseDurationSeconds: 30\n", runID, time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)))
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"stop", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("active authoritative stop exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(hostLockPath); err != nil {
+		t.Fatalf("active authoritative Host Lock changed: %v", err)
 	}
 }
 

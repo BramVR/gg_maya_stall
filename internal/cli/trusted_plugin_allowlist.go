@@ -559,7 +559,15 @@ $program = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$
 
 func trustedPluginMayaAppDir(host mayaHostConfig) string {
 	if host.Broker.isGGMayaSessiond() && strings.TrimSpace(host.Broker.StateDir) != "" {
-		return remoteJoin(host.Broker.StateDir, "maya_app")
+		stateDir := strings.TrimSpace(host.Broker.StateDir)
+		_, _, absolute, traversesRoot := canonicalWindowsPathForComparison(stateDir)
+		if absolute && !traversesRoot {
+			return remoteJoin(stateDir, "maya_app")
+		}
+		if repo := strings.TrimSpace(host.Broker.Repo); repo != "" {
+			return remoteJoin(repo, stateDir, "maya_app")
+		}
+		return remoteJoin(stateDir, "maya_app")
 	}
 	return ""
 }

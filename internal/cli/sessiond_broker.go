@@ -612,6 +612,10 @@ func isKnownSessiondScriptExecuteResponseError(err error) bool {
 		strings.Contains(message, "expecting value: line 1 column 1 (char 0)")
 }
 
+func (ggMayaSessiondBroker) CaptureVisualEvidenceAfterRecoveredScenario(err error) bool {
+	return isKnownSessiondScriptExecuteResponseError(err)
+}
+
 func (broker ggMayaSessiondBroker) recoverSessionBroker(reason string) error {
 	taskName := sessiondRecoveryTaskName(broker.host)
 	if _, err := runSSHCommandOutput(broker.host, encodedPowerShellCommand(sessiondRecoveryScript(broker.host, taskName, reason)), sessiondCommandTimeout+2*time.Minute); err != nil {

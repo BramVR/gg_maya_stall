@@ -82,6 +82,10 @@ type recordingCapturer interface {
 	CaptureRecording(runContext, recordingRequest) (visualEvidenceArtifact, error)
 }
 
+type recoveredScenarioVisualEvidencePolicy interface {
+	CaptureVisualEvidenceAfterRecoveredScenario(error) bool
+}
+
 type desktopClicker interface {
 	ClickDesktop(desktopClickRequest) error
 }

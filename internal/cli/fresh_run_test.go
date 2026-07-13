@@ -357,8 +357,9 @@ scenarios:
 `)
 	runtime := defaultRunRuntime()
 	runtime.Broker = brokerFailureAfterScenarioCompletion{
-		result:  `{"status":"passed","summary":"Scenario completed before broker response failed"}` + "\n",
-		message: "Error calling tool 'script.execute': Expecting value: line 1 column 1 (char 0)",
+		result:                             `{"status":"passed","summary":"Scenario completed before broker response failed"}` + "\n",
+		message:                            "adapter-approved response failure",
+		captureVisualEvidenceAfterRecovery: true,
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -1141,9 +1142,10 @@ func (failingScreenshotSessionBroker) CaptureScreenshot(context runContext, requ
 
 type brokerFailureAfterScenarioCompletion struct {
 	fakeSessionLifecycle
-	result  string
-	files   map[string]string
-	message string
+	result                             string
+	files                              map[string]string
+	message                            string
+	captureVisualEvidenceAfterRecovery bool
 }
 
 func (broker brokerFailureAfterScenarioCompletion) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
@@ -1175,6 +1177,10 @@ func (broker brokerFailureAfterScenarioCompletion) RunScenario(context runContex
 
 func (brokerFailureAfterScenarioCompletion) CaptureScreenshot(context runContext, request screenshotRequest) (visualEvidenceArtifact, error) {
 	return fakeSessionBroker{}.CaptureScreenshot(context, request)
+}
+
+func (broker brokerFailureAfterScenarioCompletion) CaptureVisualEvidenceAfterRecoveredScenario(error) bool {
+	return broker.captureVisualEvidenceAfterRecovery
 }
 
 func requireOutputArtifact(t *testing.T, bundle evidenceBundle, path string) {

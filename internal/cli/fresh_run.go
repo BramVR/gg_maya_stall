@@ -300,7 +300,10 @@ func (run *freshRunLifecycle) recoverCompletedScenarioAfterBrokerFailure(runErr 
 	run.result = resultDocument.Result
 	run.brokerResult = ScenarioResult{Status: resultStatusPassed, Summary: "Scenario completed before broker failure"}
 	run.skipSettleArtifactCollection = true
-	run.skipSettleVisualEvidence = !isKnownSessiondScriptExecuteResponseError(runErr)
+	run.skipSettleVisualEvidence = true
+	if policy, ok := run.runtime.Broker.(recoveredScenarioVisualEvidencePolicy); ok {
+		run.skipSettleVisualEvidence = !policy.CaptureVisualEvidenceAfterRecoveredScenario(runErr)
+	}
 	return true, appendEvent(run.context.EventsPath, "run.recovered-after-broker-failure", runErr.Error())
 }
 

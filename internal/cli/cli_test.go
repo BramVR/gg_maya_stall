@@ -2311,6 +2311,11 @@ func TestTrustedPluginPrefsUseSessionBrokerMayaAppDir(t *testing.T) {
 	if !strings.Contains(preamble, "$mayaAppDir = 'C:/maya-stall/sessiond-ui/maya_app'") {
 		t.Fatalf("trusted plug-in prefs script does not target Session Broker Maya app dir:\n%s", preamble)
 	}
+	host.Broker.StateDir = "sessiond-ui"
+	host.Broker.Repo = "C:/maya-stall/tools/GG_MayaSessiond"
+	if got := trustedPluginMayaAppDir(host); got != "C:/maya-stall/tools/GG_MayaSessiond/sessiond-ui/maya_app" {
+		t.Fatalf("relative broker state Maya app dir = %q, want path resolved from broker repo", got)
+	}
 }
 
 func TestTrustedPluginPrefsRepairInputKeepsLargePathSetsOutOfCommandLine(t *testing.T) {

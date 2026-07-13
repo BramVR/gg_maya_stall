@@ -658,7 +658,9 @@ func (batch *sftpBatch) mkdir(path string) {
 func (batch *sftpBatch) mkdirAll(path string) {
 	current := ""
 	normalized := sftpRemotePath(path)
-	if strings.HasPrefix(normalized, "/") {
+	if strings.HasPrefix(normalized, "//") {
+		current = "//"
+	} else if strings.HasPrefix(normalized, "/") {
 		current = "/"
 	}
 	for _, part := range strings.Split(strings.Trim(normalized, "/"), "/") {
@@ -670,7 +672,7 @@ func (batch *sftpBatch) mkdirAll(path string) {
 			if strings.HasSuffix(current, ":") {
 				continue
 			}
-		} else if current == "/" {
+		} else if current == "/" || current == "//" {
 			current += part
 		} else {
 			current += "/" + part

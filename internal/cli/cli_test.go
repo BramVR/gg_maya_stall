@@ -4239,6 +4239,25 @@ hostPools:
 	}
 }
 
+func TestSFTPBatchMkdirAllPreservesUNCVolume(t *testing.T) {
+	batch := newSFTPBatch()
+	batch.mkdirAll("//server/share/trusted/plugins")
+	got := batch.String()
+	for _, want := range []string{
+		`-mkdir "//server"`,
+		`-mkdir "//server/share"`,
+		`-mkdir "//server/share/trusted"`,
+		`-mkdir "//server/share/trusted/plugins"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("UNC mkdir batch missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, `-mkdir "/server`) {
+		t.Fatalf("UNC mkdir batch collapsed the UNC prefix:\n%s", got)
+	}
+}
+
 func TestRunScenarioRealSSHUploadsPluginArtifactsToTrustedRoot(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	sftpLog := filepath.Join(dir, "sftp.log")

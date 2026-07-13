@@ -60,6 +60,27 @@ func TestFreshRunLifecycleDoesNotCleanRunStateItDidNotCreate(t *testing.T) {
 	}
 }
 
+func TestFreshRunLifecycleCleansOwnedStateAfterPartialDirectorySetup(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	now := time.Date(2026, 7, 6, 12, 30, 0, 0, time.UTC)
+	runID := now.Format("20060102T150405.000000000Z")
+	blockingEvidencePath := filepath.Join(dir, "artifacts", "maya-stall", runID)
+	mustWriteFile(t, blockingEvidencePath, "keep\n")
+	runtime := defaultRunRuntime()
+	runtime.Now = func() time.Time { return now }
+
+	_, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
+	if err == nil {
+		t.Fatal("Fresh Run returned nil error for blocked Evidence directory")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "runs", runID)); !os.IsNotExist(statErr) {
+		t.Fatalf("Fresh Run left owned state after partial setup: %v", statErr)
+	}
+	if content, readErr := os.ReadFile(blockingEvidencePath); readErr != nil || string(content) != "keep\n" {
+		t.Fatalf("Fresh Run changed blocking Evidence path: content=%q err=%v", content, readErr)
+	}
+}
+
 func TestFreshRunLifecycleSettlesStopPolicyAndFailures(t *testing.T) {
 	t.Run("success cleans state and releases Host Lock", func(t *testing.T) {
 		dir := writeRunConfigFixture(t)

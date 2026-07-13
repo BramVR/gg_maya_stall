@@ -22,7 +22,8 @@ type freshRunLifecycle struct {
 	resolvedRuntime              resolvedRuntime
 	context                      runContext
 	manifest                     runManifest
-	localRunDirsCreated          bool
+	localRunStateOwned           bool
+	localEvidenceDirOwned        bool
 	sessionStartAttempted        bool
 	session                      brokerSessionIdentity
 	sessionStarted               bool
@@ -67,13 +68,15 @@ func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 				}
 			}
 		}
-		if !run.sessionStartAttempted && run.localRunDirsCreated {
+		if !run.sessionStartAttempted && run.localRunStateOwned {
 			runID := run.context.RunWorkspace.RunID()
 			if cleanupErr := cleanupRunState(run.repoDir, runID); cleanupErr != nil {
 				err = errors.Join(err, fmt.Errorf("clean up pre-session Fresh Run state for %s: %w", runID, cleanupErr))
 			}
-			if cleanupErr := os.Remove(run.context.EvidenceDir); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
-				err = errors.Join(err, fmt.Errorf("clean up empty pre-session Evidence directory for %s: %w", runID, cleanupErr))
+			if run.localEvidenceDirOwned {
+				if cleanupErr := os.Remove(run.context.EvidenceDir); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
+					err = errors.Join(err, fmt.Errorf("clean up empty pre-session Evidence directory for %s: %w", runID, cleanupErr))
+				}
 			}
 		}
 		if run.releaseHostLock {
@@ -164,10 +167,12 @@ func (run *freshRunLifecycle) setup() error {
 	if root := trustedPluginArtifactsRoot(host.Config); root != "" {
 		run.context.Environment[trustedPluginArtifactsRootEnvVar] = root
 	}
-	if err := createCleanRunDirs(run.context); err != nil {
+	ownership, err := createCleanRunDirsWithOwnership(run.context)
+	run.localRunStateOwned = ownership.StateDir
+	run.localEvidenceDirOwned = ownership.EvidenceDir
+	if err != nil {
 		return err
 	}
-	run.localRunDirsCreated = true
 	// Freeze the payload before TrustCenter preflight so the checked paths are
 	// the exact bytes later staged to the Maya Host.
 	if err := snapshotRunPayload(run.context, scenario.Payload); err != nil {

@@ -573,26 +573,29 @@ $program = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$
 
 func trustedPluginMayaAppDir(host mayaHostConfig) (string, error) {
 	if host.Broker.isGGMayaSessiond() && strings.TrimSpace(host.Broker.StateDir) != "" {
-		stateDir := strings.TrimSpace(host.Broker.StateDir)
+		stateDir := host.Broker.StateDir
 		if err := validateSessionBrokerStateDir(stateDir); err != nil {
+			return "", err
+		}
+		if err := validateSessionBrokerRepo(host.Broker.Repo); err != nil {
 			return "", err
 		}
 		_, _, absolute, _ := canonicalWindowsPathForComparison(stateDir)
 		if absolute {
 			return remoteJoin(stateDir, "maya_app"), nil
 		}
-		if repo := strings.TrimSpace(host.Broker.Repo); repo != "" {
-			return remoteJoin(repo, stateDir, "maya_app"), nil
-		}
-		return "", fmt.Errorf("broker.repo is required when broker.stateDir is relative")
+		return remoteJoin(host.Broker.Repo, stateDir, "maya_app"), nil
 	}
 	return "", nil
 }
 
 func validateSessionBrokerStateDir(stateDir string) error {
-	stateDir = strings.TrimSpace(stateDir)
-	if stateDir == "" {
+	trimmed := strings.TrimSpace(stateDir)
+	if trimmed == "" {
 		return fmt.Errorf("gg_mayasessiond broker requires broker.stateDir")
+	}
+	if stateDir != trimmed {
+		return fmt.Errorf("broker.stateDir must not contain surrounding whitespace")
 	}
 	if hasWindowsDevicePrefix(stateDir) {
 		return fmt.Errorf("broker.stateDir must not use a Windows device namespace")
@@ -613,6 +616,17 @@ func validateSessionBrokerStateDir(stateDir string) error {
 	}
 	if hasWin32TrimmedPathComponent(stateDir) || hasInvalidWin32PathComponent(stateDir) {
 		return fmt.Errorf("broker.stateDir contains an invalid Windows path component")
+	}
+	return nil
+}
+
+func validateSessionBrokerRepo(repo string) error {
+	trimmed := strings.TrimSpace(repo)
+	if trimmed == "" {
+		return fmt.Errorf("gg_mayasessiond broker requires broker.repo")
+	}
+	if repo != trimmed {
+		return fmt.Errorf("broker.repo must not contain surrounding whitespace")
 	}
 	return nil
 }

@@ -2306,6 +2306,7 @@ func TestTrustedPluginPrefsUseSessionBrokerMayaAppDir(t *testing.T) {
 		Structured: true,
 		Type:       "gg-mayasessiond",
 		StateDir:   "C:/maya-stall/sessiond-ui",
+		Repo:       "C:/maya-stall/tools/GG_MayaSessiond",
 	}}
 	mayaAppDir, err := trustedPluginMayaAppDir(host)
 	if err != nil {
@@ -2351,6 +2352,36 @@ func TestTrustedPluginPrefsRejectAmbiguousSessionBrokerStateDir(t *testing.T) {
 			}
 			if err := (ggMayaSessiondBroker{host: host}).validate(); err == nil {
 				t.Fatalf("Session Broker accepted ambiguous stateDir %q", stateDir)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginPrefsRejectWhitespaceAmbiguousSessionBrokerPaths(t *testing.T) {
+	for name, mutate := range map[string]func(*mayaHostConfig){
+		"state-dir-leading-space":  func(host *mayaHostConfig) { host.Broker.StateDir = " sessiond-ui" },
+		"state-dir-trailing-space": func(host *mayaHostConfig) { host.Broker.StateDir = "sessiond-ui " },
+		"repo-leading-space":       func(host *mayaHostConfig) { host.Broker.Repo = " C:/maya-stall/tools/GG_MayaSessiond" },
+		"repo-trailing-space":      func(host *mayaHostConfig) { host.Broker.Repo = "C:/maya-stall/tools/GG_MayaSessiond " },
+	} {
+		t.Run(name, func(t *testing.T) {
+			host := mayaHostConfig{
+				Transport: "ssh",
+				SSH:       sshConfig{Host: "maya-win-01"},
+				WorkRoot:  "C:/maya-stall",
+				Broker: brokerConfig{
+					Structured: true,
+					Type:       "gg-mayasessiond",
+					StateDir:   "sessiond-ui",
+					Python:     "C:/Python/python.exe",
+					Repo:       "C:/maya-stall/tools/GG_MayaSessiond",
+				}}
+			mutate(&host)
+			if _, err := trustedPluginPrefsReadScript(host, "2025"); err == nil {
+				t.Fatalf("trusted plug-in prefs accepted whitespace-ambiguous broker paths: %#v", host.Broker)
+			}
+			if err := (ggMayaSessiondBroker{host: host}).validate(); err == nil {
+				t.Fatalf("Session Broker accepted whitespace-ambiguous paths: %#v", host.Broker)
 			}
 		})
 	}

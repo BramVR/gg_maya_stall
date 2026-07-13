@@ -479,6 +479,9 @@ func (broker ggMayaSessiondBroker) validate() error {
 	if strings.TrimSpace(broker.host.Broker.Repo) == "" {
 		return fmt.Errorf("gg_mayasessiond broker requires broker.repo")
 	}
+	if err := validateSessionBrokerRepo(broker.host.Broker.Repo); err != nil {
+		return err
+	}
 	return nil
 }
 

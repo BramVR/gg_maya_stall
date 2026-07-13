@@ -42,6 +42,24 @@ func TestFreshRunLifecycleOrdersSetupExecuteAndSettle(t *testing.T) {
 	}
 }
 
+func TestFreshRunLifecycleDoesNotCleanRunStateItDidNotCreate(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	now := time.Date(2026, 7, 6, 12, 30, 0, 0, time.UTC)
+	runID := now.Format("20060102T150405.000000000Z")
+	sentinel := filepath.Join(dir, ".maya-stall", "state", "runs", runID, "owned-by-other-run")
+	mustWriteFile(t, sentinel, "keep\n")
+	runtime := defaultRunRuntime()
+	runtime.Now = func() time.Time { return now }
+
+	_, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
+	if err == nil || !strings.Contains(err.Error(), "create clean run state") {
+		t.Fatalf("Fresh Run error = %v, want existing run-state collision", err)
+	}
+	if content, err := os.ReadFile(sentinel); err != nil || string(content) != "keep\n" {
+		t.Fatalf("Fresh Run changed colliding run state: content=%q err=%v", content, err)
+	}
+}
+
 func TestFreshRunLifecycleSettlesStopPolicyAndFailures(t *testing.T) {
 	t.Run("success cleans state and releases Host Lock", func(t *testing.T) {
 		dir := writeRunConfigFixture(t)

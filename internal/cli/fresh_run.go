@@ -22,6 +22,8 @@ type freshRunLifecycle struct {
 	resolvedRuntime              resolvedRuntime
 	context                      runContext
 	manifest                     runManifest
+	localRunDirsCreated          bool
+	sessionStartAttempted        bool
 	session                      brokerSessionIdentity
 	sessionStarted               bool
 	sessionSettled               bool
@@ -65,9 +67,13 @@ func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 				}
 			}
 		}
-		if !run.sessionStarted && run.manifest.RunID != "" {
-			if cleanupErr := cleanupRunState(run.repoDir, run.manifest.RunID); cleanupErr != nil {
-				err = errors.Join(err, fmt.Errorf("clean up pre-session Fresh Run state for %s: %w", run.manifest.RunID, cleanupErr))
+		if !run.sessionStartAttempted && run.localRunDirsCreated {
+			runID := run.context.RunWorkspace.RunID()
+			if cleanupErr := cleanupRunState(run.repoDir, runID); cleanupErr != nil {
+				err = errors.Join(err, fmt.Errorf("clean up pre-session Fresh Run state for %s: %w", runID, cleanupErr))
+			}
+			if cleanupErr := os.Remove(run.context.EvidenceDir); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
+				err = errors.Join(err, fmt.Errorf("clean up empty pre-session Evidence directory for %s: %w", runID, cleanupErr))
 			}
 		}
 		if run.releaseHostLock {
@@ -158,18 +164,10 @@ func (run *freshRunLifecycle) setup() error {
 	if root := trustedPluginArtifactsRoot(host.Config); root != "" {
 		run.context.Environment[trustedPluginArtifactsRootEnvVar] = root
 	}
-	run.manifest = runManifest{
-		RunID:         runID,
-		Scenario:      scenario.Name,
-		TargetProfile: host.TargetProfile,
-		Host:          host.HostID,
-		Runtime:       resolved.Metadata,
-		ConfigPath:    repoRelativePath(run.repoDir, configPath),
-		Payload:       scenario.Payload,
-	}
 	if err := createCleanRunDirs(run.context); err != nil {
 		return err
 	}
+	run.localRunDirsCreated = true
 	// Freeze the payload before TrustCenter preflight so the checked paths are
 	// the exact bytes later staged to the Maya Host.
 	if err := snapshotRunPayload(run.context, scenario.Payload); err != nil {
@@ -179,6 +177,15 @@ func (run *freshRunLifecycle) setup() error {
 		return err
 	}
 
+	run.manifest = runManifest{
+		RunID:         runID,
+		Scenario:      scenario.Name,
+		TargetProfile: host.TargetProfile,
+		Host:          host.HostID,
+		Runtime:       resolved.Metadata,
+		ConfigPath:    repoRelativePath(run.repoDir, configPath),
+		Payload:       scenario.Payload,
+	}
 	if err := writeJSONFile(filepath.Join(run.context.StateDir, "manifest.json"), run.manifest); err != nil {
 		return err
 	}
@@ -198,6 +205,7 @@ func (run *freshRunLifecycle) setup() error {
 }
 
 func (run *freshRunLifecycle) startFreshSession() error {
+	run.sessionStartAttempted = true
 	session, err := run.runtime.Broker.StartFreshSession(run.context, run.scenario.Config)
 	if err == nil && (session.BrokerAdapter == "" || session.SessionID == "") {
 		run.releaseHostLock = false

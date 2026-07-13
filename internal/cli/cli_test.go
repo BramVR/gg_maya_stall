@@ -5659,6 +5659,13 @@ optionVar -cat "Security"
 	if len(runs) != 0 {
 		t.Fatalf("failed allowlist preflight left %d run snapshot(s)", len(runs))
 	}
+	evidenceRuns, err := os.ReadDir(filepath.Join(dir, "artifacts", "maya-stall"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read Evidence directory after failed allowlist preflight: %v", err)
+	}
+	if len(evidenceRuns) != 0 {
+		t.Fatalf("failed allowlist preflight left %d empty Evidence directorie(s)", len(evidenceRuns))
+	}
 }
 
 func TestRunScenarioRealSSHFailsBeforeStagingWhenNestedTrustedPluginDestinationMissing(t *testing.T) {

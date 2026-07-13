@@ -334,6 +334,9 @@ func validateTrustedPluginArtifactsRoot(host mayaHostConfig) error {
 	if hasWin32TrimmedPathComponent(host.TrustedPluginArtifactsRoot) {
 		return fmt.Errorf("trustedPluginArtifactsRoot must not contain Windows path components ending in a space or period")
 	}
+	if hasInvalidWin32PathComponent(host.TrustedPluginArtifactsRoot) {
+		return fmt.Errorf("trustedPluginArtifactsRoot contains an invalid Windows path component")
+	}
 	trustedRoot, trustedVolume, absolute, traversesRoot := canonicalWindowsPathForComparison(root)
 	if traversesRoot {
 		return fmt.Errorf("trustedPluginArtifactsRoot must not traverse above its Windows volume root")
@@ -349,6 +352,9 @@ func validateTrustedPluginArtifactsRoot(host mayaHostConfig) error {
 	}
 	if hasWin32TrimmedPathComponent(host.WorkRoot) {
 		return fmt.Errorf("workRoot must not contain Windows path components ending in a space or period when trustedPluginArtifactsRoot is configured")
+	}
+	if hasInvalidWin32PathComponent(host.WorkRoot) {
+		return fmt.Errorf("workRoot contains an invalid Windows path component when trustedPluginArtifactsRoot is configured")
 	}
 	workRoot, _, workRootAbsolute, workRootTraversesRoot := canonicalWindowsPathForComparison(host.WorkRoot)
 	if workRootTraversesRoot || !workRootAbsolute {
@@ -413,6 +419,35 @@ func hasWin32TrimmedPathComponent(value string) bool {
 			continue
 		}
 		if strings.HasSuffix(component, " ") || strings.HasSuffix(component, ".") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasInvalidWin32PathComponent(value string) bool {
+	value = strings.ReplaceAll(remotePath(value), `\`, "/")
+	for index, component := range strings.Split(value, "/") {
+		if component == "" || component == "." || component == ".." {
+			continue
+		}
+		if index == 0 && len(component) == 2 && component[1] == ':' && isASCIIAlpha(component[0]) {
+			continue
+		}
+		if strings.ContainsAny(component, `<>:"|?*`) {
+			return true
+		}
+		for _, character := range component {
+			if character < 32 {
+				return true
+			}
+		}
+		base := strings.ToUpper(strings.SplitN(component, ".", 2)[0])
+		switch base {
+		case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$":
+			return true
+		}
+		if len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '1' && base[3] <= '9' {
 			return true
 		}
 	}

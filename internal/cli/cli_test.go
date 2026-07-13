@@ -2087,6 +2087,22 @@ func TestTrustedPluginAllowlistRequiredPathsRejectWin32Aliases(t *testing.T) {
 	}
 }
 
+func TestTrustedPluginAllowlistRequiredPathsRejectInvalidWin32Components(t *testing.T) {
+	for _, nestedDir := range []string{"scripts?", "bad:name", "CON", "aux.txt"} {
+		t.Run(nestedDir, func(t *testing.T) {
+			dir := t.TempDir()
+			mustWriteFile(t, filepath.Join(dir, "package", nestedDir, "plugin.py"), "# Python payload\n")
+			host := mayaHostConfig{TrustedPluginArtifactsRoot: "C:/maya-stall/trusted-plugin-artifacts"}
+			payload := []manifestPayload{{Kind: "pluginArtifacts", Source: "package"}}
+
+			_, err := trustedPluginAllowlistRequiredPaths(dir, host, payload)
+			if err == nil || !strings.Contains(err.Error(), "invalid Windows path component") {
+				t.Fatalf("required allowlist paths error = %v, want invalid Win32 component rejection", err)
+			}
+		})
+	}
+}
+
 func TestRunTrustedPluginAllowlistChecksAllHostMayaVersionsWhenScenarioUnpinned(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "build", "demo.mll"), "fake plugin artifact\n")
@@ -2231,6 +2247,23 @@ optionVar -cat "Security"
 	}
 	if !prefsAllowlistContainsRoot(prefs, "c:/maya-stall/trusted-plugin-artifacts") {
 		t.Fatalf("allowlist did not normalize configured trusted root")
+	}
+}
+
+func TestTrustedPluginAllowlistPreservesUNCIdentity(t *testing.T) {
+	required := "//server/share/plugins"
+	content := `// Security
+optionVar -cat "Security"
+ -sa "SafeModeAllowedlistPaths"
+ -sva "SafeModeAllowedlistPaths" "/server/share/plugins";
+`
+
+	missing := prefsAllowlistMissingPaths(content, []string{required})
+	if !reflect.DeepEqual(missing, []string{required}) {
+		t.Fatalf("UNC missing paths = %#v, want %#v", missing, []string{required})
+	}
+	if normalizeTrustedPluginPath(`\\server\share\plugins`) != normalizeTrustedPluginPath(required) {
+		t.Fatalf("backslash and slash UNC forms did not normalize equally")
 	}
 }
 
@@ -4130,6 +4163,27 @@ func TestTrustedPluginArtifactsRootRejectsWin32TrimmedWorkRoot(t *testing.T) {
 			err := validateTrustedPluginArtifactsRoot(host)
 			if err == nil || !strings.Contains(err.Error(), "workRoot must not contain Windows path components ending in a space or period") {
 				t.Fatalf("validate work root %q error = %v", workRoot, err)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginArtifactsRootRejectsInvalidWin32Components(t *testing.T) {
+	for _, root := range []string{
+		"C:/trusted/CON",
+		"C:/trusted/bad?name",
+		"//server/share/trusted/aux.txt",
+		"//server/share/trusted/bad:name",
+	} {
+		t.Run(root, func(t *testing.T) {
+			host := mayaHostConfig{
+				WorkRoot:                   "C:/maya-stall",
+				TrustedPluginArtifactsRoot: root,
+			}
+
+			err := validateTrustedPluginArtifactsRoot(host)
+			if err == nil || !strings.Contains(err.Error(), "invalid Windows path component") {
+				t.Fatalf("validate trusted Plugin Artifact root %q error = %v", root, err)
 			}
 		})
 	}

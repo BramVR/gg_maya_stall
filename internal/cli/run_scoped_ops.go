@@ -229,9 +229,6 @@ func readRunScopedState(repoDir string, runID string) (keptRun, error) {
 	if err != nil {
 		return keptRun{}, err
 	}
-	if err := ensureRunHasScopedHostLock(repoDir, manifest, runID); err != nil {
-		return keptRun{}, err
-	}
 	record, err := readRunRetentionRecord(repoDir, stateDir, manifest)
 	if err != nil {
 		return keptRun{}, err
@@ -240,6 +237,8 @@ func readRunScopedState(repoDir string, runID string) (keptRun, error) {
 		if err := verifyHostSideLockForRun(record.HostConfig, runID); err != nil {
 			return keptRun{}, err
 		}
+	} else if err := ensureRunHasScopedHostLock(repoDir, manifest, runID); err != nil {
+		return keptRun{}, err
 	}
 	return keptRun{RunID: runID, StateDir: stateDir, Manifest: manifest, Record: record}, nil
 }

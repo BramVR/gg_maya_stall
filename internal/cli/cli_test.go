@@ -412,6 +412,32 @@ func TestAttachRunScreenshotCapturesThroughOwnedHostLock(t *testing.T) {
 	}
 }
 
+func TestAttachRunScreenshotUsesAuthoritativeHostLockWithoutLocalMirror(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostRoot := t.TempDir()
+	hostConfigPath := writeSingleHealthyHostConfigWithWorkRoot(t, dir, hostRoot)
+	runtime := defaultRunRuntime()
+	runtime.Broker = fakeSessionBroker{Result: ScenarioResult{Status: "failed", Summary: "keep for inspection"}}
+	var stdout, stderr bytes.Buffer
+
+	code := RunWithRuntime([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--keep-on-failure", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("kept run exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+	localMirror := filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock")
+	if err := os.Remove(localMirror); err != nil {
+		t.Fatalf("remove compatibility Host Lock mirror: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"attach", runID, "screenshot"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("attach screenshot exit code = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+}
+
 func TestAttachRunControlClickRequiresOwnedHostLock(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	var stdout, stderr bytes.Buffer

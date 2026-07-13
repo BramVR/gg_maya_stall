@@ -117,10 +117,10 @@ func remoteHostLockReclaimAllowed(result remoteHostLockResult, sessionInactive b
 
 func remoteHostLockSessionInactive(host mayaHostConfig, owner remoteHostLockResult) (bool, error) {
 	if strings.TrimSpace(owner.BrokerStateDir) == "" || strings.TrimSpace(owner.BrokerPython) == "" || strings.TrimSpace(owner.BrokerRepo) == "" {
-		return false, fmt.Errorf("Host Lock does not identify its complete owning Session Broker configuration")
+		return false, fmt.Errorf("host lock does not identify its complete owning Session Broker configuration")
 	}
 	if err := validateSessionBrokerStateDir(owner.BrokerStateDir); err != nil {
-		return false, fmt.Errorf("Host Lock Session Broker state directory: %w", err)
+		return false, fmt.Errorf("host lock Session Broker state directory: %w", err)
 	}
 	ownerHost := host
 	ownerHost.Broker.StateDir = owner.BrokerStateDir

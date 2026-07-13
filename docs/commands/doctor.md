@@ -16,7 +16,7 @@ maya-stall doctor --scenario smoke
 maya-stall doctor --host-config ci-hosts.yaml --target-profile ci
 maya-stall doctor --host-config ci-hosts.yaml --target-profile ci --host maya-win-01
 maya-stall doctor --host-config ci-hosts.yaml --target-profile ci --host maya-win-01 --scenario smoke
-maya-stall doctor --host-config ci-hosts.yaml --target-profile ci --host maya-win-01 --repair-trusted-plugin-allowlist
+maya-stall doctor --host-config ci-hosts.yaml --target-profile ci --host maya-win-01 --scenario smoke --repair-trusted-plugin-allowlist
 ```
 
 ## What It Checks
@@ -81,7 +81,9 @@ plug-in load to hang behind Maya's security modal. The repair path is opt-in:
 appending a preserved allowlist plus the required trusted destinations. Stop
 Maya before repair, make sure the target Maya version has been launched at
 least once so its preferences file exists, then restart it after repair so the
-durable preference is read by a clean interactive session.
+durable preference is read by a clean interactive session. Keep `--scenario`
+when repairing a nested-path failure; a root-only doctor invocation cannot
+discover the Scenario's declared Plugin Artifact destinations.
 
 ## When To Run
 

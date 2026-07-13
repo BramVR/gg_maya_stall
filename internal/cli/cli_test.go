@@ -5033,7 +5033,7 @@ optionVar -cat "Security"
 	if code != 1 {
 		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "trusted Plugin Artifact allowlist preflight failed: maya 2025 SafeModeAllowedlistPaths does not contain trusted Plugin Artifact destination directories") {
+	if !strings.Contains(stderr.String(), "trusted Plugin Artifact allowlist preflight failed: maya 2025 SafeModeAllowedlistPaths does not contain trusted Plugin Artifact destination directories; run doctor with the same Scenario and --repair-trusted-plugin-allowlist") {
 		t.Fatalf("run stderr missing nested trusted allowlist preflight:\n%s", stderr.String())
 	}
 	if _, err := os.Stat(sftpLog); !os.IsNotExist(err) {

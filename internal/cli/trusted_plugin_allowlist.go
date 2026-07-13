@@ -54,7 +54,11 @@ func trustedPluginAllowlistDoctorLayer(repoDir string, host mayaHostConfig, scen
 	versions := trustedPluginAllowlistMayaVersions(host, scenario.Config)
 	changed, err := ensureTrustedPluginAllowlist(host, versions, requiredPaths, repair)
 	if err != nil {
-		return withSource(failedCheck(trustedPluginAllowlistLayerID, err.Error(), "Add trustedPluginArtifactsRoot to Maya's trusted plug-in locations, or run doctor with --repair-trusted-plugin-allowlist after approving this host policy change. See docs/setup/windows-maya-host.md#trusted-plugin-artifacts."), "maya-prefs")
+		hint := "Add trustedPluginArtifactsRoot to Maya's trusted plug-in locations, or run doctor with --repair-trusted-plugin-allowlist after approving this host policy change. See docs/setup/windows-maya-host.md#trusted-plugin-artifacts."
+		if len(requiredPaths) > 1 {
+			hint = "Run doctor again with the same Scenario and --repair-trusted-plugin-allowlist after approving this host policy change. See docs/setup/windows-maya-host.md#trusted-plugin-artifacts."
+		}
+		return withSource(failedCheck(trustedPluginAllowlistLayerID, err.Error(), hint), "maya-prefs")
 	}
 	detail := fmt.Sprintf("Maya %s %s contains trustedPluginArtifactsRoot", strings.Join(versions, ","), safeModeAllowedlistOptionVar)
 	if len(requiredPaths) > 1 {
@@ -125,7 +129,7 @@ func ensureTrustedPluginAllowlist(host mayaHostConfig, versions []string, requir
 			if len(requiredPaths) == 1 || missingPathsIncludeTrustedRoot(host, missingPaths) {
 				return false, fmt.Errorf("maya %s %s does not contain trustedPluginArtifactsRoot", version, safeModeAllowedlistOptionVar)
 			}
-			return false, fmt.Errorf("maya %s %s does not contain trusted Plugin Artifact destination directories", version, safeModeAllowedlistOptionVar)
+			return false, fmt.Errorf("maya %s %s does not contain trusted Plugin Artifact destination directories; run doctor with the same Scenario and --repair-trusted-plugin-allowlist", version, safeModeAllowedlistOptionVar)
 		}
 		changed = changed || probe.Changed
 	}

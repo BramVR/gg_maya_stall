@@ -169,10 +169,10 @@ Doctor layer:
 - Ensure licensing is valid for the Windows user that owns the interactive desktop.
 - Verify Plugin Artifacts from consuming repos can load in that Maya version; Maya Stall does not build Plugin Artifacts.
 - If Maya's secure plug-in loading prompts for staged Plugin Artifacts, configure
-  a host-managed `trustedPluginArtifactsRoot` outside `workRoot/runs` and add
-  that exact directory to Maya's trusted plug-in locations for the interactive
-  Windows user. Do not trust `workRoot`, `workRoot/runs`, or every fresh run
-  workspace.
+  a host-managed `trustedPluginArtifactsRoot` outside `workRoot/runs`, then use
+  the Scenario-aware steps below to trust its declared destinations and nested
+  plug-in parent directories for the interactive Windows user. Do not trust
+  `workRoot`, `workRoot/runs`, or every fresh run workspace.
 
 Doctor layer:
 
@@ -192,8 +192,9 @@ trustedPluginArtifactsRoot: C:/maya-stall/trusted-plugin-artifacts
 Host-admin steps:
 
 - Create or allow Maya Stall to create the stable directory.
-- In Maya security preferences for the interactive Windows account, add that
-  exact directory as a trusted plug-in location.
+- In Maya security preferences for the interactive Windows account, add the
+  configured root plus the declared destination and nested plug-in parent
+  directories reported by `doctor --scenario <scenario>`.
 - Or, after approving the host security-policy change, run
   `maya-stall doctor --host-config <host-config.yaml> --target-profile <profile> --host <host-id> --scenario <scenario> --repair-trusted-plugin-allowlist`.
   The repair path backs up existing Maya preferences, preserves existing

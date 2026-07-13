@@ -110,10 +110,10 @@ Use this split instead:
 - Consuming repo: declare Plugin Artifacts in `payload.pluginArtifacts` and
   keep Scenario scripts responsible for loading and asserting the plug-in.
 - Operator/host config: set `trustedPluginArtifactsRoot` to a stable directory
-  that is not inside or above `workRoot/runs`, then trust that root plus the
-  declared destination and nested plug-in parent directories reported by
-  `doctor --scenario <scenario>` for the Windows account that runs the
-  interactive Maya UI.
+  using an absolute Windows drive or UNC path that is not inside or above
+  `workRoot/runs`, then trust that root plus the declared destination and
+  nested plug-in parent directories reported by `doctor --scenario <scenario>`
+  for the Windows account that runs the interactive Maya UI.
 - Scenario script: when `MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT` is present,
   load the declared plug-in from that root using the same repo-relative path;
   otherwise load from the per-run `payload/pluginArtifacts` path.

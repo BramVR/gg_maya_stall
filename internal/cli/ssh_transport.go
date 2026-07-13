@@ -330,8 +330,11 @@ func validateTrustedPluginArtifactsRoot(host mayaHostConfig) error {
 	}
 	workRoot := cleanRemotePathForComparison(host.WorkRoot)
 	trustedRoot := cleanRemotePathForComparison(root)
-	if trustedRoot == "" || isWindowsDriveRoot(trustedRoot) || isUNCShareRoot(root) {
+	if trustedRoot == "" || trustedRoot == "/" || isWindowsDriveRoot(trustedRoot) || isUNCShareRoot(root) {
 		return fmt.Errorf("trustedPluginArtifactsRoot must resolve to a non-root directory")
+	}
+	if !isAbsoluteWindowsPath(root) {
+		return fmt.Errorf("trustedPluginArtifactsRoot must be an absolute Windows path")
 	}
 	if workRoot == "" {
 		return nil
@@ -348,6 +351,19 @@ func validateTrustedPluginArtifactsRoot(host mayaHostConfig) error {
 
 func isWindowsDriveRoot(path string) bool {
 	return len(path) == 2 && path[1] == ':' && path[0] >= 'a' && path[0] <= 'z'
+}
+
+func isAbsoluteWindowsPath(value string) bool {
+	value = windowsPathWithoutDevicePrefix(value)
+	if strings.HasPrefix(value, "//") {
+		parts := strings.FieldsFunc(strings.Trim(value, "/"), func(r rune) bool { return r == '/' })
+		return len(parts) >= 2
+	}
+	if len(value) < 3 || value[1] != ':' || value[2] != '/' {
+		return false
+	}
+	drive := value[0]
+	return drive >= 'a' && drive <= 'z' || drive >= 'A' && drive <= 'Z'
 }
 
 func isUNCShareRoot(value string) bool {

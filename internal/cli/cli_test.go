@@ -3892,6 +3892,24 @@ func TestTrustedPluginArtifactsRootRejectsWindowsDeviceNamespaces(t *testing.T) 
 	}
 }
 
+func TestTrustedPluginArtifactsRootRejectsRelativeWindowsPaths(t *testing.T) {
+	for _, root := range []string{
+		"plugins", "maya-stall/runs", `C:plugins`, `C:maya-stall\runs`,
+	} {
+		t.Run(root, func(t *testing.T) {
+			host := mayaHostConfig{
+				WorkRoot:                   "C:/Users/maya/maya-stall",
+				TrustedPluginArtifactsRoot: root,
+			}
+
+			err := validateTrustedPluginArtifactsRoot(host)
+			if err == nil || !strings.Contains(err.Error(), "must be an absolute Windows path") {
+				t.Fatalf("validate trusted Plugin Artifact root %q error = %v", root, err)
+			}
+		})
+	}
+}
+
 func TestRunScenarioRejectsTrustedPluginRootThatNormalizesUnderRunWorkspaces(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")

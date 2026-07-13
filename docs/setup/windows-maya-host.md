@@ -203,7 +203,7 @@ Host-admin steps:
   to be stopped before repair, requires the target Maya version to have an
   existing preferences file, and requires a clean Maya restart before proof.
 - Keep the value in host config, CI secret material, or runner-owned config,
-  not in `.maya-stall.yaml`.
+  not in `.maya-stall.yaml`; use an absolute Windows drive or UNC path.
 - Declare the Maya version in host config `mayaVersions` or Scenario
   `mayaVersion`; Maya Stall uses that version to locate the durable TrustCenter
   preferences directory.

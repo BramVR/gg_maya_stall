@@ -1783,6 +1783,29 @@ func TestDoctorRepairTrustedPluginAllowlistStopsAfterScenarioValidationFailure(t
 	}
 }
 
+func TestDoctorRepairTrustedPluginAllowlistValidatesNestedDestinationsBeforeHostAccess(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	configPath := filepath.Join(dir, ".maya-stall.yaml")
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config fixture: %v", err)
+	}
+	mustWriteFile(t, configPath, strings.Replace(string(configBytes), "build/demo.mll", "build/package", 1))
+	mustWriteFile(t, filepath.Join(dir, "build", "package", "scripts\nbad", "plugin.py"), "def initializePlugin(plugin):\n    pass\n")
+	sshLog := filepath.Join(dir, "ssh.log")
+	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, nil)
+	hostConfigPath := writeTrustedPluginHostConfig(t, dir, sshPath, "")
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha", "--scenario", "smoke", "--repair-trusted-plugin-allowlist"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(sshLog); !os.IsNotExist(err) {
+		t.Fatalf("TrustCenter repair touched the host before validating nested destinations, stat err = %v", err)
+	}
+}
+
 func TestDoctorRepairTrustedPluginAllowlistSkipsLiveBrokerProbes(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	useFakeFFmpegLookPath(t, dir)
@@ -3951,6 +3974,50 @@ func TestTrustedPluginArtifactsRootRejectsTraversalAboveWindowsVolume(t *testing
 			err := validateTrustedPluginArtifactsRoot(host)
 			if err == nil || !strings.Contains(err.Error(), "must not traverse above its Windows volume root") {
 				t.Fatalf("validate trusted Plugin Artifact root %q error = %v", root, err)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginArtifactsRootRejectsWin32TrimmedComponents(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		workRoot string
+		root     string
+	}{
+		{name: "drive trailing period", workRoot: "C:/maya-stall", root: "C:/maya-stall/runs./trusted"},
+		{name: "drive trailing space", workRoot: "C:/maya-stall", root: "C:/maya-stall/runs /trusted"},
+		{name: "UNC trailing period", workRoot: "//server/share/maya-stall", root: "//server/share/maya-stall/runs./trusted"},
+		{name: "UNC trailing space", workRoot: "//server/share/maya-stall", root: "//server/share/maya-stall/runs /trusted"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			host := mayaHostConfig{
+				WorkRoot:                   test.workRoot,
+				TrustedPluginArtifactsRoot: test.root,
+			}
+
+			err := validateTrustedPluginArtifactsRoot(host)
+			if err == nil || !strings.Contains(err.Error(), "must not contain Windows path components ending in a space or period") {
+				t.Fatalf("validate trusted Plugin Artifact root %q error = %v", test.root, err)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginArtifactsRootRejectsWin32TrimmedWorkRoot(t *testing.T) {
+	for _, workRoot := range []string{
+		"C:/maya-stall./work",
+		"//server/share/maya-stall /work",
+	} {
+		t.Run(workRoot, func(t *testing.T) {
+			host := mayaHostConfig{
+				WorkRoot:                   workRoot,
+				TrustedPluginArtifactsRoot: "C:/trusted/plugins",
+			}
+
+			err := validateTrustedPluginArtifactsRoot(host)
+			if err == nil || !strings.Contains(err.Error(), "workRoot must not contain Windows path components ending in a space or period") {
+				t.Fatalf("validate work root %q error = %v", workRoot, err)
 			}
 		})
 	}

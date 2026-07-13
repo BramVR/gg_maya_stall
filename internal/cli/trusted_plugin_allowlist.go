@@ -30,13 +30,30 @@ type trustedPluginPrefsProbeJSON struct {
 	Changed bool            `json:"changed,omitempty"`
 }
 
+func trustedPluginAllowlistLocalConfigCheck(repoDir string, host mayaHostConfig, scenario scenarioContract) ([]string, *doctorCheck) {
+	if trustedPluginArtifactsRoot(host) == "" {
+		return nil, nil
+	}
+	if err := validateTrustedPluginArtifactsRoot(host); err != nil {
+		check := withSource(failedCheck(trustedPluginAllowlistLayerID, err.Error(), "Choose a narrow trustedPluginArtifactsRoot outside workRoot/runs. See docs/setup/windows-maya-host.md#trusted-plugin-artifacts."), "config")
+		return nil, &check
+	}
+	requiredPaths, err := trustedPluginAllowlistRequiredPaths(repoDir, host, scenario.Payload)
+	if err != nil {
+		check := withSource(failedCheck(trustedPluginAllowlistLayerID, err.Error(), "Fix declared Plugin Artifact paths before checking Maya trusted plug-in locations. See docs/setup/windows-maya-host.md#trusted-plugin-artifacts."), "config")
+		return nil, &check
+	}
+	return requiredPaths, nil
+}
+
 func trustedPluginAllowlistDoctorLayer(repoDir string, host mayaHostConfig, scenario scenarioContract, repair bool, sshOK bool, lockClear bool) doctorCheck {
 	root := trustedPluginArtifactsRoot(host)
 	if root == "" {
 		return withSource(okCheck(trustedPluginAllowlistLayerID, "not configured"), "config")
 	}
-	if err := validateTrustedPluginArtifactsRoot(host); err != nil {
-		return withSource(failedCheck(trustedPluginAllowlistLayerID, err.Error(), "Choose a narrow trustedPluginArtifactsRoot outside workRoot/runs. See docs/setup/windows-maya-host.md#trusted-plugin-artifacts."), "config")
+	requiredPaths, check := trustedPluginAllowlistLocalConfigCheck(repoDir, host, scenario)
+	if check != nil {
+		return *check
 	}
 	if !host.usesRealSSH() {
 		return withSource(okCheck(trustedPluginAllowlistLayerID, "not checked for fake runtime"), "fake")
@@ -46,10 +63,6 @@ func trustedPluginAllowlistDoctorLayer(repoDir string, host mayaHostConfig, scen
 	}
 	if repair && !lockClear {
 		return withBlockedBy(failedCheck(trustedPluginAllowlistLayerID, "repair skipped because Host Lock is not clear", "Wait for the active Fresh Run or clear the stale Host Lock before repairing Maya trusted plug-in locations. See docs/setup/windows-maya-host.md#host-lock-and-retention."), "host-lock")
-	}
-	requiredPaths, err := trustedPluginAllowlistRequiredPaths(repoDir, host, scenario.Payload)
-	if err != nil {
-		return withSource(failedCheck(trustedPluginAllowlistLayerID, err.Error(), "Fix declared Plugin Artifact paths before checking Maya trusted plug-in locations. See docs/setup/windows-maya-host.md#trusted-plugin-artifacts."), "config")
 	}
 	versions := trustedPluginAllowlistMayaVersions(host, scenario.Config)
 	changed, err := ensureTrustedPluginAllowlist(host, versions, requiredPaths, repair)

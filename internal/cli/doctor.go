@@ -128,6 +128,12 @@ func runDoctor(repoDir string, options doctorOptions) hostHealthReport {
 	}
 	add(okCheck("host", host.ID))
 	report.HostID = host.ID
+	if options.RepairTrustedPluginAllowlist {
+		if _, check := trustedPluginAllowlistLocalConfigCheck(repoDir, host, scenario); check != nil {
+			add(*check)
+			return report
+		}
+	}
 	checkHostLayers(repoDir, options, host, scenario, &report, add)
 
 	return report

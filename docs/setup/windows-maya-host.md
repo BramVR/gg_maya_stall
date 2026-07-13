@@ -204,6 +204,8 @@ Host-admin steps:
   existing preferences file, and requires a clean Maya restart before proof.
 - Keep the value in host config, CI secret material, or runner-owned config,
   not in `.maya-stall.yaml`; use an absolute Windows drive or UNC path.
+- Avoid path components ending in a period or space; Maya Stall rejects those
+  Win32-aliased forms for both `workRoot` and `trustedPluginArtifactsRoot`.
 - Declare the Maya version in host config `mayaVersions` or Scenario
   `mayaVersion`; Maya Stall uses that version to locate the durable TrustCenter
   preferences directory.

@@ -1806,6 +1806,89 @@ func TestDoctorRepairTrustedPluginAllowlistValidatesNestedDestinationsBeforeHost
 	}
 }
 
+func TestDoctorRepairTrustedPluginAllowlistReusesPrevalidatedDestinations(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	configPath := filepath.Join(dir, ".maya-stall.yaml")
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config fixture: %v", err)
+	}
+	mustWriteFile(t, configPath, strings.Replace(string(configBytes), "build/demo.mll", "build/package", 1))
+	mustWriteFile(t, filepath.Join(dir, "build", "package", "initial", "plugin.py"), "# Initial Python plug-in\n")
+
+	root := "C:/maya-stall/trusted-plugin-artifacts"
+	repairedPrefs := `// Security
+optionVar -cat "Security"
+ -sa "SafeModeAllowedlistPaths"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts/build/package"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts/build/package/initial";
+`
+	sshPath := filepath.Join(dir, "fake-ssh-prevalidated-trust-paths")
+	countPath := filepath.Join(dir, "fake-ssh-prevalidated-trust-paths.count")
+	inputPath := filepath.Join(dir, "repair-input.txt")
+	latePluginPath := filepath.Join(dir, "build", "package", "late", "plugin.py")
+	sshScript := fmt.Sprintf(`#!/bin/sh
+count=0
+if [ -f %[1]s ]; then
+  count=$(cat %[1]s)
+fi
+count=$((count + 1))
+printf '%%s\n' "$count" > %[1]s
+case "$count" in
+1)
+  mkdir -p %[2]s
+  printf '%%s\n' '# Late Python plug-in' > %[3]s
+  printf '%%s\n' 'maya-stall-ssh-ok'
+  ;;
+2)
+  printf '%%s\n' 'writable'
+  ;;
+3)
+  printf '%%s\n' 'maya-version:2025'
+  ;;
+4)
+  ;;
+5)
+  cat > %[4]s
+  cat <<'JSON'
+%[5]s
+JSON
+  ;;
+*)
+  printf 'unexpected SSH call %%s\n' "$count" >&2
+  exit 1
+  ;;
+esac
+`, shellQuote(countPath), shellQuote(filepath.Dir(latePluginPath)), shellQuote(latePluginPath), shellQuote(inputPath), trustedPluginPrefsProbeOutputChanged(repairedPrefs, true))
+	if err := os.WriteFile(sshPath, []byte(sshScript), 0o755); err != nil {
+		t.Fatalf("write prevalidated-path fake SSH command: %v", err)
+	}
+	hostConfigPath := writeTrustedPluginHostConfig(t, dir, sshPath, "")
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha", "--scenario", "smoke", "--repair-trusted-plugin-allowlist"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("doctor exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	encodedInput, err := os.ReadFile(inputPath)
+	if err != nil {
+		t.Fatalf("read repair input: %v", err)
+	}
+	inputJSON, err := base64.StdEncoding.DecodeString(string(encodedInput))
+	if err != nil {
+		t.Fatalf("decode repair input: %v", err)
+	}
+	var requiredPaths []string
+	if err := json.Unmarshal(inputJSON, &requiredPaths); err != nil {
+		t.Fatalf("parse repair input: %v", err)
+	}
+	want := []string{root, root + "/build/package", root + "/build/package/initial"}
+	if !reflect.DeepEqual(requiredPaths, want) {
+		t.Fatalf("repair paths = %#v, want prevalidated snapshot %#v", requiredPaths, want)
+	}
+}
+
 func TestDoctorRepairTrustedPluginAllowlistSkipsLiveBrokerProbes(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	useFakeFFmpegLookPath(t, dir)
@@ -1974,6 +2057,31 @@ func TestTrustedPluginAllowlistRequiredPathsRejectTransportControlCharacters(t *
 			_, err := trustedPluginAllowlistRequiredPaths(dir, host, payload)
 			if err == nil || !strings.Contains(err.Error(), "control characters") {
 				t.Fatalf("required allowlist paths error = %v, want transport control-character rejection", err)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginAllowlistRequiredPathsRejectWin32Aliases(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		root      string
+		nestedDir string
+	}{
+		{name: "drive trailing period", root: "C:/maya-stall/trusted-plugin-artifacts", nestedDir: "scripts."},
+		{name: "drive trailing space", root: "C:/maya-stall/trusted-plugin-artifacts", nestedDir: "scripts "},
+		{name: "UNC trailing period", root: "//server/share/trusted-plugin-artifacts", nestedDir: "scripts."},
+		{name: "UNC trailing space", root: "//server/share/trusted-plugin-artifacts", nestedDir: "scripts "},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mustWriteFile(t, filepath.Join(dir, "package", test.nestedDir, "plugin.py"), "# Python payload\n")
+			host := mayaHostConfig{TrustedPluginArtifactsRoot: test.root}
+			payload := []manifestPayload{{Kind: "pluginArtifacts", Source: "package"}}
+
+			_, err := trustedPluginAllowlistRequiredPaths(dir, host, payload)
+			if err == nil || !strings.Contains(err.Error(), "Windows path components ending in a space or period") {
+				t.Fatalf("required allowlist paths error = %v, want Win32 alias rejection", err)
 			}
 		})
 	}
@@ -3987,8 +4095,10 @@ func TestTrustedPluginArtifactsRootRejectsWin32TrimmedComponents(t *testing.T) {
 	}{
 		{name: "drive trailing period", workRoot: "C:/maya-stall", root: "C:/maya-stall/runs./trusted"},
 		{name: "drive trailing space", workRoot: "C:/maya-stall", root: "C:/maya-stall/runs /trusted"},
+		{name: "drive terminal space", workRoot: "C:/maya-stall", root: "C:/trusted/plugins "},
 		{name: "UNC trailing period", workRoot: "//server/share/maya-stall", root: "//server/share/maya-stall/runs./trusted"},
 		{name: "UNC trailing space", workRoot: "//server/share/maya-stall", root: "//server/share/maya-stall/runs /trusted"},
+		{name: "UNC terminal space", workRoot: "//server/share/maya-stall", root: "//server/share/trusted/plugins "},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			host := mayaHostConfig{
@@ -4007,7 +4117,9 @@ func TestTrustedPluginArtifactsRootRejectsWin32TrimmedComponents(t *testing.T) {
 func TestTrustedPluginArtifactsRootRejectsWin32TrimmedWorkRoot(t *testing.T) {
 	for _, workRoot := range []string{
 		"C:/maya-stall./work",
+		"C:/maya-stall ",
 		"//server/share/maya-stall /work",
+		"//server/share/maya-stall ",
 	} {
 		t.Run(workRoot, func(t *testing.T) {
 			host := mayaHostConfig{

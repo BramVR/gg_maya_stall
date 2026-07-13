@@ -128,13 +128,16 @@ func runDoctor(repoDir string, options doctorOptions) hostHealthReport {
 	}
 	add(okCheck("host", host.ID))
 	report.HostID = host.ID
+	var repairRequiredPaths []string
 	if options.RepairTrustedPluginAllowlist {
-		if _, check := trustedPluginAllowlistLocalConfigCheck(repoDir, host, scenario); check != nil {
+		var check *doctorCheck
+		repairRequiredPaths, check = trustedPluginAllowlistLocalConfigCheck(repoDir, host, scenario)
+		if check != nil {
 			add(*check)
 			return report
 		}
 	}
-	checkHostLayers(repoDir, options, host, scenario, &report, add)
+	checkHostLayers(repoDir, options, host, scenario, repairRequiredPaths, &report, add)
 
 	return report
 }
@@ -204,7 +207,7 @@ func selectDoctorHost(hosts []mayaHostConfig, hostPin string) (mayaHostConfig, e
 	return mayaHostConfig{}, fmt.Errorf("no healthy Maya Host available")
 }
 
-func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig, scenario scenarioContract, report *hostHealthReport, add func(hostHealthLayer)) {
+func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig, scenario scenarioContract, repairRequiredPaths []string, report *hostHealthReport, add func(hostHealthLayer)) {
 	sshOK := true
 	if host.usesRealSSH() {
 		sshCheck := realSSHLayer(host)
@@ -231,7 +234,7 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 		} else {
 			add(mayaVersionLayer(options, host, scenario.Config))
 		}
-		add(trustedPluginAllowlistDoctorLayer(repoDir, host, scenario, true, sshOK, lockCheck.Status == "ok"))
+		add(trustedPluginAllowlistDoctorLayer(repoDir, host, scenario, repairRequiredPaths, true, sshOK, lockCheck.Status == "ok"))
 		add(withSource(okCheck("session-broker", "skipped during TrustCenter repair"), "repair"))
 		add(withSource(okCheck("visual-evidence", "skipped during TrustCenter repair"), "repair"))
 		add(withSource(okCheck("desktop-control", "skipped during TrustCenter repair"), "repair"))
@@ -287,7 +290,7 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 	} else {
 		add(mayaVersionLayer(options, host, scenario.Config))
 	}
-	add(trustedPluginAllowlistDoctorLayer(repoDir, host, scenario, false, sshOK, lockCheck.Status == "ok"))
+	add(trustedPluginAllowlistDoctorLayer(repoDir, host, scenario, nil, false, sshOK, lockCheck.Status == "ok"))
 	if host.VisualEvidence != nil && !*host.VisualEvidence {
 		add(withSource(failedCheck("visual-evidence", "unavailable", "Enable screenshot capture through the Session Broker. See docs/setup/windows-maya-host.md#visual-evidence."), "config"))
 	} else if brokerInvalidReason != "" {

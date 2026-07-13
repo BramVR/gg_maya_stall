@@ -46,14 +46,18 @@ func trustedPluginAllowlistLocalConfigCheck(repoDir string, host mayaHostConfig,
 	return requiredPaths, nil
 }
 
-func trustedPluginAllowlistDoctorLayer(repoDir string, host mayaHostConfig, scenario scenarioContract, repair bool, sshOK bool, lockClear bool) doctorCheck {
+func trustedPluginAllowlistDoctorLayer(repoDir string, host mayaHostConfig, scenario scenarioContract, prevalidatedRequiredPaths []string, repair bool, sshOK bool, lockClear bool) doctorCheck {
 	root := trustedPluginArtifactsRoot(host)
 	if root == "" {
 		return withSource(okCheck(trustedPluginAllowlistLayerID, "not configured"), "config")
 	}
-	requiredPaths, check := trustedPluginAllowlistLocalConfigCheck(repoDir, host, scenario)
-	if check != nil {
-		return *check
+	requiredPaths := prevalidatedRequiredPaths
+	if requiredPaths == nil {
+		var check *doctorCheck
+		requiredPaths, check = trustedPluginAllowlistLocalConfigCheck(repoDir, host, scenario)
+		if check != nil {
+			return *check
+		}
 	}
 	if !host.usesRealSSH() {
 		return withSource(okCheck(trustedPluginAllowlistLayerID, "not checked for fake runtime"), "fake")
@@ -317,6 +321,9 @@ func trustedPluginAllowlistRequiredPaths(repoDir string, host mayaHostConfig, pa
 		}
 	}
 	for _, destination := range required {
+		if hasWin32TrimmedPathComponent(destination) {
+			return nil, fmt.Errorf("inspect trusted Plugin Artifact destination %q: Windows path components ending in a space or period are not allowed", destination)
+		}
 		if err := rejectSFTPBatchUnsafePath(destination); err != nil {
 			return nil, fmt.Errorf("inspect trusted Plugin Artifact destination %q: %w", destination, err)
 		}

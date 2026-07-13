@@ -331,7 +331,7 @@ func validateTrustedPluginArtifactsRoot(host mayaHostConfig) error {
 	if normalizedRoot == "." || strings.Trim(normalizedRoot, "/") == "" {
 		return fmt.Errorf("trustedPluginArtifactsRoot must resolve to a non-root directory")
 	}
-	if hasWin32TrimmedPathComponent(root) {
+	if hasWin32TrimmedPathComponent(host.TrustedPluginArtifactsRoot) {
 		return fmt.Errorf("trustedPluginArtifactsRoot must not contain Windows path components ending in a space or period")
 	}
 	trustedRoot, trustedVolume, absolute, traversesRoot := canonicalWindowsPathForComparison(root)
@@ -407,7 +407,7 @@ func canonicalWindowsPathForComparison(value string) (string, string, bool, bool
 }
 
 func hasWin32TrimmedPathComponent(value string) bool {
-	value = strings.ReplaceAll(strings.TrimSpace(remotePath(value)), `\`, "/")
+	value = strings.ReplaceAll(remotePath(value), `\`, "/")
 	for _, component := range strings.Split(value, "/") {
 		if component == "" || component == "." || component == ".." {
 			continue

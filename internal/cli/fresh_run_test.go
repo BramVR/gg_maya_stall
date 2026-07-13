@@ -339,6 +339,44 @@ scenarios:
 	}
 }
 
+func TestFreshRunLifecycleCapturesVisualEvidenceAfterKnownBrokerResponseFailure(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload: {}
+    expectedOutputs:
+      scenarioResult: "outputs/result.json"
+    evidence:
+      screenshots:
+        enabled: true
+    validators:
+      - type: scenarioResultStatus
+        status: passed
+      - type: visualEvidence
+`)
+	runtime := defaultRunRuntime()
+	runtime.Broker = brokerFailureAfterScenarioCompletion{
+		result:  `{"status":"passed","summary":"Scenario completed before broker response failed"}` + "\n",
+		message: "Error calling tool 'script.execute': Expecting value: line 1 column 1 (char 0)",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := RunWithRuntime([]string{"run", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	bundle := readEvidenceBundle(t, onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall")))
+	if len(bundle.VisualEvidence) != 1 || bundle.VisualEvidence[0].Kind != "screenshot" {
+		t.Fatalf("recovered Visual Evidence = %+v, want one screenshot", bundle.VisualEvidence)
+	}
+	for _, result := range bundle.Validators {
+		if result.Status != resultStatusPassed {
+			t.Fatalf("validator = %+v, want passed", result)
+		}
+	}
+}
+
 func TestFreshRunLifecycleRejectsInvalidScenarioCompletionAfterBrokerFailure(t *testing.T) {
 	tests := []struct {
 		name       string

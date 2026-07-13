@@ -2256,7 +2256,7 @@ optionVar -cat "Security"
 }
 
 func TestTrustedPluginPrefsRepairScriptDocumentsMutationSafety(t *testing.T) {
-	script := trustedPluginPrefsRepairScript("2025")
+	script := trustedPluginPrefsRepairScript(mayaHostConfig{}, "2025")
 	for _, want := range []string{
 		"$env:MAYA_APP_DIR",
 		"$MayaStallRequiredPathsInput",
@@ -2298,6 +2298,21 @@ func TestTrustedPluginPrefsRepairScriptDocumentsMutationSafety(t *testing.T) {
 	}
 }
 
+func TestTrustedPluginPrefsUseSessionBrokerMayaAppDir(t *testing.T) {
+	host := mayaHostConfig{Broker: brokerConfig{
+		Structured: true,
+		Type:       "gg-mayasessiond",
+		StateDir:   "C:/maya-stall/sessiond-ui",
+	}}
+	if got := trustedPluginMayaAppDir(host); got != "C:/maya-stall/sessiond-ui/maya_app" {
+		t.Fatalf("trusted plug-in Maya app dir = %q, want Session Broker Maya app dir", got)
+	}
+	preamble := trustedPluginPrefsScriptPreamble(host)
+	if !strings.Contains(preamble, "$mayaAppDir = 'C:/maya-stall/sessiond-ui/maya_app'") {
+		t.Fatalf("trusted plug-in prefs script does not target Session Broker Maya app dir:\n%s", preamble)
+	}
+}
+
 func TestTrustedPluginPrefsRepairInputKeepsLargePathSetsOutOfCommandLine(t *testing.T) {
 	paths := make([]string, 0, 1_000)
 	for index := range 1_000 {
@@ -2319,7 +2334,7 @@ func TestTrustedPluginPrefsRepairInputKeepsLargePathSetsOutOfCommandLine(t *test
 	if !reflect.DeepEqual(got, compactTrustedPluginAllowlistPaths(paths)) {
 		t.Fatalf("repair input paths differ: got %d paths, want %d", len(got), len(paths))
 	}
-	if strings.Contains(trustedPluginPrefsRepairScript("2025"), paths[len(paths)-1]) {
+	if strings.Contains(trustedPluginPrefsRepairScript(mayaHostConfig{}, "2025"), paths[len(paths)-1]) {
 		t.Fatalf("repair command embeds a required path")
 	}
 }

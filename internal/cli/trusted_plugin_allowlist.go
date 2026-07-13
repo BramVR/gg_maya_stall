@@ -174,11 +174,11 @@ func validateMayaPrefsVersion(version string) error {
 }
 
 func trustedPluginPrefs(host mayaHostConfig, version string, requiredPaths []string, repair bool) (trustedPluginPrefsProbe, error) {
-	script := trustedPluginPrefsReadScript(version)
+	script := trustedPluginPrefsReadScript(host, version)
 	input := ""
 	remoteCommand := encodedPowerShellCommand(script)
 	if repair {
-		script = trustedPluginPrefsRepairScript(version)
+		script = trustedPluginPrefsRepairScript(host, version)
 		repairInput, err := trustedPluginPrefsRepairInput(requiredPaths)
 		if err != nil {
 			return trustedPluginPrefsProbe{}, err
@@ -437,7 +437,7 @@ func compactMayaVersions(versions []string) []string {
 	return compact
 }
 
-func trustedPluginPrefsReadScript(version string) string {
+func trustedPluginPrefsReadScript(host mayaHostConfig, version string) string {
 	return fmt.Sprintf(`$ErrorActionPreference = 'Stop'
 %s
 $prefs = MayaStall-PrefsPath %s
@@ -448,10 +448,10 @@ if ($exists) {
 }
 $json = [pscustomobject]@{ exists = $exists; content = $content } | ConvertTo-Json -Compress
 Write-Output (%s + $json)
-`, trustedPluginPrefsScriptPreamble(), powerShellSingleQuoted(version), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix))
+`, trustedPluginPrefsScriptPreamble(host), powerShellSingleQuoted(version), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix))
 }
 
-func trustedPluginPrefsRepairScript(version string) string {
+func trustedPluginPrefsRepairScript(host mayaHostConfig, version string) string {
 	return fmt.Sprintf(`$ErrorActionPreference = 'Stop'
 %s
 $prefs = MayaStall-PrefsPath %s
@@ -523,7 +523,7 @@ if ($changed) {
 $content = [string](Get-Content -LiteralPath $prefs -Raw)
 $json = [pscustomobject]@{ exists = $true; content = $content; changed = $changed } | ConvertTo-Json -Compress
 Write-Output (%s + $json)
-`, trustedPluginPrefsScriptPreamble(), powerShellSingleQuoted(version), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix))
+`, trustedPluginPrefsScriptPreamble(host), powerShellSingleQuoted(version), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix))
 }
 
 func trustedPluginPrefsRepairInput(requiredPaths []string) (string, error) {
@@ -557,7 +557,22 @@ $program = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$
 `
 }
 
-func trustedPluginPrefsScriptPreamble() string {
+func trustedPluginMayaAppDir(host mayaHostConfig) string {
+	if host.Broker.isGGMayaSessiond() && strings.TrimSpace(host.Broker.StateDir) != "" {
+		return remoteJoin(host.Broker.StateDir, "maya_app")
+	}
+	return ""
+}
+
+func trustedPluginPrefsScriptPreamble(host mayaHostConfig) string {
+	mayaAppDir := trustedPluginMayaAppDir(host)
+	if mayaAppDir != "" {
+		return fmt.Sprintf(`function MayaStall-PrefsPath([string]$version) {
+  $mayaAppDir = %s
+  return Join-Path (Join-Path $mayaAppDir $version) 'prefs\userPrefs.mel'
+}
+`, powerShellSingleQuoted(mayaAppDir))
+	}
 	return `function MayaStall-PrefsPath([string]$version) {
   $mayaAppDir = $env:MAYA_APP_DIR
   if ([string]::IsNullOrWhiteSpace($mayaAppDir)) {

@@ -212,7 +212,10 @@ Host-admin steps:
   SSH and work-root health probes before reporting the local path error.
 - Declare the Maya version in host config `mayaVersions` or Scenario
   `mayaVersion`; Maya Stall uses that version to locate the durable TrustCenter
-  preferences directory.
+  preferences directory. For a structured `gg-mayasessiond` broker, Maya Stall
+  reads and repairs the broker-owned Maya preferences under
+  `broker.stateDir/maya_app`; this is the isolated `MAYA_APP_DIR` used by Fresh
+  Run Maya sessions, not the interactive account's default Documents folder.
 - Keep the root separate from the run workspace tree; Maya Stall rejects roots
   that are `workRoot`, under `workRoot/runs`, or broad enough to contain
   `workRoot/runs`.

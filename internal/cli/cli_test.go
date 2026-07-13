@@ -1549,6 +1549,55 @@ scenarios:
 	}
 }
 
+func TestRunScenarioSnapshotsOverlappingPayloadDeclarations(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "package", "plugin.py"), "# plug-in\n")
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload:
+      pluginArtifacts:
+        - "package/plugin.py"
+        - "package"
+    expectedOutputs:
+      scenarioResult: "outputs/smoke-result.json"
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	runState := onlyRunDir(t, filepath.Join(dir, ".maya-stall", "state", "runs"))
+	content, err := os.ReadFile(filepath.Join(runState, "payload", "pluginArtifacts", "package", "plugin.py"))
+	if err != nil {
+		t.Fatalf("read overlapping payload snapshot: %v", err)
+	}
+	if string(content) != "# plug-in\n" {
+		t.Fatalf("overlapping payload snapshot = %q", content)
+	}
+}
+
+func TestCopyFileRejectsExistingDestination(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.txt")
+	destination := filepath.Join(dir, "destination.txt")
+	mustWriteFile(t, source, "new artifact\n")
+	mustWriteFile(t, destination, "existing artifact\n")
+
+	err := copyFile(source, destination)
+	if err == nil || !errors.Is(err, os.ErrExist) {
+		t.Fatalf("copy existing destination error = %v, want os.ErrExist", err)
+	}
+	content, readErr := os.ReadFile(destination)
+	if readErr != nil {
+		t.Fatalf("read existing destination: %v", readErr)
+	}
+	if string(content) != "existing artifact\n" {
+		t.Fatalf("existing destination changed to %q", content)
+	}
+}
+
 func TestRunScenarioReportsMissingTypedPayloadPath(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
@@ -1758,6 +1807,166 @@ func TestDoctorRepairTrustedPluginAllowlistRequiresMayaStopped(t *testing.T) {
 	}
 }
 
+func TestDoctorRepairTrustedPluginAllowlistStopsAfterScenarioValidationFailure(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	configPath := filepath.Join(dir, ".maya-stall.yaml")
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config fixture: %v", err)
+	}
+	mustWriteFile(t, configPath, strings.Replace(string(configBytes), "build/demo.mll", "build/missing-demo.mll", 1))
+	sshLog := filepath.Join(dir, "ssh.log")
+	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, nil)
+	hostConfigPath := writeTrustedPluginHostConfig(t, dir, sshPath, "")
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha", "--scenario", "smoke", "--repair-trusted-plugin-allowlist"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "scenario-inputs: fail") {
+		t.Fatalf("doctor output missing scenario validation failure:\n%s", stdout.String())
+	}
+	if _, err := os.Stat(sshLog); !os.IsNotExist(err) {
+		t.Fatalf("TrustCenter repair touched the host after Scenario validation failed, stat err = %v", err)
+	}
+}
+
+func TestDoctorRepairTrustedPluginAllowlistValidatesNestedDestinationsBeforeHostAccess(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	configPath := filepath.Join(dir, ".maya-stall.yaml")
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config fixture: %v", err)
+	}
+	mustWriteFile(t, configPath, strings.Replace(string(configBytes), "build/demo.mll", "build/package", 1))
+	mustWriteFile(t, filepath.Join(dir, "build", "package", "scripts\nbad", "plugin.py"), "def initializePlugin(plugin):\n    pass\n")
+	sshLog := filepath.Join(dir, "ssh.log")
+	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, nil)
+	hostConfigPath := writeTrustedPluginHostConfig(t, dir, sshPath, "")
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha", "--scenario", "smoke", "--repair-trusted-plugin-allowlist"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(sshLog); !os.IsNotExist(err) {
+		t.Fatalf("TrustCenter repair touched the host before validating nested destinations, stat err = %v", err)
+	}
+}
+
+func TestDoctorRepairTrustedPluginAllowlistValidatesArtifactLeafBeforeHostAccess(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	configPath := filepath.Join(dir, ".maya-stall.yaml")
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config fixture: %v", err)
+	}
+	mustWriteFile(t, configPath, strings.Replace(string(configBytes), "build/demo.mll", "build/demo?.mll", 1))
+	mustWriteFile(t, filepath.Join(dir, "build", "demo?.mll"), "fake plug-in\n")
+	sshLog := filepath.Join(dir, "ssh.log")
+	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, nil)
+	hostConfigPath := writeTrustedPluginHostConfig(t, dir, sshPath, "")
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha", "--scenario", "smoke", "--repair-trusted-plugin-allowlist"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(sshLog); !os.IsNotExist(err) {
+		t.Fatalf("TrustCenter repair touched the host before validating the artifact leaf, stat err = %v", err)
+	}
+}
+
+func TestDoctorRepairTrustedPluginAllowlistReusesPrevalidatedDestinations(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	configPath := filepath.Join(dir, ".maya-stall.yaml")
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config fixture: %v", err)
+	}
+	mustWriteFile(t, configPath, strings.Replace(string(configBytes), "build/demo.mll", "build/package", 1))
+	mustWriteFile(t, filepath.Join(dir, "build", "package", "initial", "plugin.py"), "# Initial Python plug-in\n")
+
+	root := "C:/maya-stall/trusted-plugin-artifacts"
+	repairedPrefs := `// Security
+optionVar -cat "Security"
+ -sa "SafeModeAllowedlistPaths"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts/build/package"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts/build/package/initial";
+`
+	sshPath := filepath.Join(dir, "fake-ssh-prevalidated-trust-paths")
+	countPath := filepath.Join(dir, "fake-ssh-prevalidated-trust-paths.count")
+	inputPath := filepath.Join(dir, "repair-input.txt")
+	latePluginPath := filepath.Join(dir, "build", "package", "late", "plugin.py")
+	sshScript := fmt.Sprintf(`#!/bin/sh
+count=0
+if [ -f %[1]s ]; then
+  count=$(cat %[1]s)
+fi
+count=$((count + 1))
+printf '%%s\n' "$count" > %[1]s
+case "$count" in
+1)
+  mkdir -p %[2]s
+  printf '%%s\n' '# Late Python plug-in' > %[3]s
+  printf '%%s\n' 'maya-stall-ssh-ok'
+  ;;
+2)
+  printf '%%s\n' 'writable'
+  ;;
+3)
+  printf '%%s\n' 'maya-version:2025'
+  ;;
+4)
+  ;;
+5)
+  cat > %[4]s
+  cat <<'JSON'
+%[5]s
+JSON
+  ;;
+*)
+  printf 'unexpected SSH call %%s\n' "$count" >&2
+  exit 1
+  ;;
+esac
+`, shellQuote(countPath), shellQuote(filepath.Dir(latePluginPath)), shellQuote(latePluginPath), shellQuote(inputPath), trustedPluginPrefsProbeOutputChanged(repairedPrefs, true))
+	if err := os.WriteFile(sshPath, []byte(sshScript), 0o755); err != nil {
+		t.Fatalf("write prevalidated-path fake SSH command: %v", err)
+	}
+	hostConfigPath := writeTrustedPluginHostConfig(t, dir, sshPath, "")
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha", "--scenario", "smoke", "--repair-trusted-plugin-allowlist"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("doctor exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	streamedInput, err := os.ReadFile(inputPath)
+	if err != nil {
+		t.Fatalf("read repair input: %v", err)
+	}
+	var envelope struct {
+		RequiredPaths string `json:"requiredPaths"`
+	}
+	if err := json.Unmarshal(streamedInput, &envelope); err != nil {
+		t.Fatalf("parse repair input envelope: %v", err)
+	}
+	inputJSON, err := base64.StdEncoding.DecodeString(envelope.RequiredPaths)
+	if err != nil {
+		t.Fatalf("decode repair input: %v", err)
+	}
+	var requiredPaths []string
+	if err := json.Unmarshal(inputJSON, &requiredPaths); err != nil {
+		t.Fatalf("parse repair input: %v", err)
+	}
+	want := []string{root, root + "/build/package", root + "/build/package/initial"}
+	if !reflect.DeepEqual(requiredPaths, want) {
+		t.Fatalf("repair paths = %#v, want prevalidated snapshot %#v", requiredPaths, want)
+	}
+}
+
 func TestDoctorRepairTrustedPluginAllowlistSkipsLiveBrokerProbes(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	useFakeFFmpegLookPath(t, dir)
@@ -1820,7 +2029,8 @@ optionVar -cat "Security"
 		TrustedPluginArtifactsRoot: "C:/maya-stall/trusted-plugin-artifacts",
 	}
 
-	changed, err := ensureTrustedPluginAllowlist(host, []string{"2025"}, true)
+	requiredPaths := []string{"C:/maya-stall/trusted-plugin-artifacts"}
+	changed, err := ensureTrustedPluginAllowlist(host, []string{"2025"}, requiredPaths, true)
 	if err != nil {
 		t.Fatalf("repair allowlist error: %v", err)
 	}
@@ -1838,7 +2048,7 @@ func TestTrustedPluginAllowlistRejectsUnsafeMayaVersionPathSegment(t *testing.T)
 		TrustedPluginArtifactsRoot: "C:/maya-stall/trusted-plugin-artifacts",
 	}
 
-	_, err := ensureTrustedPluginAllowlist(host, []string{`..\outside`}, false)
+	_, err := ensureTrustedPluginAllowlist(host, []string{`..\outside`}, []string{"C:/maya-stall/trusted-plugin-artifacts"}, false)
 	if err == nil || !strings.Contains(err.Error(), "not a safe preferences path segment") {
 		t.Fatalf("unsafe Maya version error = %v", err)
 	}
@@ -1851,7 +2061,7 @@ func TestTrustedPluginAllowlistRequiresDeclaredMayaVersion(t *testing.T) {
 		MayaVersions:               []string{""},
 	}
 
-	_, err := ensureTrustedPluginAllowlist(host, trustedPluginAllowlistMayaVersions(host, scenarioConfig{}), false)
+	_, err := ensureTrustedPluginAllowlist(host, trustedPluginAllowlistMayaVersions(host, scenarioConfig{}), []string{"C:/maya-stall/trusted-plugin-artifacts"}, false)
 	if err == nil || !strings.Contains(err.Error(), "maya version is required") {
 		t.Fatalf("missing Maya version error = %v", err)
 	}
@@ -1863,18 +2073,258 @@ func TestTrustedPluginAllowlistAcceptsPointReleaseMayaVersion(t *testing.T) {
 	}
 }
 
+func TestTrustedPluginAllowlistRequiredPathsIncludeNestedPluginParent(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "build", "maya2025", "Release", "demo.mll"), "fake nested plugin artifact\n")
+	host := mayaHostConfig{
+		TrustedPluginArtifactsRoot: "C:/maya-stall/trusted-plugin-artifacts",
+	}
+	payload := []manifestPayload{{Kind: "pluginArtifacts", Source: "build/maya2025/Release/demo.mll"}}
+
+	paths, err := trustedPluginAllowlistRequiredPaths(dir, host, payload)
+	if err != nil {
+		t.Fatalf("required allowlist paths error: %v", err)
+	}
+	want := []string{
+		"C:/maya-stall/trusted-plugin-artifacts",
+		"C:/maya-stall/trusted-plugin-artifacts/build/maya2025/Release",
+	}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("required allowlist paths = %#v, want %#v", paths, want)
+	}
+}
+
+func TestTrustedPluginAllowlistRequiredPathsIncludeNestedPluginParents(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "build", "maya2025", "Release", "package", "scripts", "plugin", "tool.py"), "def initializePlugin(plugin):\n    pass\n\ndef uninitializePlugin(plugin):\n    pass\n")
+	mustWriteFile(t, filepath.Join(dir, "build", "maya2025", "Release", "package", "scripts", "delegated", "loader.py"), "try:\n    from .implementation import initializePlugin, uninitializePlugin\nexcept ImportError:\n    from implementation import initializePlugin, uninitializePlugin\n")
+	mustWriteFile(t, filepath.Join(dir, "build", "maya2025", "Release", "package", "scripts", "star", "loader.py"), "from package.implementation import *\n")
+	mustWriteFile(t, filepath.Join(dir, "build", "maya2025", "Release", "package", "scripts", "tuple", "loader.py"), "initializePlugin, uninitializePlugin = make_callbacks()\n")
+	mustWriteFile(t, filepath.Join(dir, "build", "maya2025", "Release", "package", "scripts", "support", "helper.py"), "# Documents initializePlugin and uninitializePlugin without exporting them.\ndef initializePluginForTest():\n    pass\n\ndef uninitializePluginForTest():\n    pass\n")
+	host := mayaHostConfig{
+		TrustedPluginArtifactsRoot: "C:/maya-stall/trusted-plugin-artifacts",
+	}
+	payload := []manifestPayload{{Kind: "pluginArtifacts", Source: "build/maya2025/Release/package"}}
+
+	paths, err := trustedPluginAllowlistRequiredPaths(dir, host, payload)
+	if err != nil {
+		t.Fatalf("required allowlist paths error: %v", err)
+	}
+	want := []string{
+		"C:/maya-stall/trusted-plugin-artifacts",
+		"C:/maya-stall/trusted-plugin-artifacts/build/maya2025/Release/package",
+		"C:/maya-stall/trusted-plugin-artifacts/build/maya2025/Release/package/scripts/delegated",
+		"C:/maya-stall/trusted-plugin-artifacts/build/maya2025/Release/package/scripts/plugin",
+		"C:/maya-stall/trusted-plugin-artifacts/build/maya2025/Release/package/scripts/star",
+		"C:/maya-stall/trusted-plugin-artifacts/build/maya2025/Release/package/scripts/support",
+		"C:/maya-stall/trusted-plugin-artifacts/build/maya2025/Release/package/scripts/tuple",
+	}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("required allowlist paths = %#v, want %#v", paths, want)
+	}
+}
+
+func TestTrustedPluginAllowlistUsesFrozenRunPayloadSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "package", "plugin.py"), "# original plug-in\n")
+	payload := []manifestPayload{{Kind: "pluginArtifacts", Source: "package", Staged: filepath.Join("payload", "pluginArtifacts", "package")}}
+	workspace, err := newRunWorkspace(dir, "run-1", "C:/maya-stall", "scenario-result.json")
+	if err != nil {
+		t.Fatalf("create run workspace: %v", err)
+	}
+	context := runContext{
+		RepoDir:      dir,
+		RunWorkspace: workspace,
+		StateDir:     workspace.StateDir(),
+		EvidenceDir:  workspace.EvidenceDir(),
+		Workspace:    workspace.LocalWorkspace(),
+		EventsPath:   workspace.EventsPath(),
+		LogPath:      workspace.LogPath(),
+	}
+	if err := createCleanRunDirs(context); err != nil {
+		t.Fatalf("create run dirs: %v", err)
+	}
+	if err := snapshotRunPayload(context, payload); err != nil {
+		t.Fatalf("snapshot run payload: %v", err)
+	}
+	mustWriteFile(t, filepath.Join(dir, "package", "late", "plugin.py"), "# late plug-in\n")
+
+	host := mayaHostConfig{TrustedPluginArtifactsRoot: "C:/maya-stall/trusted-plugin-artifacts"}
+	paths, err := trustedPluginAllowlistRequiredPathsFromSnapshot(context, host, payload)
+	if err != nil {
+		t.Fatalf("inspect snapshot allowlist paths: %v", err)
+	}
+	want := []string{
+		"C:/maya-stall/trusted-plugin-artifacts",
+		"C:/maya-stall/trusted-plugin-artifacts/package",
+	}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("snapshot allowlist paths = %#v, want %#v", paths, want)
+	}
+	if _, err := os.Stat(filepath.Join(workspace.LocalPayloadPath(payload[0]), "late", "plugin.py")); !os.IsNotExist(err) {
+		t.Fatalf("payload snapshot changed after repo mutation: %v", err)
+	}
+}
+
+func TestTrustedPluginAllowlistRequiredPathsRejectTransportControlCharacters(t *testing.T) {
+	for index, nestedDir := range []string{"scripts\nbad", "bad\n", "\nbad"} {
+		t.Run(fmt.Sprintf("case-%d", index), func(t *testing.T) {
+			dir := t.TempDir()
+			mustWriteFile(t, filepath.Join(dir, "package", nestedDir, "plugin.py"), "# Python payload\n")
+			host := mayaHostConfig{TrustedPluginArtifactsRoot: "C:/maya-stall/trusted-plugin-artifacts"}
+			payload := []manifestPayload{{Kind: "pluginArtifacts", Source: "package"}}
+
+			_, err := trustedPluginAllowlistRequiredPaths(dir, host, payload)
+			if err == nil || !strings.Contains(err.Error(), "control characters") {
+				t.Fatalf("required allowlist paths error = %v, want transport control-character rejection", err)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginAllowlistRequiredPathsRejectWin32Aliases(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		root      string
+		nestedDir string
+	}{
+		{name: "drive trailing period", root: "C:/maya-stall/trusted-plugin-artifacts", nestedDir: "scripts."},
+		{name: "drive trailing space", root: "C:/maya-stall/trusted-plugin-artifacts", nestedDir: "scripts "},
+		{name: "UNC trailing period", root: "//server/share/trusted-plugin-artifacts", nestedDir: "scripts."},
+		{name: "UNC trailing space", root: "//server/share/trusted-plugin-artifacts", nestedDir: "scripts "},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mustWriteFile(t, filepath.Join(dir, "package", test.nestedDir, "plugin.py"), "# Python payload\n")
+			host := mayaHostConfig{TrustedPluginArtifactsRoot: test.root}
+			payload := []manifestPayload{{Kind: "pluginArtifacts", Source: "package"}}
+
+			_, err := trustedPluginAllowlistRequiredPaths(dir, host, payload)
+			if err == nil || !strings.Contains(err.Error(), "Windows path components ending in a space or period") {
+				t.Fatalf("required allowlist paths error = %v, want Win32 alias rejection", err)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginAllowlistRequiredPathsRejectInvalidWin32Components(t *testing.T) {
+	for _, nestedDir := range []string{"scripts?", "bad:name", "CON", "aux.txt", "COM¹", "lpt³.txt"} {
+		t.Run(nestedDir, func(t *testing.T) {
+			dir := t.TempDir()
+			mustWriteFile(t, filepath.Join(dir, "package", nestedDir, "plugin.py"), "# Python payload\n")
+			host := mayaHostConfig{TrustedPluginArtifactsRoot: "C:/maya-stall/trusted-plugin-artifacts"}
+			payload := []manifestPayload{{Kind: "pluginArtifacts", Source: "package"}}
+
+			_, err := trustedPluginAllowlistRequiredPaths(dir, host, payload)
+			if err == nil || !strings.Contains(err.Error(), "invalid Windows path component") {
+				t.Fatalf("required allowlist paths error = %v, want invalid Win32 component rejection", err)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginAllowlistValidationErrorsRedactConfiguredRoot(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "package", "COM¹", "plugin.py"), "# Python payload\n")
+	root := "D:/private-live-host/trusted-plugin-artifacts"
+	host := mayaHostConfig{TrustedPluginArtifactsRoot: root}
+	payload := []manifestPayload{{Kind: "pluginArtifacts", Source: "package"}}
+
+	_, err := trustedPluginAllowlistRequiredPaths(dir, host, payload)
+	if err == nil {
+		t.Fatal("required allowlist paths accepted invalid Win32 component")
+	}
+	if strings.Contains(err.Error(), root) {
+		t.Fatalf("validation error disclosed configured trusted root: %v", err)
+	}
+	if !strings.Contains(err.Error(), "package/COM¹") {
+		t.Fatalf("validation error missing repo-relative artifact path: %v", err)
+	}
+}
+
+func TestTrustedPluginAllowlistRequiredPathsRejectInvalidWin32ArtifactLeaves(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		source  string
+		isDir   bool
+		content string
+	}{
+		{name: "file artifact", source: "build/demo?.mll", content: "fake plug-in\n"},
+		{name: "reserved file artifact", source: "build/CON.mll", content: "fake plug-in\n"},
+		{name: "nested plugin leaf", source: "package/plugin?.py", isDir: true, content: "# Python plug-in\n"},
+		{name: "nested support leaf", source: "package/notes?.txt", isDir: true, content: "support\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mustWriteFile(t, filepath.Join(dir, filepath.FromSlash(test.source)), test.content)
+			payloadSource := test.source
+			if test.isDir {
+				payloadSource = "package"
+			}
+			host := mayaHostConfig{TrustedPluginArtifactsRoot: "C:/maya-stall/trusted-plugin-artifacts"}
+			payload := []manifestPayload{{Kind: "pluginArtifacts", Source: payloadSource}}
+
+			_, err := trustedPluginAllowlistRequiredPaths(dir, host, payload)
+			if err == nil || !strings.Contains(err.Error(), "invalid Windows path component") {
+				t.Fatalf("required allowlist paths error = %v, want invalid artifact leaf rejection", err)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginAllowlistRequiredPathsRejectUnsafeRawArtifactLeaves(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		entry     string
+		emptyDir  bool
+		wantError string
+	}{
+		{name: "file terminal space", entry: "build/demo.mll ", wantError: "ending in a space or period"},
+		{name: "file control character", entry: "build/demo.mll\n", wantError: "control characters"},
+		{name: "support terminal space", entry: "package/notes.txt ", wantError: "ending in a space or period"},
+		{name: "empty directory terminal period", entry: "package/cache.", emptyDir: true, wantError: "ending in a space or period"},
+		{name: "nested backslash", entry: `package/scripts\bad/plugin.py`, wantError: "forward slashes"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			entryPath := filepath.Join(dir, filepath.FromSlash(test.entry))
+			if test.emptyDir {
+				if err := os.MkdirAll(entryPath, 0o755); err != nil {
+					t.Fatalf("create artifact directory: %v", err)
+				}
+			} else {
+				mustWriteFile(t, entryPath, "artifact\n")
+			}
+			payloadSource := test.entry
+			if strings.HasPrefix(test.entry, "package/") {
+				payloadSource = "package"
+			}
+			host := mayaHostConfig{TrustedPluginArtifactsRoot: "C:/maya-stall/trusted-plugin-artifacts"}
+			payload := []manifestPayload{{Kind: "pluginArtifacts", Source: payloadSource}}
+
+			_, err := trustedPluginAllowlistRequiredPaths(dir, host, payload)
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("required allowlist paths error = %v, want %q", err, test.wantError)
+			}
+		})
+	}
+}
+
 func TestRunTrustedPluginAllowlistChecksAllHostMayaVersionsWhenScenarioUnpinned(t *testing.T) {
 	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "build", "demo.mll"), "fake plugin artifact\n")
 	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
 		trustedPluginPrefsProbeOutput(`// Security
 optionVar -cat "Security"
  -sa "SafeModeAllowedlistPaths"
- -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts";
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts/build";
 `),
 		trustedPluginPrefsProbeOutput(`// Security
 optionVar -cat "Security"
  -sa "SafeModeAllowedlistPaths"
- -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts";
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts/build";
 `),
 	})
 	host := mayaHostConfig{
@@ -1883,9 +2333,29 @@ optionVar -cat "Security"
 		TrustedPluginArtifactsRoot: "C:/maya-stall/trusted-plugin-artifacts",
 		MayaVersions:               []string{"2024", "2025"},
 	}
-	scenario := scenarioContract{Config: scenarioConfig{}, Payload: []manifestPayload{{Kind: "pluginArtifacts", Source: "build/demo.mll"}}}
+	payload := []manifestPayload{{Kind: "pluginArtifacts", Source: "build/demo.mll", Staged: filepath.Join("payload", "pluginArtifacts", "build", "demo.mll")}}
+	scenario := scenarioContract{Config: scenarioConfig{}, Payload: payload}
+	workspace, err := newRunWorkspace(dir, "run-1", "C:/maya-stall", "scenario-result.json")
+	if err != nil {
+		t.Fatalf("create run workspace: %v", err)
+	}
+	context := runContext{
+		RepoDir:      dir,
+		RunWorkspace: workspace,
+		StateDir:     workspace.StateDir(),
+		EvidenceDir:  workspace.EvidenceDir(),
+		Workspace:    workspace.LocalWorkspace(),
+		EventsPath:   workspace.EventsPath(),
+		LogPath:      workspace.LogPath(),
+	}
+	if err := createCleanRunDirs(context); err != nil {
+		t.Fatalf("create run dirs: %v", err)
+	}
+	if err := snapshotRunPayload(context, payload); err != nil {
+		t.Fatalf("snapshot run payload: %v", err)
+	}
 
-	if err := ensureTrustedPluginArtifactsAllowlistedForRun(host, scenario); err != nil {
+	if err := ensureTrustedPluginArtifactSnapshotAllowlistedForRun(context, host, scenario); err != nil {
 		t.Fatalf("run allowlist preflight error: %v", err)
 	}
 	countBytes, err := os.ReadFile(filepath.Join(dir, "fake-ssh-sequenced.count"))
@@ -1898,14 +2368,23 @@ optionVar -cat "Security"
 }
 
 func TestTrustedPluginPrefsRepairScriptDocumentsMutationSafety(t *testing.T) {
-	script := trustedPluginPrefsRepairScript("2025", "C:/maya-stall/trusted-plugin-artifacts")
+	script, err := trustedPluginPrefsRepairScript(mayaHostConfig{}, "2025")
+	if err != nil {
+		t.Fatalf("build trusted plug-in prefs repair script: %v", err)
+	}
 	for _, want := range []string{
 		"$env:MAYA_APP_DIR",
+		"$MayaStallRequiredPathsInput",
+		"ConvertFrom-Json",
+		"ConvertFrom-Json | ForEach-Object { $_ }",
 		"[Environment]::GetFolderPath('MyDocuments')",
 		"[System.IO.Path]::GetFullPath",
 		"Copy-Item -LiteralPath $prefs",
 		"[regex]::Matches($content",
-		"$paths.Add($root)",
+		"System.Collections.Generic.HashSet[string]",
+		"System.Text.StringBuilder",
+		"$normalizedPaths.Add($wanted)",
+		"$paths.Add($requiredPath)",
 		"Add-Content -LiteralPath $prefs",
 		"SafeModeAllowedlistPaths",
 	} {
@@ -1915,6 +2394,239 @@ func TestTrustedPluginPrefsRepairScriptDocumentsMutationSafety(t *testing.T) {
 	}
 	if strings.Contains(script, "New-Item -ItemType Directory") {
 		t.Fatalf("repair script should not fabricate missing Maya prefs:\n%s", script)
+	}
+	if strings.Contains(script, "C:/maya-stall/trusted-plugin-artifacts") {
+		t.Fatalf("repair script must receive required paths over stdin, not the command line:\n%s", script)
+	}
+	for _, quadratic := range []string{"$paths.Contains($entry)", "$block +="} {
+		if strings.Contains(script, quadratic) {
+			t.Fatalf("repair script contains quadratic operation %q:\n%s", quadratic, script)
+		}
+	}
+	requiredLoop := strings.Index(script, "foreach ($requiredPath in $requiredPaths)")
+	if requiredLoop < 0 {
+		t.Fatalf("repair script missing required-path loop:\n%s", script)
+	}
+	writeBlock := strings.Index(script[requiredLoop:], "if ($changed)")
+	if writeBlock < 0 || strings.Contains(script[requiredLoop:requiredLoop+writeBlock], "foreach ($entry in $paths)") {
+		t.Fatalf("repair script must not rescan every path for each requirement:\n%s", script)
+	}
+}
+
+func TestTrustedPluginPrefsUseSessionBrokerMayaAppDir(t *testing.T) {
+	host := mayaHostConfig{Broker: brokerConfig{
+		Structured: true,
+		Type:       "gg-mayasessiond",
+		StateDir:   "C:/maya-stall/sessiond-ui",
+		Repo:       "C:/maya-stall/tools/GG_MayaSessiond",
+	}}
+	mayaAppDir, err := trustedPluginMayaAppDir(host)
+	if err != nil {
+		t.Fatalf("resolve trusted plug-in Maya app dir: %v", err)
+	}
+	if mayaAppDir != "C:/maya-stall/sessiond-ui/maya_app" {
+		t.Fatalf("trusted plug-in Maya app dir = %q, want Session Broker Maya app dir", mayaAppDir)
+	}
+	preamble, err := trustedPluginPrefsScriptPreamble(host)
+	if err != nil {
+		t.Fatalf("build trusted plug-in prefs preamble: %v", err)
+	}
+	if !strings.Contains(preamble, "$mayaAppDir = 'C:/maya-stall/sessiond-ui/maya_app'") {
+		t.Fatalf("trusted plug-in prefs script does not target Session Broker Maya app dir:\n%s", preamble)
+	}
+	host.Broker.StateDir = "sessiond-ui"
+	host.Broker.Repo = "C:/maya-stall/tools/GG_MayaSessiond"
+	mayaAppDir, err = trustedPluginMayaAppDir(host)
+	if err != nil {
+		t.Fatalf("resolve relative trusted plug-in Maya app dir: %v", err)
+	}
+	if mayaAppDir != "C:/maya-stall/tools/GG_MayaSessiond/sessiond-ui/maya_app" {
+		t.Fatalf("relative broker state Maya app dir = %q, want path resolved from broker repo", mayaAppDir)
+	}
+}
+
+func TestTrustedPluginPrefsRejectAmbiguousSessionBrokerStateDir(t *testing.T) {
+	for _, stateDir := range []string{`\sessiond-ui`, `/sessiond-ui`, `C:sessiond-ui`} {
+		t.Run(stateDir, func(t *testing.T) {
+			host := mayaHostConfig{
+				Transport: "ssh",
+				SSH:       sshConfig{Host: "maya-win-01"},
+				WorkRoot:  "C:/maya-stall",
+				Broker: brokerConfig{
+					Structured: true,
+					Type:       "gg-mayasessiond",
+					StateDir:   stateDir,
+					Python:     "C:/Python/python.exe",
+					Repo:       "C:/maya-stall/tools/GG_MayaSessiond",
+				}}
+			if _, err := trustedPluginPrefsReadScript(host, "2025"); err == nil {
+				t.Fatalf("trusted plug-in prefs accepted ambiguous broker stateDir %q", stateDir)
+			}
+			if err := (ggMayaSessiondBroker{host: host}).validate(); err == nil {
+				t.Fatalf("Session Broker accepted ambiguous stateDir %q", stateDir)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginPrefsRejectWhitespaceAmbiguousSessionBrokerPaths(t *testing.T) {
+	for name, mutate := range map[string]func(*mayaHostConfig){
+		"state-dir-leading-space":  func(host *mayaHostConfig) { host.Broker.StateDir = " sessiond-ui" },
+		"state-dir-trailing-space": func(host *mayaHostConfig) { host.Broker.StateDir = "sessiond-ui " },
+		"repo-leading-space":       func(host *mayaHostConfig) { host.Broker.Repo = " C:/maya-stall/tools/GG_MayaSessiond" },
+		"repo-trailing-space":      func(host *mayaHostConfig) { host.Broker.Repo = "C:/maya-stall/tools/GG_MayaSessiond " },
+	} {
+		t.Run(name, func(t *testing.T) {
+			host := mayaHostConfig{
+				Transport: "ssh",
+				SSH:       sshConfig{Host: "maya-win-01"},
+				WorkRoot:  "C:/maya-stall",
+				Broker: brokerConfig{
+					Structured: true,
+					Type:       "gg-mayasessiond",
+					StateDir:   "sessiond-ui",
+					Python:     "C:/Python/python.exe",
+					Repo:       "C:/maya-stall/tools/GG_MayaSessiond",
+				}}
+			mutate(&host)
+			if _, err := trustedPluginPrefsReadScript(host, "2025"); err == nil {
+				t.Fatalf("trusted plug-in prefs accepted whitespace-ambiguous broker paths: %#v", host.Broker)
+			}
+			if err := (ggMayaSessiondBroker{host: host}).validate(); err == nil {
+				t.Fatalf("Session Broker accepted whitespace-ambiguous paths: %#v", host.Broker)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginPrefsRejectAmbiguousSessionBrokerRepo(t *testing.T) {
+	for _, repo := range []string{`\tools`, `/tools`, `C:tools`, `\\?\C:\maya-stall\tools`, `C:/../tools`, `C:/maya-stall/CON`} {
+		t.Run(repo, func(t *testing.T) {
+			host := mayaHostConfig{
+				Transport: "ssh",
+				SSH:       sshConfig{Host: "maya-win-01"},
+				WorkRoot:  "C:/maya-stall",
+				Broker: brokerConfig{
+					Structured: true,
+					Type:       "gg-mayasessiond",
+					StateDir:   "sessiond-ui",
+					Python:     "C:/Python/python.exe",
+					Repo:       repo,
+				}}
+			if _, err := trustedPluginPrefsReadScript(host, "2025"); err == nil {
+				t.Fatalf("trusted plug-in prefs accepted ambiguous broker repo %q", repo)
+			}
+			if err := (ggMayaSessiondBroker{host: host}).validate(); err == nil {
+				t.Fatalf("Session Broker accepted ambiguous repo %q", repo)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginPrefsRepairInputKeepsLargePathSetsOutOfCommandLine(t *testing.T) {
+	paths := make([]string, 0, 1_000)
+	for index := range 1_000 {
+		paths = append(paths, fmt.Sprintf("C:/maya-stall/trusted-plugin-artifacts/package-%04d/scripts", index))
+	}
+
+	input, err := trustedPluginPrefsRepairInput(paths)
+	if err != nil {
+		t.Fatalf("build repair input: %v", err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(input)
+	if err != nil {
+		t.Fatalf("decode repair input: %v", err)
+	}
+	var got []string
+	if err := json.Unmarshal(decoded, &got); err != nil {
+		t.Fatalf("parse repair input JSON: %v", err)
+	}
+	if !reflect.DeepEqual(got, compactTrustedPluginAllowlistPaths(paths)) {
+		t.Fatalf("repair input paths differ: got %d paths, want %d", len(got), len(paths))
+	}
+	script, err := trustedPluginPrefsRepairScript(mayaHostConfig{}, "2025")
+	if err != nil {
+		t.Fatalf("build trusted plug-in prefs repair script: %v", err)
+	}
+	if strings.Contains(script, paths[len(paths)-1]) {
+		t.Fatalf("repair command embeds a required path")
+	}
+}
+
+func TestTrustedPluginPrefsRepairStreamsPowerShellProgram(t *testing.T) {
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args.txt")
+	stdinPath := filepath.Join(dir, "stdin.txt")
+	sshPath := filepath.Join(dir, "fake-ssh-repair-stream")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s' \"$*\" > %s\ncat > %s\nprintf '%%s\\n' '%s{\"exists\":true,\"content\":\"\",\"changed\":true}'\n", shellQuote(argsPath), shellQuote(stdinPath), trustedPluginPrefsJSONPrefix)
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake SSH: %v", err)
+	}
+	host := mayaHostConfig{SSH: sshConfig{Host: "maya-win-01", Binary: sshPath}}
+	paths := []string{
+		"C:/maya-stall/trusted-plugin-artifacts",
+		"C:/maya-stall/trusted-plugin-artifacts/build/maya2025/Release/klv_push/scripts/klv_push",
+	}
+
+	if _, err := trustedPluginPrefs(host, "2025", paths, true); err != nil {
+		t.Fatalf("repair trusted plug-in prefs: %v", err)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read SSH args: %v", err)
+	}
+	if !strings.Contains(string(args), "-EncodedCommand") || strings.Contains(string(args), "Copy-Item") {
+		t.Fatalf("repair SSH args must use a short encoded bootstrap, got %q", string(args))
+	}
+	if len(args) > 2_048 {
+		t.Fatalf("repair SSH args length = %d, want <= 2048", len(args))
+	}
+	stdin, err := os.ReadFile(stdinPath)
+	if err != nil {
+		t.Fatalf("read SSH stdin: %v", err)
+	}
+	var envelope struct {
+		Program       string `json:"program"`
+		RequiredPaths string `json:"requiredPaths"`
+	}
+	if err := json.Unmarshal(stdin, &envelope); err != nil {
+		t.Fatalf("parse repair stdin envelope: %v", err)
+	}
+	program, err := base64.StdEncoding.DecodeString(envelope.Program)
+	if err != nil {
+		t.Fatalf("decode repair PowerShell program: %v", err)
+	}
+	if !strings.Contains(string(program), "Copy-Item -LiteralPath $prefs") {
+		t.Fatalf("repair PowerShell program was not streamed over stdin")
+	}
+	if strings.Contains(string(args), paths[len(paths)-1]) || strings.Contains(string(stdin), paths[len(paths)-1]) {
+		t.Fatalf("repair transport exposed a raw required path")
+	}
+}
+
+func TestRunSSHCommandOutputWithInputStreamsStdin(t *testing.T) {
+	dir := t.TempDir()
+	stdinPath := filepath.Join(dir, "stdin.txt")
+	sshPath := filepath.Join(dir, "fake-ssh-stdin")
+	script := fmt.Sprintf("#!/bin/sh\ncat > %s\nprintf 'ok'\n", shellQuote(stdinPath))
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake SSH: %v", err)
+	}
+	host := mayaHostConfig{SSH: sshConfig{Host: "maya-win-01", Binary: sshPath}}
+
+	raw, err := runSSHCommandOutputWithInput(host, []string{"ignored"}, "large-input-payload", sshCommandTimeout)
+	if err != nil {
+		t.Fatalf("run SSH with stdin: %v", err)
+	}
+	if string(raw) != "ok" {
+		t.Fatalf("SSH output = %q, want ok", string(raw))
+	}
+	got, err := os.ReadFile(stdinPath)
+	if err != nil {
+		t.Fatalf("read captured stdin: %v", err)
+	}
+	if string(got) != "large-input-payload" {
+		t.Fatalf("SSH stdin = %q", string(got))
 	}
 }
 
@@ -1931,6 +2643,23 @@ optionVar -cat "Security"
 	}
 	if !prefsAllowlistContainsRoot(prefs, "c:/maya-stall/trusted-plugin-artifacts") {
 		t.Fatalf("allowlist did not normalize configured trusted root")
+	}
+}
+
+func TestTrustedPluginAllowlistPreservesUNCIdentity(t *testing.T) {
+	required := "//server/share/plugins"
+	content := `// Security
+optionVar -cat "Security"
+ -sa "SafeModeAllowedlistPaths"
+ -sva "SafeModeAllowedlistPaths" "/server/share/plugins";
+`
+
+	missing := prefsAllowlistMissingPaths(content, []string{required})
+	if !reflect.DeepEqual(missing, []string{required}) {
+		t.Fatalf("UNC missing paths = %#v, want %#v", missing, []string{required})
+	}
+	if normalizeTrustedPluginPath(`\\server\share\plugins`) != normalizeTrustedPluginPath(required) {
+		t.Fatalf("backslash and slash UNC forms did not normalize equally")
 	}
 }
 
@@ -3559,6 +4288,25 @@ hostPools:
 	}
 }
 
+func TestSFTPBatchMkdirAllPreservesUNCVolume(t *testing.T) {
+	batch := newSFTPBatch()
+	batch.mkdirAll("//server/share/trusted/plugins")
+	got := batch.String()
+	for _, want := range []string{
+		`-mkdir "//server"`,
+		`-mkdir "//server/share"`,
+		`-mkdir "//server/share/trusted"`,
+		`-mkdir "//server/share/trusted/plugins"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("UNC mkdir batch missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, `-mkdir "/server`) {
+		t.Fatalf("UNC mkdir batch collapsed the UNC prefix:\n%s", got)
+	}
+}
+
 func TestRunScenarioRealSSHUploadsPluginArtifactsToTrustedRoot(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	sftpLog := filepath.Join(dir, "sftp.log")
@@ -3567,7 +4315,8 @@ func TestRunScenarioRealSSHUploadsPluginArtifactsToTrustedRoot(t *testing.T) {
 		trustedPluginPrefsProbeOutput(`// Security
 optionVar -cat "Security"
  -sa "SafeModeAllowedlistPaths"
- -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts";
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts/build";
 `),
 		`{"ok":true,"tool":"trusted-plugin-cleanup"}`,
 		sessiondStatusFixture("session-alpha"),
@@ -3704,6 +4453,156 @@ hostPools:
 	}
 	if !strings.Contains(stderr.String(), "trustedPluginArtifactsRoot must be outside workRoot/runs") {
 		t.Fatalf("run stderr missing trusted root rejection:\n%s", stderr.String())
+	}
+}
+
+func TestTrustedPluginArtifactsRootRejectsFilesystemRoots(t *testing.T) {
+	for _, root := range []string{
+		".", "/", "C:/", `C:\`,
+		`//server/share`, `\\server\share`, `//server/share/.`, `//server/share/plugins/..`,
+	} {
+		t.Run(root, func(t *testing.T) {
+			host := mayaHostConfig{
+				WorkRoot:                   "C:/maya-stall",
+				TrustedPluginArtifactsRoot: root,
+			}
+
+			err := validateTrustedPluginArtifactsRoot(host)
+			if err == nil || !strings.Contains(err.Error(), "must resolve to a non-root directory") {
+				t.Fatalf("validate trusted Plugin Artifact root %q error = %v", root, err)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginArtifactsRootRejectsWindowsDeviceNamespaces(t *testing.T) {
+	for _, root := range []string{
+		`\\?\UNC\server\share\plugins`, `\\.\UNC\server\share\plugins`,
+		`\\?\C:\plugins`, `\\.\C:\plugins`,
+		`\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\plugins`,
+		`\\?\GLOBALROOT\Device\HarddiskVolume1\plugins`,
+	} {
+		t.Run(root, func(t *testing.T) {
+			host := mayaHostConfig{
+				WorkRoot:                   "C:/maya-stall",
+				TrustedPluginArtifactsRoot: root,
+			}
+
+			err := validateTrustedPluginArtifactsRoot(host)
+			if err == nil || !strings.Contains(err.Error(), "must not use a Windows device namespace") {
+				t.Fatalf("validate trusted Plugin Artifact root %q error = %v", root, err)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginArtifactsRootRejectsRelativeWindowsPaths(t *testing.T) {
+	for _, root := range []string{
+		"plugins", "maya-stall/runs", `C:plugins`, `C:maya-stall\runs`,
+	} {
+		t.Run(root, func(t *testing.T) {
+			host := mayaHostConfig{
+				WorkRoot:                   "C:/Users/maya/maya-stall",
+				TrustedPluginArtifactsRoot: root,
+			}
+
+			err := validateTrustedPluginArtifactsRoot(host)
+			if err == nil || !strings.Contains(err.Error(), "must be an absolute Windows path") {
+				t.Fatalf("validate trusted Plugin Artifact root %q error = %v", root, err)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginArtifactsRootRejectsTraversalAboveWindowsVolume(t *testing.T) {
+	for _, root := range []string{
+		"C:/plugins/../../..",
+		"C:/../../maya-stall/runs/trusted",
+		"//server/share/../../plugins",
+		"//server/share/plugins/../../../other",
+	} {
+		t.Run(root, func(t *testing.T) {
+			host := mayaHostConfig{
+				WorkRoot:                   "C:/maya-stall",
+				TrustedPluginArtifactsRoot: root,
+			}
+
+			err := validateTrustedPluginArtifactsRoot(host)
+			if err == nil || !strings.Contains(err.Error(), "must not traverse above its Windows volume root") {
+				t.Fatalf("validate trusted Plugin Artifact root %q error = %v", root, err)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginArtifactsRootRejectsWin32TrimmedComponents(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		workRoot string
+		root     string
+	}{
+		{name: "drive trailing period", workRoot: "C:/maya-stall", root: "C:/maya-stall/runs./trusted"},
+		{name: "drive trailing space", workRoot: "C:/maya-stall", root: "C:/maya-stall/runs /trusted"},
+		{name: "drive terminal space", workRoot: "C:/maya-stall", root: "C:/trusted/plugins "},
+		{name: "UNC trailing period", workRoot: "//server/share/maya-stall", root: "//server/share/maya-stall/runs./trusted"},
+		{name: "UNC trailing space", workRoot: "//server/share/maya-stall", root: "//server/share/maya-stall/runs /trusted"},
+		{name: "UNC terminal space", workRoot: "//server/share/maya-stall", root: "//server/share/trusted/plugins "},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			host := mayaHostConfig{
+				WorkRoot:                   test.workRoot,
+				TrustedPluginArtifactsRoot: test.root,
+			}
+
+			err := validateTrustedPluginArtifactsRoot(host)
+			if err == nil || !strings.Contains(err.Error(), "must not contain Windows path components ending in a space or period") {
+				t.Fatalf("validate trusted Plugin Artifact root %q error = %v", test.root, err)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginArtifactsRootRejectsWin32TrimmedWorkRoot(t *testing.T) {
+	for _, workRoot := range []string{
+		"C:/maya-stall./work",
+		"C:/maya-stall ",
+		"//server/share/maya-stall /work",
+		"//server/share/maya-stall ",
+	} {
+		t.Run(workRoot, func(t *testing.T) {
+			host := mayaHostConfig{
+				WorkRoot:                   workRoot,
+				TrustedPluginArtifactsRoot: "C:/trusted/plugins",
+			}
+
+			err := validateTrustedPluginArtifactsRoot(host)
+			if err == nil || !strings.Contains(err.Error(), "workRoot must not contain Windows path components ending in a space or period") {
+				t.Fatalf("validate work root %q error = %v", workRoot, err)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginArtifactsRootRejectsInvalidWin32Components(t *testing.T) {
+	for _, root := range []string{
+		"C:/trusted/CON",
+		"C:/trusted/bad?name",
+		"C:/trusted/COM¹",
+		"//server/share/trusted/aux.txt",
+		"//server/share/trusted/bad:name",
+		"//server/share/trusted/lpt².log",
+	} {
+		t.Run(root, func(t *testing.T) {
+			host := mayaHostConfig{
+				WorkRoot:                   "C:/maya-stall",
+				TrustedPluginArtifactsRoot: root,
+			}
+
+			err := validateTrustedPluginArtifactsRoot(host)
+			if err == nil || !strings.Contains(err.Error(), "invalid Windows path component") {
+				t.Fatalf("validate trusted Plugin Artifact root %q error = %v", root, err)
+			}
+		})
 	}
 }
 
@@ -4817,6 +5716,53 @@ optionVar -cat "Security"
 	}
 	if !strings.Contains(stderr.String(), "trusted Plugin Artifact allowlist preflight failed: maya 2025 SafeModeAllowedlistPaths does not contain trustedPluginArtifactsRoot") {
 		t.Fatalf("run stderr missing trusted allowlist preflight:\n%s", stderr.String())
+	}
+	if _, err := os.Stat(sftpLog); !os.IsNotExist(err) {
+		t.Fatalf("trusted allowlist preflight should happen before SFTP staging, stat err = %v", err)
+	}
+	runs, err := os.ReadDir(filepath.Join(dir, ".maya-stall", "state", "runs"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read run state after failed allowlist preflight: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("failed allowlist preflight left %d run snapshot(s)", len(runs))
+	}
+	evidenceRuns, err := os.ReadDir(filepath.Join(dir, "artifacts", "maya-stall"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read Evidence directory after failed allowlist preflight: %v", err)
+	}
+	if len(evidenceRuns) != 0 {
+		t.Fatalf("failed allowlist preflight left %d empty Evidence directorie(s)", len(evidenceRuns))
+	}
+}
+
+func TestRunScenarioRealSSHFailsBeforeStagingWhenNestedTrustedPluginDestinationMissing(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	mustWriteFile(t, filepath.Join(dir, "build", "maya2025", "Release", "demo.mll"), "fake nested plugin artifact\n")
+	configPath := filepath.Join(dir, ".maya-stall.yaml")
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config fixture: %v", err)
+	}
+	mustWriteFile(t, configPath, strings.Replace(string(configBytes), "build/demo.mll", "build/maya2025/Release/demo.mll", 1))
+	sftpLog := filepath.Join(dir, "sftp.log")
+	sftpPath := writeFakeSFTPCommand(t, dir, sftpLog)
+	sshPath := writeSequencedFakeSSHCommand(t, dir, filepath.Join(dir, "ssh.log"), []string{
+		trustedPluginPrefsProbeOutput(`// Security
+optionVar -cat "Security"
+ -sa "SafeModeAllowedlistPaths"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts";
+`),
+	})
+	hostConfigPath := writeTrustedPluginHostConfig(t, dir, sshPath, sftpPath)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "trusted Plugin Artifact allowlist preflight failed: maya 2025 SafeModeAllowedlistPaths does not contain trusted Plugin Artifact destination directories; run doctor with the same Scenario and --repair-trusted-plugin-allowlist") {
+		t.Fatalf("run stderr missing nested trusted allowlist preflight:\n%s", stderr.String())
 	}
 	if _, err := os.Stat(sftpLog); !os.IsNotExist(err) {
 		t.Fatalf("trusted allowlist preflight should happen before SFTP staging, stat err = %v", err)
@@ -7708,7 +8654,8 @@ exit 0
 `, shellQuote(countPath), shellQuote(logPath), shellQuote(expectedCommand), sessiondStatusFixture("session-alpha"), trustedPluginPrefsProbeOutput(`// Security
 optionVar -cat "Security"
  -sa "SafeModeAllowedlistPaths"
- -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts";
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts/build";
 `))
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("write missing trusted Plugin Artifact destination fake ssh command: %v", err)
@@ -7767,7 +8714,8 @@ esac
 `, shellQuote(countPath), shellQuote(logPath), shellQuote(expectedCommand), sessiondStatusFixture("session-alpha"), trustedPluginPrefsProbeOutput(`// Security
 optionVar -cat "Security"
  -sa "SafeModeAllowedlistPaths"
- -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts";
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts"
+ -sva "SafeModeAllowedlistPaths" "C:/maya-stall/trusted-plugin-artifacts/build";
 `))
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("write failing trusted Plugin Artifact removal fake ssh command: %v", err)

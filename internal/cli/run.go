@@ -82,6 +82,10 @@ type recordingCapturer interface {
 	CaptureRecording(runContext, recordingRequest) (visualEvidenceArtifact, error)
 }
 
+type recoveredScenarioVisualEvidencePolicy interface {
+	CaptureVisualEvidenceAfterRecoveredScenario(error) bool
+}
+
 type desktopClicker interface {
 	ClickDesktop(desktopClickRequest) error
 }
@@ -250,30 +254,86 @@ func shouldStopAfter(stopAfter string, status string) bool {
 	}
 }
 
+type runDirOwnership struct {
+	StateDir    bool
+	EvidenceDir bool
+}
+
 func createCleanRunDirs(context runContext) error {
+	_, err := createCleanRunDirsWithOwnership(context)
+	return err
+}
+
+func createCleanRunDirsWithOwnership(context runContext) (runDirOwnership, error) {
+	var ownership runDirOwnership
 	for _, path := range []string{
 		filepath.Join(".maya-stall", "state", "runs"),
 		filepath.Join("artifacts", "maya-stall"),
 	} {
 		if err := ensureOutputPathHasNoSymlinkParent(context.RepoDir, path); err != nil {
-			return err
+			return ownership, err
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(context.StateDir), 0o755); err != nil {
-		return err
+		return ownership, err
 	}
 	if err := os.Mkdir(context.StateDir, 0o755); err != nil {
-		return fmt.Errorf("create clean run state: %w", err)
+		return ownership, fmt.Errorf("create clean run state: %w", err)
 	}
+	ownership.StateDir = true
 	for _, path := range []string{
 		context.Workspace,
 		context.RunWorkspace.LocalPayloadRoot(),
 		filepath.Dir(context.LogPath),
-		context.EvidenceDir,
 	} {
 		if err := os.MkdirAll(path, 0o755); err != nil {
-			return err
+			return ownership, err
 		}
+	}
+	if err := os.MkdirAll(filepath.Dir(context.EvidenceDir), 0o755); err != nil {
+		return ownership, err
+	}
+	if err := os.Mkdir(context.EvidenceDir, 0o755); err != nil {
+		return ownership, fmt.Errorf("create clean Evidence directory: %w", err)
+	}
+	ownership.EvidenceDir = true
+	return ownership, nil
+}
+
+func snapshotRunPayload(context runContext, payload []manifestPayload) error {
+	for _, item := range payload {
+		if err := rejectSFTPRepoPath(item.Source); err != nil {
+			return fmt.Errorf("snapshot %s payload: %w", item.Kind, err)
+		}
+		if err := validatePayloadPathForTransport(context.RepoDir, item.Source); err != nil {
+			return fmt.Errorf("snapshot %s payload %s: %w", item.Kind, item.Source, err)
+		}
+	}
+
+	// Copy shallower declarations first. Their frozen tree already contains any
+	// explicitly declared descendants, so later overlaps need no second write.
+	snapshotPayload := append([]manifestPayload(nil), payload...)
+	sort.SliceStable(snapshotPayload, func(left int, right int) bool {
+		return strings.Count(snapshotPayload[left].Source, "/") < strings.Count(snapshotPayload[right].Source, "/")
+	})
+	copiedRoots := make(map[string][]string)
+	for _, item := range snapshotPayload {
+		covered := false
+		for _, root := range copiedRoots[item.Kind] {
+			if item.Source == root || strings.HasPrefix(item.Source, root+"/") {
+				covered = true
+				break
+			}
+		}
+		if covered {
+			continue
+		}
+		source := filepath.Join(context.RepoDir, item.Source)
+		destination := context.RunWorkspace.LocalPayloadPath(item)
+		if err := copyPath(source, destination); err != nil {
+			return fmt.Errorf("snapshot %s payload %s: %w", item.Kind, item.Source, err)
+		}
+		copiedRoots[item.Kind] = append(copiedRoots[item.Kind], item.Source)
 	}
 	return nil
 }
@@ -1024,17 +1084,7 @@ func decodeJSONUseNumber(content []byte, value any) error {
 type fakeHost struct{}
 
 func (fakeHost) StagePayload(context runContext, payload []manifestPayload) error {
-	for _, item := range payload {
-		if err := ensurePayloadPathHasNoSymlinkAncestor(context.RepoDir, item.Source); err != nil {
-			return fmt.Errorf("stage %s payload %s: %w", item.Kind, item.Source, err)
-		}
-		source := filepath.Join(context.RepoDir, item.Source)
-		destination := context.RunWorkspace.LocalPayloadPath(item)
-		if err := copyPath(source, destination); err != nil {
-			return fmt.Errorf("stage %s payload %s: %w", item.Kind, item.Source, err)
-		}
-	}
-	return nil
+	return validatePayloadSnapshotForStage(context, payload)
 }
 
 func ensurePayloadPathHasNoSymlinkAncestor(repoDir string, relativePath string) error {

@@ -58,11 +58,14 @@ preflight layer instead of starting a Scenario.
 If the selected Maya Host config sets `trustedPluginArtifactsRoot`, `run` also
 copies declared `pluginArtifacts` to that stable host-managed root and exposes
 it to Scenario scripts as `MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT`.
-Before staging Plugin Artifacts, `run` validates that the same root is present
-in Maya's durable `SafeModeAllowedlistPaths` preference for the selected Maya
-version. A missing baseline fails before upload or Scenario execution, with an
-actionable TrustCenter diagnostic instead of hanging behind Maya's untrusted
-plug-in modal.
+Before staging Plugin Artifacts, `run` validates that Maya's durable
+`SafeModeAllowedlistPaths` preference for the selected Maya version contains
+the configured root, declared Plugin Artifact destinations, and parent
+directories for nested `.mll` and `.py` files under directory artifacts. Python
+files are treated conservatively because Maya plug-in callbacks can be
+published dynamically. A missing baseline fails before upload or Scenario execution, with
+an actionable TrustCenter diagnostic instead of hanging behind Maya's
+untrusted plug-in modal.
 The normal per-run payload copy still happens.
 Remote Scenario execution through `script.execute` is capped at 10 minutes.
 If `script.execute` or equivalent broker execution fails after the remote
@@ -107,9 +110,10 @@ Use this split instead:
 - Consuming repo: declare Plugin Artifacts in `payload.pluginArtifacts` and
   keep Scenario scripts responsible for loading and asserting the plug-in.
 - Operator/host config: set `trustedPluginArtifactsRoot` to a stable directory
-  that is not inside or above `workRoot/runs`, then add that exact directory to
-  Maya's trusted plug-in locations for the Windows account that runs the
-  interactive Maya UI.
+  using an absolute Windows drive or UNC path that is not inside or above
+  `workRoot/runs`, then trust that root plus the declared destination and
+  nested plug-in parent directories reported by `doctor --scenario <scenario>`
+  for the Windows account that runs the interactive Maya UI.
 - Scenario script: when `MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT` is present,
   load the declared plug-in from that root using the same repo-relative path;
   otherwise load from the per-run `payload/pluginArtifacts` path.
@@ -130,8 +134,9 @@ else:
 Maya Stall removes each declared destination in the trusted root before copying
 the current Plugin Artifact, so directory artifacts do not retain stale files.
 It adds trusted locations to Maya preferences only through the explicit
-`maya-stall doctor --repair-trusted-plugin-allowlist` operator action; ordinary
-run paths validate but do not mutate host security policy.
+`maya-stall doctor --scenario <scenario> --repair-trusted-plugin-allowlist`
+operator action; ordinary run paths validate but do not mutate host security
+policy.
 
 Default output:
 

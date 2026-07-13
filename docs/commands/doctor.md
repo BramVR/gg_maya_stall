@@ -16,7 +16,7 @@ maya-stall doctor --scenario smoke
 maya-stall doctor --host-config ci-hosts.yaml --target-profile ci
 maya-stall doctor --host-config ci-hosts.yaml --target-profile ci --host maya-win-01
 maya-stall doctor --host-config ci-hosts.yaml --target-profile ci --host maya-win-01 --scenario smoke
-maya-stall doctor --host-config ci-hosts.yaml --target-profile ci --host maya-win-01 --repair-trusted-plugin-allowlist
+maya-stall doctor --host-config ci-hosts.yaml --target-profile ci --host maya-win-01 --scenario smoke --repair-trusted-plugin-allowlist
 ```
 
 ## What It Checks
@@ -69,16 +69,23 @@ a layer-specific `session-broker` failure.
 
 When a real SSH Maya Host sets `trustedPluginArtifactsRoot`, doctor checks the
 interactive Windows account's durable Maya `SafeModeAllowedlistPaths` preference
-for the selected Maya version. Set `mayaVersions` in host config or
-`mayaVersion` on the Scenario so Maya Stall can locate the right preferences
-directory. A missing entry reports
+for the selected Maya version. When a Scenario is selected, doctor also checks
+the declared Plugin Artifact destinations and parent directories for nested
+`.mll` and `.py` files under directory artifacts. Python files are treated
+conservatively because Maya plug-in callbacks can be published dynamically. Set
+`mayaVersions` in host config or `mayaVersion` on the Scenario so Maya Stall can
+locate the right preferences directory. A missing entry reports
 `trusted-plugin-allowlist: fail` with a repair hint instead of leaving the next
 plug-in load to hang behind Maya's security modal. The repair path is opt-in:
 `--repair-trusted-plugin-allowlist` backs up existing Maya preferences before
-appending a preserved allowlist plus the configured root. Stop Maya before
-repair, make sure the target Maya version has been launched at least once so
-its preferences file exists, then restart it after repair so the durable
-preference is read by a clean interactive session.
+appending a preserved allowlist plus the required trusted destinations. Stop
+Maya before repair, make sure the target Maya version has been launched at
+least once so its preferences file exists, then restart it after repair so the
+durable preference is read by a clean interactive session. Keep `--scenario`
+when repairing a nested-path failure; a root-only doctor invocation cannot
+discover the Scenario's declared Plugin Artifact destinations. If that
+Scenario fails local validation, repair stops before contacting or mutating the
+Maya Host.
 
 ## When To Run
 

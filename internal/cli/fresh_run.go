@@ -22,6 +22,9 @@ type freshRunLifecycle struct {
 	resolvedRuntime              resolvedRuntime
 	context                      runContext
 	manifest                     runManifest
+	localRunStateOwned           bool
+	localEvidenceDirOwned        bool
+	sessionStartAttempted        bool
 	session                      brokerSessionIdentity
 	sessionStarted               bool
 	sessionSettled               bool
@@ -62,6 +65,17 @@ func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 				if cleanupErr := run.cleanupStoppedRun(); cleanupErr != nil {
 					err = errors.Join(err, cleanupErr)
 					run.releaseHostLock = false
+				}
+			}
+		}
+		if !run.sessionStartAttempted && run.localRunStateOwned {
+			runID := run.context.RunWorkspace.RunID()
+			if cleanupErr := cleanupRunState(run.repoDir, runID); cleanupErr != nil {
+				err = errors.Join(err, fmt.Errorf("clean up pre-session Fresh Run state for %s: %w", runID, cleanupErr))
+			}
+			if run.localEvidenceDirOwned {
+				if cleanupErr := os.Remove(run.context.EvidenceDir); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
+					err = errors.Join(err, fmt.Errorf("clean up empty pre-session Evidence directory for %s: %w", runID, cleanupErr))
 				}
 			}
 		}
@@ -132,10 +146,6 @@ func (run *freshRunLifecycle) setup() error {
 	if err := rejectUnsupportedEvidenceConfig(run.runtime.Broker, scenario.Config); err != nil {
 		return err
 	}
-	if err := ensureTrustedPluginArtifactsAllowlistedForRun(host.Config, scenario); err != nil {
-		return err
-	}
-
 	runID := run.runtime.Now().UTC().Format("20060102T150405.000000000Z")
 	workspace, err := newRunWorkspace(run.repoDir, runID, host.Config.WorkRoot, scenario.ScenarioResultPath)
 	if err != nil {
@@ -157,7 +167,18 @@ func (run *freshRunLifecycle) setup() error {
 	if root := trustedPluginArtifactsRoot(host.Config); root != "" {
 		run.context.Environment[trustedPluginArtifactsRootEnvVar] = root
 	}
-	if err := createCleanRunDirs(run.context); err != nil {
+	ownership, err := createCleanRunDirsWithOwnership(run.context)
+	run.localRunStateOwned = ownership.StateDir
+	run.localEvidenceDirOwned = ownership.EvidenceDir
+	if err != nil {
+		return err
+	}
+	// Freeze the payload before TrustCenter preflight so the checked paths are
+	// the exact bytes later staged to the Maya Host.
+	if err := snapshotRunPayload(run.context, scenario.Payload); err != nil {
+		return err
+	}
+	if err := ensureTrustedPluginArtifactSnapshotAllowlistedForRun(run.context, host.Config, scenario); err != nil {
 		return err
 	}
 
@@ -189,6 +210,7 @@ func (run *freshRunLifecycle) setup() error {
 }
 
 func (run *freshRunLifecycle) startFreshSession() error {
+	run.sessionStartAttempted = true
 	session, err := run.runtime.Broker.StartFreshSession(run.context, run.scenario.Config)
 	if err == nil && (session.BrokerAdapter == "" || session.SessionID == "") {
 		run.releaseHostLock = false
@@ -301,6 +323,9 @@ func (run *freshRunLifecycle) recoverCompletedScenarioAfterBrokerFailure(runErr 
 	run.brokerResult = ScenarioResult{Status: resultStatusPassed, Summary: "Scenario completed before broker failure"}
 	run.skipSettleArtifactCollection = true
 	run.skipSettleVisualEvidence = true
+	if policy, ok := run.runtime.Broker.(recoveredScenarioVisualEvidencePolicy); ok {
+		run.skipSettleVisualEvidence = !policy.CaptureVisualEvidenceAfterRecoveredScenario(runErr)
+	}
 	return true, appendEvent(run.context.EventsPath, "run.recovered-after-broker-failure", runErr.Error())
 }
 

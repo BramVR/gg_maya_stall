@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -229,7 +228,7 @@ func (host realSSHHost) StagePayload(context runContext, payload []manifestPaylo
 	if err := validateRealSSHConfig(host.host); err != nil {
 		return err
 	}
-	if err := validatePayloadForStage(context, payload); err != nil {
+	if err := validatePayloadSnapshotForStage(context, payload); err != nil {
 		return err
 	}
 	if err := host.prepareTrustedPluginArtifactDestinations(payload); err != nil {
@@ -239,7 +238,7 @@ func (host realSSHHost) StagePayload(context runContext, payload []manifestPaylo
 	batch.mkdirAll(context.RunWorkspace.RemoteRunRoot())
 	batch.mkdirAll(context.RunWorkspace.RemoteWorkspace())
 	for _, item := range payload {
-		source := filepath.Join(context.RepoDir, item.Source)
+		source := context.RunWorkspace.LocalPayloadPath(item)
 		destination := context.RunWorkspace.RemotePayloadPath(item)
 		batch.mkdirAll(remoteDir(destination))
 		batch.put(source, destination)
@@ -254,12 +253,13 @@ func (host realSSHHost) StagePayload(context runContext, payload []manifestPaylo
 	return nil
 }
 
-func validatePayloadForStage(context runContext, payload []manifestPayload) error {
+func validatePayloadSnapshotForStage(context runContext, payload []manifestPayload) error {
 	for _, item := range payload {
 		if err := rejectSFTPRepoPath(item.Source); err != nil {
 			return fmt.Errorf("stage %s payload: %w", item.Kind, err)
 		}
-		if err := validatePayloadPathForTransport(context.RepoDir, item.Source); err != nil {
+		snapshotRoot := filepath.Join(context.RunWorkspace.LocalPayloadRoot(), item.Kind)
+		if err := validatePayloadPathForTransport(snapshotRoot, item.Source); err != nil {
 			return fmt.Errorf("stage %s payload %s: %w", item.Kind, item.Source, err)
 		}
 	}
@@ -322,15 +322,46 @@ func validateTrustedPluginArtifactsRoot(host mayaHostConfig) error {
 	if root == "" {
 		return nil
 	}
+	if hasWindowsDevicePrefix(root) {
+		return fmt.Errorf("trustedPluginArtifactsRoot must not use a Windows device namespace")
+	}
 	if err := rejectSFTPBatchUnsafePath(root); err != nil {
 		return fmt.Errorf("trustedPluginArtifactsRoot %w", err)
 	}
-	workRoot := cleanRemotePathForComparison(host.WorkRoot)
-	trustedRoot := cleanRemotePathForComparison(root)
-	if workRoot == "" {
+	normalizedRoot := strings.TrimSpace(strings.ReplaceAll(root, `\`, "/"))
+	if normalizedRoot == "." || strings.Trim(normalizedRoot, "/") == "" {
+		return fmt.Errorf("trustedPluginArtifactsRoot must resolve to a non-root directory")
+	}
+	trustedRoot, trustedVolume, absolute, traversesRoot := canonicalWindowsPathForComparison(root)
+	if traversesRoot {
+		return fmt.Errorf("trustedPluginArtifactsRoot must not traverse above its Windows volume root")
+	}
+	if !absolute {
+		return fmt.Errorf("trustedPluginArtifactsRoot must be an absolute Windows path")
+	}
+	if hasWin32TrimmedPathComponent(host.TrustedPluginArtifactsRoot) {
+		return fmt.Errorf("trustedPluginArtifactsRoot must not contain Windows path components ending in a space or period")
+	}
+	if hasInvalidWin32PathComponent(host.TrustedPluginArtifactsRoot) {
+		return fmt.Errorf("trustedPluginArtifactsRoot contains an invalid Windows path component")
+	}
+	if trustedRoot == trustedVolume {
+		return fmt.Errorf("trustedPluginArtifactsRoot must resolve to a non-root directory")
+	}
+	if strings.TrimSpace(host.WorkRoot) == "" {
 		return nil
 	}
-	runsRoot := cleanRemotePathForComparison(remoteJoin(workRoot, "runs"))
+	workRoot, _, workRootAbsolute, workRootTraversesRoot := canonicalWindowsPathForComparison(host.WorkRoot)
+	if workRootTraversesRoot || !workRootAbsolute {
+		return fmt.Errorf("workRoot must be an absolute Windows path without above-root traversal when trustedPluginArtifactsRoot is configured")
+	}
+	if hasWin32TrimmedPathComponent(host.WorkRoot) {
+		return fmt.Errorf("workRoot must not contain Windows path components ending in a space or period when trustedPluginArtifactsRoot is configured")
+	}
+	if hasInvalidWin32PathComponent(host.WorkRoot) {
+		return fmt.Errorf("workRoot contains an invalid Windows path component when trustedPluginArtifactsRoot is configured")
+	}
+	runsRoot := remoteJoin(workRoot, "runs")
 	if trustedRoot == workRoot || trustedRoot == runsRoot || strings.HasPrefix(trustedRoot, runsRoot+"/") {
 		return fmt.Errorf("trustedPluginArtifactsRoot must be outside workRoot/runs and separate from workRoot")
 	}
@@ -340,12 +371,118 @@ func validateTrustedPluginArtifactsRoot(host mayaHostConfig) error {
 	return nil
 }
 
-func cleanRemotePathForComparison(value string) string {
-	clean := path.Clean(strings.ReplaceAll(remotePath(value), `\`, "/"))
-	if clean == "." {
-		return ""
+func canonicalWindowsPathForComparison(value string) (string, string, bool, bool) {
+	value = windowsPathWithoutDevicePrefix(value)
+	var volume string
+	var parts []string
+	if strings.HasPrefix(value, "//") {
+		uncParts := strings.Split(strings.TrimLeft(value, "/"), "/")
+		if len(uncParts) < 2 || uncParts[0] == "" || uncParts[1] == "" {
+			return "", "", false, false
+		}
+		if uncParts[0] == "." || uncParts[0] == ".." || uncParts[1] == "." || uncParts[1] == ".." {
+			return "", "", true, true
+		}
+		volume = "//" + strings.ToLower(uncParts[0]) + "/" + strings.ToLower(uncParts[1])
+		parts = uncParts[2:]
+	} else {
+		if len(value) < 3 || value[1] != ':' || value[2] != '/' || !isASCIIAlpha(value[0]) {
+			return "", "", false, false
+		}
+		volume = strings.ToLower(value[:2])
+		parts = strings.Split(value[3:], "/")
 	}
-	return strings.TrimRight(strings.ToLower(clean), "/")
+	cleanParts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(cleanParts) == 0 {
+				return "", volume, true, true
+			}
+			cleanParts = cleanParts[:len(cleanParts)-1]
+		default:
+			cleanParts = append(cleanParts, strings.ToLower(part))
+		}
+	}
+	clean := volume
+	if len(cleanParts) > 0 {
+		clean += "/" + strings.Join(cleanParts, "/")
+	}
+	return clean, volume, true, false
+}
+
+func hasWin32TrimmedPathComponent(value string) bool {
+	value = strings.ReplaceAll(remotePath(value), `\`, "/")
+	for _, component := range strings.Split(value, "/") {
+		if component == "" || component == "." || component == ".." {
+			continue
+		}
+		if strings.HasSuffix(component, " ") || strings.HasSuffix(component, ".") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasInvalidWin32PathComponent(value string) bool {
+	value = strings.ReplaceAll(remotePath(value), `\`, "/")
+	for index, component := range strings.Split(value, "/") {
+		if component == "" || component == "." || component == ".." {
+			continue
+		}
+		if index == 0 && len(component) == 2 && component[1] == ':' && isASCIIAlpha(component[0]) {
+			continue
+		}
+		if strings.ContainsAny(component, `<>:"|?*`) {
+			return true
+		}
+		for _, character := range component {
+			if character < 32 {
+				return true
+			}
+		}
+		base := strings.ToUpper(strings.SplitN(component, ".", 2)[0])
+		switch base {
+		case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$":
+			return true
+		}
+		if hasReservedWin32PortDeviceName(base) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasReservedWin32PortDeviceName(base string) bool {
+	if !strings.HasPrefix(base, "COM") && !strings.HasPrefix(base, "LPT") {
+		return false
+	}
+	suffix := base[3:]
+	return (len(suffix) == 1 && suffix[0] >= '1' && suffix[0] <= '9') ||
+		suffix == "¹" || suffix == "²" || suffix == "³"
+}
+
+func windowsPathWithoutDevicePrefix(value string) string {
+	value = strings.ReplaceAll(strings.TrimSpace(remotePath(value)), `\`, "/")
+	lower := strings.ToLower(value)
+	for _, prefix := range []string{"//?/unc/", "//./unc/"} {
+		if strings.HasPrefix(lower, prefix) {
+			return "//" + value[len(prefix):]
+		}
+	}
+	for _, prefix := range []string{"//?/", "//./"} {
+		if strings.HasPrefix(lower, prefix) {
+			return value[len(prefix):]
+		}
+	}
+	return value
+}
+
+func hasWindowsDevicePrefix(value string) bool {
+	value = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(remotePath(value)), `\`, "/"))
+	return strings.HasPrefix(value, "//?/") || strings.HasPrefix(value, "//./")
 }
 
 func (host realSSHHost) CollectArtifacts(context runContext, scenario scenarioContract) error {
@@ -521,7 +658,9 @@ func (batch *sftpBatch) mkdir(path string) {
 func (batch *sftpBatch) mkdirAll(path string) {
 	current := ""
 	normalized := sftpRemotePath(path)
-	if strings.HasPrefix(normalized, "/") {
+	if strings.HasPrefix(normalized, "//") {
+		current = "//"
+	} else if strings.HasPrefix(normalized, "/") {
 		current = "/"
 	}
 	for _, part := range strings.Split(strings.Trim(normalized, "/"), "/") {
@@ -533,7 +672,7 @@ func (batch *sftpBatch) mkdirAll(path string) {
 			if strings.HasSuffix(current, ":") {
 				continue
 			}
-		} else if current == "/" {
+		} else if current == "/" || current == "//" {
 			current += part
 		} else {
 			current += "/" + part

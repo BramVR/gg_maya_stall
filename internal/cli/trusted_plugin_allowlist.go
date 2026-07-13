@@ -1,10 +1,14 @@
 package cli
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -26,13 +30,34 @@ type trustedPluginPrefsProbeJSON struct {
 	Changed bool            `json:"changed,omitempty"`
 }
 
-func trustedPluginAllowlistDoctorLayer(host mayaHostConfig, scenario scenarioConfig, repair bool, sshOK bool, lockClear bool) doctorCheck {
+func trustedPluginAllowlistLocalConfigCheck(repoDir string, host mayaHostConfig, scenario scenarioContract) ([]string, *doctorCheck) {
+	if trustedPluginArtifactsRoot(host) == "" {
+		return nil, nil
+	}
+	if err := validateTrustedPluginArtifactsRoot(host); err != nil {
+		check := withSource(failedCheck(trustedPluginAllowlistLayerID, err.Error(), "Choose a narrow trustedPluginArtifactsRoot outside workRoot/runs. See docs/setup/windows-maya-host.md#trusted-plugin-artifacts."), "config")
+		return nil, &check
+	}
+	requiredPaths, err := trustedPluginAllowlistRequiredPaths(repoDir, host, scenario.Payload)
+	if err != nil {
+		check := withSource(failedCheck(trustedPluginAllowlistLayerID, err.Error(), "Fix declared Plugin Artifact paths before checking Maya trusted plug-in locations. See docs/setup/windows-maya-host.md#trusted-plugin-artifacts."), "config")
+		return nil, &check
+	}
+	return requiredPaths, nil
+}
+
+func trustedPluginAllowlistDoctorLayer(repoDir string, host mayaHostConfig, scenario scenarioContract, prevalidatedRequiredPaths []string, repair bool, sshOK bool, lockClear bool) doctorCheck {
 	root := trustedPluginArtifactsRoot(host)
 	if root == "" {
 		return withSource(okCheck(trustedPluginAllowlistLayerID, "not configured"), "config")
 	}
-	if err := validateTrustedPluginArtifactsRoot(host); err != nil {
-		return withSource(failedCheck(trustedPluginAllowlistLayerID, err.Error(), "Choose a narrow trustedPluginArtifactsRoot outside workRoot/runs. See docs/setup/windows-maya-host.md#trusted-plugin-artifacts."), "config")
+	requiredPaths := prevalidatedRequiredPaths
+	if requiredPaths == nil {
+		var check *doctorCheck
+		requiredPaths, check = trustedPluginAllowlistLocalConfigCheck(repoDir, host, scenario)
+		if check != nil {
+			return *check
+		}
 	}
 	if !host.usesRealSSH() {
 		return withSource(okCheck(trustedPluginAllowlistLayerID, "not checked for fake runtime"), "fake")
@@ -43,31 +68,48 @@ func trustedPluginAllowlistDoctorLayer(host mayaHostConfig, scenario scenarioCon
 	if repair && !lockClear {
 		return withBlockedBy(failedCheck(trustedPluginAllowlistLayerID, "repair skipped because Host Lock is not clear", "Wait for the active Fresh Run or clear the stale Host Lock before repairing Maya trusted plug-in locations. See docs/setup/windows-maya-host.md#host-lock-and-retention."), "host-lock")
 	}
-	versions := trustedPluginAllowlistMayaVersions(host, scenario)
-	changed, err := ensureTrustedPluginAllowlist(host, versions, repair)
+	versions := trustedPluginAllowlistMayaVersions(host, scenario.Config)
+	changed, err := ensureTrustedPluginAllowlist(host, versions, requiredPaths, repair)
 	if err != nil {
-		return withSource(failedCheck(trustedPluginAllowlistLayerID, err.Error(), "Add trustedPluginArtifactsRoot to Maya's trusted plug-in locations, or run doctor with --repair-trusted-plugin-allowlist after approving this host policy change. See docs/setup/windows-maya-host.md#trusted-plugin-artifacts."), "maya-prefs")
+		hint := "Add trustedPluginArtifactsRoot to Maya's trusted plug-in locations, or run doctor with --repair-trusted-plugin-allowlist after approving this host policy change. See docs/setup/windows-maya-host.md#trusted-plugin-artifacts."
+		if len(requiredPaths) > 1 {
+			hint = "Run doctor again with the same Scenario and --repair-trusted-plugin-allowlist after approving this host policy change. See docs/setup/windows-maya-host.md#trusted-plugin-artifacts."
+		}
+		return withSource(failedCheck(trustedPluginAllowlistLayerID, err.Error(), hint), "maya-prefs")
 	}
 	detail := fmt.Sprintf("Maya %s %s contains trustedPluginArtifactsRoot", strings.Join(versions, ","), safeModeAllowedlistOptionVar)
+	if len(requiredPaths) > 1 {
+		detail = fmt.Sprintf("Maya %s %s contains trustedPluginArtifactsRoot and trusted Plugin Artifact destination directories", strings.Join(versions, ","), safeModeAllowedlistOptionVar)
+	}
 	if repair && changed {
 		detail = fmt.Sprintf("Maya %s %s contains trustedPluginArtifactsRoot after repair", strings.Join(versions, ","), safeModeAllowedlistOptionVar)
+		if len(requiredPaths) > 1 {
+			detail = fmt.Sprintf("Maya %s %s contains trustedPluginArtifactsRoot and trusted Plugin Artifact destination directories after repair", strings.Join(versions, ","), safeModeAllowedlistOptionVar)
+		}
 	} else if repair {
 		detail = fmt.Sprintf("Maya %s %s already contains trustedPluginArtifactsRoot", strings.Join(versions, ","), safeModeAllowedlistOptionVar)
+		if len(requiredPaths) > 1 {
+			detail = fmt.Sprintf("Maya %s %s already contains trustedPluginArtifactsRoot and trusted Plugin Artifact destination directories", strings.Join(versions, ","), safeModeAllowedlistOptionVar)
+		}
 	}
 	return withSource(okCheck(trustedPluginAllowlistLayerID, detail), "maya-prefs")
 }
 
-func ensureTrustedPluginArtifactsAllowlistedForRun(host mayaHostConfig, scenario scenarioContract) error {
+func ensureTrustedPluginArtifactSnapshotAllowlistedForRun(context runContext, host mayaHostConfig, scenario scenarioContract) error {
 	if trustedPluginArtifactsRoot(host) == "" || !host.usesRealSSH() || !manifestHasPluginArtifacts(scenario.Payload) {
 		return nil
 	}
-	if _, err := ensureTrustedPluginAllowlist(host, trustedPluginAllowlistMayaVersions(host, scenario.Config), false); err != nil {
+	requiredPaths, err := trustedPluginAllowlistRequiredPathsFromSnapshot(context, host, scenario.Payload)
+	if err != nil {
+		return fmt.Errorf("trusted Plugin Artifact allowlist preflight failed: %w", err)
+	}
+	if _, err := ensureTrustedPluginAllowlist(host, trustedPluginAllowlistMayaVersions(host, scenario.Config), requiredPaths, false); err != nil {
 		return fmt.Errorf("trusted Plugin Artifact allowlist preflight failed: %w", err)
 	}
 	return nil
 }
 
-func ensureTrustedPluginAllowlist(host mayaHostConfig, versions []string, repair bool) (bool, error) {
+func ensureTrustedPluginAllowlist(host mayaHostConfig, versions []string, requiredPaths []string, repair bool) (bool, error) {
 	if repair {
 		sessions, err := mayaProcessSessions(host)
 		if err != nil {
@@ -76,6 +118,10 @@ func ensureTrustedPluginAllowlist(host mayaHostConfig, versions []string, repair
 		if len(sessions) > 0 {
 			return false, fmt.Errorf("TrustCenter repair requires Maya to be stopped first so userPrefs.mel is not overwritten on exit")
 		}
+	}
+	requiredPaths = compactTrustedPluginAllowlistPaths(requiredPaths)
+	if len(requiredPaths) == 0 {
+		requiredPaths = []string{trustedPluginArtifactsRoot(host)}
 	}
 	var changed bool
 	checked := 0
@@ -88,15 +134,19 @@ func ensureTrustedPluginAllowlist(host mayaHostConfig, versions []string, repair
 			return false, err
 		}
 		checked++
-		probe, err := trustedPluginPrefs(host, version, repair)
+		probe, err := trustedPluginPrefs(host, version, requiredPaths, repair)
 		if err != nil {
 			return false, fmt.Errorf("maya %s %s", version, err)
 		}
 		if !probe.Exists {
 			return false, fmt.Errorf("maya %s userPrefs.mel is missing", version)
 		}
-		if !prefsAllowlistContainsRoot(probe.Content, trustedPluginArtifactsRoot(host)) {
-			return false, fmt.Errorf("maya %s %s does not contain trustedPluginArtifactsRoot", version, safeModeAllowedlistOptionVar)
+		missingPaths := prefsAllowlistMissingPaths(probe.Content, requiredPaths)
+		if len(missingPaths) > 0 {
+			if len(requiredPaths) == 1 || missingPathsIncludeTrustedRoot(host, missingPaths) {
+				return false, fmt.Errorf("maya %s %s does not contain trustedPluginArtifactsRoot", version, safeModeAllowedlistOptionVar)
+			}
+			return false, fmt.Errorf("maya %s %s does not contain trusted Plugin Artifact destination directories; run doctor with the same Scenario and --repair-trusted-plugin-allowlist", version, safeModeAllowedlistOptionVar)
 		}
 		changed = changed || probe.Changed
 	}
@@ -106,6 +156,16 @@ func ensureTrustedPluginAllowlist(host mayaHostConfig, versions []string, repair
 	return changed, nil
 }
 
+func missingPathsIncludeTrustedRoot(host mayaHostConfig, missingPaths []string) bool {
+	root := normalizeTrustedPluginPath(trustedPluginArtifactsRoot(host))
+	for _, missingPath := range missingPaths {
+		if normalizeTrustedPluginPath(missingPath) == root {
+			return true
+		}
+	}
+	return false
+}
+
 func validateMayaPrefsVersion(version string) error {
 	if !mayaVersionPattern.MatchString(version) {
 		return fmt.Errorf("maya version %q is not a safe preferences path segment", version)
@@ -113,12 +173,29 @@ func validateMayaPrefsVersion(version string) error {
 	return nil
 }
 
-func trustedPluginPrefs(host mayaHostConfig, version string, repair bool) (trustedPluginPrefsProbe, error) {
-	script := trustedPluginPrefsReadScript(version)
-	if repair {
-		script = trustedPluginPrefsRepairScript(version, trustedPluginArtifactsRoot(host))
+func trustedPluginPrefs(host mayaHostConfig, version string, requiredPaths []string, repair bool) (trustedPluginPrefsProbe, error) {
+	script, err := trustedPluginPrefsReadScript(host, version)
+	if err != nil {
+		return trustedPluginPrefsProbe{}, err
 	}
-	raw, err := runSSHCommandOutput(host, encodedPowerShellCommand(script), sshCommandTimeout)
+	input := ""
+	remoteCommand := encodedPowerShellCommand(script)
+	if repair {
+		script, err = trustedPluginPrefsRepairScript(host, version)
+		if err != nil {
+			return trustedPluginPrefsProbe{}, err
+		}
+		repairInput, err := trustedPluginPrefsRepairInput(requiredPaths)
+		if err != nil {
+			return trustedPluginPrefsProbe{}, err
+		}
+		input, err = trustedPluginPrefsRepairEnvelope(script, repairInput)
+		if err != nil {
+			return trustedPluginPrefsProbe{}, err
+		}
+		remoteCommand = encodedPowerShellCommand(trustedPluginPrefsRepairBootstrapScript())
+	}
+	raw, err := runSSHCommandOutputWithInput(host, remoteCommand, input, sshCommandTimeout)
 	if err != nil {
 		return trustedPluginPrefsProbe{}, err
 	}
@@ -165,16 +242,164 @@ func trustedPluginPrefsContent(raw json.RawMessage) (string, error) {
 }
 
 func prefsAllowlistContainsRoot(content string, root string) bool {
-	want := normalizeTrustedPluginPath(root)
-	if want == "" {
-		return false
-	}
+	return len(prefsAllowlistMissingPaths(content, []string{root})) == 0
+}
+
+func prefsAllowlistMissingPaths(content string, requiredPaths []string) []string {
+	allowed := map[string]bool{}
 	for _, entry := range parseSafeModeAllowedlistPaths(content) {
-		if normalizeTrustedPluginPath(entry) == want {
-			return true
+		normalized := normalizeTrustedPluginPath(entry)
+		if normalized != "" {
+			allowed[normalized] = true
 		}
 	}
-	return false
+	var missing []string
+	for _, required := range compactTrustedPluginAllowlistPaths(requiredPaths) {
+		normalized := normalizeTrustedPluginPath(required)
+		if normalized == "" || allowed[normalized] {
+			continue
+		}
+		missing = append(missing, required)
+	}
+	return missing
+}
+
+func compactTrustedPluginAllowlistPaths(paths []string) []string {
+	seen := map[string]bool{}
+	var compact []string
+	for _, candidate := range paths {
+		trimmed := strings.TrimSpace(candidate)
+		normalized := normalizeTrustedPluginPath(trimmed)
+		if normalized == "" || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		compact = append(compact, trimmed)
+	}
+	sort.Slice(compact, func(i, j int) bool {
+		return normalizeTrustedPluginPath(compact[i]) < normalizeTrustedPluginPath(compact[j])
+	})
+	return compact
+}
+
+func trustedPluginAllowlistRequiredPaths(repoDir string, host mayaHostConfig, payload []manifestPayload) ([]string, error) {
+	root := trustedPluginArtifactsRoot(host)
+	if root == "" {
+		return nil, nil
+	}
+	required := []string{root}
+	validationPaths := []string{root}
+	for _, item := range payload {
+		if item.Kind != "pluginArtifacts" {
+			continue
+		}
+		if err := rejectSFTPRepoPath(item.Source); err != nil {
+			return nil, fmt.Errorf("inspect Plugin Artifact %s: %w", item.Source, err)
+		}
+		destination := trustedPluginArtifactPath(host, item)
+		if destination == "" {
+			continue
+		}
+		validationPaths = append(validationPaths, destination)
+		if err := validatePayloadPathForTransport(repoDir, item.Source); err != nil {
+			return nil, fmt.Errorf("inspect Plugin Artifact %s: %w", item.Source, err)
+		}
+		sourcePath := filepath.Join(repoDir, filepath.FromSlash(item.Source))
+		info, err := os.Stat(sourcePath)
+		if err != nil {
+			return nil, fmt.Errorf("inspect Plugin Artifact %s: %w", item.Source, err)
+		}
+		if !info.IsDir() {
+			required = append(required, remoteDir(destination))
+			continue
+		}
+		required = append(required, destination)
+		err = filepath.WalkDir(sourcePath, func(localPath string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			relativePath, err := filepath.Rel(sourcePath, localPath)
+			if err != nil {
+				return err
+			}
+			relativePath = filepath.ToSlash(relativePath)
+			if err := rejectSFTPRepoPath(relativePath); err != nil {
+				return err
+			}
+			if relativePath != "." {
+				validationPaths = append(validationPaths, remoteJoin(destination, relativePath))
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			pluginFile, err := isMayaPluginFile(localPath)
+			if err != nil || !pluginFile {
+				return err
+			}
+			relativeParent, err := filepath.Rel(sourcePath, filepath.Dir(localPath))
+			if err != nil || relativeParent == "." {
+				return err
+			}
+			required = append(required, remoteJoin(destination, filepath.ToSlash(relativeParent)))
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("inspect Plugin Artifact %s: %w", item.Source, err)
+		}
+	}
+	for _, destination := range validationPaths {
+		displayPath := trustedPluginValidationDisplayPath(root, destination)
+		if err := rejectSFTPBatchUnsafePath(destination); err != nil {
+			return nil, fmt.Errorf("inspect trusted Plugin Artifact path %q: %w", displayPath, err)
+		}
+		if hasWin32TrimmedPathComponent(destination) {
+			return nil, fmt.Errorf("inspect trusted Plugin Artifact path %q: Windows path components ending in a space or period are not allowed", displayPath)
+		}
+		if hasInvalidWin32PathComponent(destination) {
+			return nil, fmt.Errorf("inspect trusted Plugin Artifact path %q: invalid Windows path component", displayPath)
+		}
+	}
+	return compactTrustedPluginAllowlistPaths(required), nil
+}
+
+func trustedPluginAllowlistRequiredPathsFromSnapshot(context runContext, host mayaHostConfig, payload []manifestPayload) ([]string, error) {
+	var requiredPaths []string
+	for _, item := range payload {
+		if item.Kind != "pluginArtifacts" {
+			continue
+		}
+		snapshotRoot := filepath.Join(context.RunWorkspace.LocalPayloadRoot(), item.Kind)
+		itemPaths, err := trustedPluginAllowlistRequiredPaths(snapshotRoot, host, []manifestPayload{item})
+		if err != nil {
+			return nil, err
+		}
+		requiredPaths = append(requiredPaths, itemPaths...)
+	}
+	return compactTrustedPluginAllowlistPaths(requiredPaths), nil
+}
+
+func trustedPluginValidationDisplayPath(root string, destination string) string {
+	normalizedRoot := strings.TrimRight(strings.ReplaceAll(root, `\`, "/"), "/")
+	normalizedDestination := strings.ReplaceAll(destination, `\`, "/")
+	if strings.EqualFold(normalizedDestination, normalizedRoot) {
+		return "configured root"
+	}
+	prefix := normalizedRoot + "/"
+	if len(normalizedDestination) >= len(prefix) && strings.EqualFold(normalizedDestination[:len(prefix)], prefix) {
+		return normalizedDestination[len(prefix):]
+	}
+	return "configured destination"
+}
+
+func isMayaPluginFile(localPath string) (bool, error) {
+	switch strings.ToLower(filepath.Ext(localPath)) {
+	case ".mll", ".py":
+		// Python can publish Maya callbacks dynamically, so syntax inspection
+		// cannot safely distinguish plug-ins from helper modules.
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 func parseSafeModeAllowedlistPaths(content string) []string {
@@ -202,6 +427,9 @@ func unescapeMELString(value string) string {
 }
 
 func normalizeTrustedPluginPath(value string) string {
+	if clean, _, absolute, traversesRoot := canonicalWindowsPathForComparison(value); absolute && !traversesRoot {
+		return clean
+	}
 	clean := path.Clean(strings.ReplaceAll(remotePath(value), `\`, "/"))
 	if clean == "." {
 		return ""
@@ -238,7 +466,11 @@ func compactMayaVersions(versions []string) []string {
 	return compact
 }
 
-func trustedPluginPrefsReadScript(version string) string {
+func trustedPluginPrefsReadScript(host mayaHostConfig, version string) (string, error) {
+	preamble, err := trustedPluginPrefsScriptPreamble(host)
+	if err != nil {
+		return "", err
+	}
 	return fmt.Sprintf(`$ErrorActionPreference = 'Stop'
 %s
 $prefs = MayaStall-PrefsPath %s
@@ -249,14 +481,19 @@ if ($exists) {
 }
 $json = [pscustomobject]@{ exists = $exists; content = $content } | ConvertTo-Json -Compress
 Write-Output (%s + $json)
-`, trustedPluginPrefsScriptPreamble(), powerShellSingleQuoted(version), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix))
+`, preamble, powerShellSingleQuoted(version), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix)), nil
 }
 
-func trustedPluginPrefsRepairScript(version string, root string) string {
+func trustedPluginPrefsRepairScript(host mayaHostConfig, version string) (string, error) {
+	preamble, err := trustedPluginPrefsScriptPreamble(host)
+	if err != nil {
+		return "", err
+	}
 	return fmt.Sprintf(`$ErrorActionPreference = 'Stop'
 %s
 $prefs = MayaStall-PrefsPath %s
-$root = %s
+$requiredPathsJSON = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($MayaStallRequiredPathsInput))
+$requiredPaths = @($requiredPathsJSON | ConvertFrom-Json | ForEach-Object { $_ })
 function Normalize-MayaStallPath([string]$value) {
   try {
     return ([System.IO.Path]::GetFullPath(($value -replace '/','\')) -replace '\\','/').TrimEnd('/').ToLowerInvariant()
@@ -277,46 +514,174 @@ if ($exists) {
   return
 }
 $paths = New-Object System.Collections.Generic.List[string]
+$normalizedPaths = New-Object System.Collections.Generic.HashSet[string]
 foreach ($match in [regex]::Matches($content, '-(sva|sa)\s+"SafeModeAllowedlistPaths"(?:\s+"((?:\\.|[^"])*)")?')) {
   if ($match.Groups[1].Value -eq 'sa') {
     $paths.Clear()
+    $normalizedPaths.Clear()
   } else {
     $entry = (($match.Groups[2].Value -replace '\\"','"') -replace '\\\\','\')
-    if ($entry -and -not $paths.Contains($entry)) {
+    if ($entry -and $normalizedPaths.Add((Normalize-MayaStallPath $entry))) {
       $paths.Add($entry)
     }
   }
 }
-$wanted = Normalize-MayaStallPath $root
-$found = $false
-foreach ($entry in $paths) {
-  if ((Normalize-MayaStallPath $entry) -eq $wanted) {
-    $found = $true
+$changed = $false
+foreach ($requiredPath in $requiredPaths) {
+  $wanted = Normalize-MayaStallPath $requiredPath
+  if ($normalizedPaths.Add($wanted)) {
+    $paths.Add($requiredPath)
+    $changed = $true
   }
 }
-$changed = $false
-if (-not $found) {
+if ($changed) {
   if ($exists) {
     $stamp = Get-Date -Format 'yyyyMMddTHHmmss'
     Copy-Item -LiteralPath $prefs -Destination ($prefs + '.maya-stall-' + $stamp + '.bak') -Force
   }
-  $paths.Add($root)
   $nl = [Environment]::NewLine
-  $block = $nl + '// Maya Stall trusted Plugin Artifact root' + $nl + 'optionVar -cat "Security"' + $nl + ' -sa "SafeModeAllowedlistPaths"'
+  $block = New-Object System.Text.StringBuilder
+  [void]$block.Append($nl)
+  [void]$block.Append('// Maya Stall trusted Plugin Artifact destinations')
+  [void]$block.Append($nl)
+  [void]$block.Append('optionVar -cat "Security"')
+  [void]$block.Append($nl)
+  [void]$block.Append(' -sa "SafeModeAllowedlistPaths"')
   foreach ($entry in $paths) {
-    $block += $nl + ' -sva "SafeModeAllowedlistPaths" "' + (Escape-MelString $entry) + '"'
+    [void]$block.Append($nl)
+    [void]$block.Append(' -sva "SafeModeAllowedlistPaths" "')
+    [void]$block.Append((Escape-MelString $entry))
+    [void]$block.Append('"')
   }
-  $block += ';' + $nl
-  Add-Content -LiteralPath $prefs -Value $block -Encoding UTF8
-  $changed = $true
+  [void]$block.Append(';')
+  [void]$block.Append($nl)
+  Add-Content -LiteralPath $prefs -Value $block.ToString() -Encoding UTF8
 }
 $content = [string](Get-Content -LiteralPath $prefs -Raw)
 $json = [pscustomobject]@{ exists = $true; content = $content; changed = $changed } | ConvertTo-Json -Compress
 Write-Output (%s + $json)
-`, trustedPluginPrefsScriptPreamble(), powerShellSingleQuoted(version), powerShellSingleQuoted(root), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix))
+`, preamble, powerShellSingleQuoted(version), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix)), nil
 }
 
-func trustedPluginPrefsScriptPreamble() string {
+func trustedPluginPrefsRepairInput(requiredPaths []string) (string, error) {
+	data, err := json.Marshal(compactTrustedPluginAllowlistPaths(requiredPaths))
+	if err != nil {
+		return "", fmt.Errorf("encode trusted Plugin Artifact repair paths: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(data), nil
+}
+
+func trustedPluginPrefsRepairEnvelope(script string, requiredPathsInput string) (string, error) {
+	data, err := json.Marshal(struct {
+		Program       string `json:"program"`
+		RequiredPaths string `json:"requiredPaths"`
+	}{
+		Program:       base64.StdEncoding.EncodeToString([]byte(script)),
+		RequiredPaths: requiredPathsInput,
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode trusted Plugin Artifact repair program: %w", err)
+	}
+	return string(data), nil
+}
+
+func trustedPluginPrefsRepairBootstrapScript() string {
+	return `$ErrorActionPreference = 'Stop'
+$payload = [Console]::In.ReadToEnd() | ConvertFrom-Json
+$MayaStallRequiredPathsInput = [string]$payload.requiredPaths
+$program = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$payload.program))
+& ([ScriptBlock]::Create($program))
+`
+}
+
+func trustedPluginMayaAppDir(host mayaHostConfig) (string, error) {
+	if host.Broker.isGGMayaSessiond() && strings.TrimSpace(host.Broker.StateDir) != "" {
+		stateDir := host.Broker.StateDir
+		if err := validateSessionBrokerStateDir(stateDir); err != nil {
+			return "", err
+		}
+		if err := validateSessionBrokerRepo(host.Broker.Repo); err != nil {
+			return "", err
+		}
+		_, _, absolute, _ := canonicalWindowsPathForComparison(stateDir)
+		if absolute {
+			return remoteJoin(stateDir, "maya_app"), nil
+		}
+		return remoteJoin(host.Broker.Repo, stateDir, "maya_app"), nil
+	}
+	return "", nil
+}
+
+func validateSessionBrokerStateDir(stateDir string) error {
+	trimmed := strings.TrimSpace(stateDir)
+	if trimmed == "" {
+		return fmt.Errorf("gg_mayasessiond broker requires broker.stateDir")
+	}
+	if stateDir != trimmed {
+		return fmt.Errorf("broker.stateDir must not contain surrounding whitespace")
+	}
+	if hasWindowsDevicePrefix(stateDir) {
+		return fmt.Errorf("broker.stateDir must not use a Windows device namespace")
+	}
+	_, _, absolute, traversesRoot := canonicalWindowsPathForComparison(stateDir)
+	if traversesRoot {
+		return fmt.Errorf("broker.stateDir must not traverse above its Windows volume root")
+	}
+	if !absolute {
+		normalized := strings.ReplaceAll(remotePath(stateDir), `\`, "/")
+		if strings.HasPrefix(normalized, "/") || (len(normalized) >= 2 && isASCIIAlpha(normalized[0]) && normalized[1] == ':') {
+			return fmt.Errorf("broker.stateDir must be an absolute Windows path or a path relative to broker.repo")
+		}
+		clean := path.Clean(normalized)
+		if clean == ".." || strings.HasPrefix(clean, "../") {
+			return fmt.Errorf("broker.stateDir relative path must not escape broker.repo")
+		}
+	}
+	if hasWin32TrimmedPathComponent(stateDir) || hasInvalidWin32PathComponent(stateDir) {
+		return fmt.Errorf("broker.stateDir contains an invalid Windows path component")
+	}
+	return nil
+}
+
+func validateSessionBrokerRepo(repo string) error {
+	trimmed := strings.TrimSpace(repo)
+	if trimmed == "" {
+		return fmt.Errorf("gg_mayasessiond broker requires broker.repo")
+	}
+	if repo != trimmed {
+		return fmt.Errorf("broker.repo must not contain surrounding whitespace")
+	}
+	if hasWindowsDevicePrefix(repo) {
+		return fmt.Errorf("broker.repo must not use a Windows device namespace")
+	}
+	if err := rejectSFTPBatchUnsafePath(repo); err != nil {
+		return fmt.Errorf("broker.repo %w", err)
+	}
+	_, _, absolute, traversesRoot := canonicalWindowsPathForComparison(repo)
+	if traversesRoot {
+		return fmt.Errorf("broker.repo must not traverse above its Windows volume root")
+	}
+	if !absolute {
+		return fmt.Errorf("broker.repo must be an absolute Windows path")
+	}
+	if hasWin32TrimmedPathComponent(repo) || hasInvalidWin32PathComponent(repo) {
+		return fmt.Errorf("broker.repo contains an invalid Windows path component")
+	}
+	return nil
+}
+
+func trustedPluginPrefsScriptPreamble(host mayaHostConfig) (string, error) {
+	mayaAppDir, err := trustedPluginMayaAppDir(host)
+	if err != nil {
+		return "", err
+	}
+	if mayaAppDir != "" {
+		return fmt.Sprintf(`function MayaStall-PrefsPath([string]$version) {
+  $mayaAppDir = %s
+  return Join-Path (Join-Path $mayaAppDir $version) 'prefs\userPrefs.mel'
+}
+`, powerShellSingleQuoted(mayaAppDir)), nil
+	}
 	return `function MayaStall-PrefsPath([string]$version) {
   $mayaAppDir = $env:MAYA_APP_DIR
   if ([string]::IsNullOrWhiteSpace($mayaAppDir)) {
@@ -324,5 +689,5 @@ func trustedPluginPrefsScriptPreamble() string {
   }
   return Join-Path (Join-Path $mayaAppDir $version) 'prefs\userPrefs.mel'
 }
-`
+`, nil
 }

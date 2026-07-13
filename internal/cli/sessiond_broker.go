@@ -470,11 +470,17 @@ func (broker ggMayaSessiondBroker) validate() error {
 	if strings.TrimSpace(broker.host.Broker.StateDir) == "" {
 		return fmt.Errorf("gg_mayasessiond broker requires broker.stateDir")
 	}
+	if err := validateSessionBrokerStateDir(broker.host.Broker.StateDir); err != nil {
+		return err
+	}
 	if strings.TrimSpace(broker.host.Broker.Python) == "" {
 		return fmt.Errorf("gg_mayasessiond broker requires broker.python")
 	}
 	if strings.TrimSpace(broker.host.Broker.Repo) == "" {
 		return fmt.Errorf("gg_mayasessiond broker requires broker.repo")
+	}
+	if err := validateSessionBrokerRepo(broker.host.Broker.Repo); err != nil {
+		return err
 	}
 	return nil
 }
@@ -610,6 +616,10 @@ func isKnownSessiondScriptExecuteResponseError(err error) bool {
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "'int' object has no attribute 'get'") ||
 		strings.Contains(message, "expecting value: line 1 column 1 (char 0)")
+}
+
+func (ggMayaSessiondBroker) CaptureVisualEvidenceAfterRecoveredScenario(err error) bool {
+	return isKnownSessiondScriptExecuteResponseError(err)
 }
 
 func (broker ggMayaSessiondBroker) recoverSessionBroker(reason string) error {
@@ -1177,6 +1187,10 @@ func sessiondStatusJSONFromFailedOutput(raw []byte) ([]byte, bool) {
 }
 
 func runSSHCommandOutput(host mayaHostConfig, remoteCommand []string, timeout time.Duration) ([]byte, error) {
+	return runSSHCommandOutputWithInput(host, remoteCommand, "", timeout)
+}
+
+func runSSHCommandOutputWithInput(host mayaHostConfig, remoteCommand []string, input string, timeout time.Duration) ([]byte, error) {
 	binary := host.SSH.Binary
 	if binary == "" {
 		binary = "ssh"
@@ -1187,6 +1201,9 @@ func runSSHCommandOutput(host mayaHostConfig, remoteCommand []string, timeout ti
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, binary, append(sshArgs(host), remoteCommand...)...)
+	if input != "" {
+		command.Stdin = strings.NewReader(input)
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	command.Stdout = &stdout

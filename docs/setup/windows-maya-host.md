@@ -169,10 +169,10 @@ Doctor layer:
 - Ensure licensing is valid for the Windows user that owns the interactive desktop.
 - Verify Plugin Artifacts from consuming repos can load in that Maya version; Maya Stall does not build Plugin Artifacts.
 - If Maya's secure plug-in loading prompts for staged Plugin Artifacts, configure
-  a host-managed `trustedPluginArtifactsRoot` outside `workRoot/runs` and add
-  that exact directory to Maya's trusted plug-in locations for the interactive
-  Windows user. Do not trust `workRoot`, `workRoot/runs`, or every fresh run
-  workspace.
+  a host-managed `trustedPluginArtifactsRoot` outside `workRoot/runs`, then use
+  the Scenario-aware steps below to trust its declared destinations and nested
+  plug-in parent directories for the interactive Windows user. Do not trust
+  `workRoot`, `workRoot/runs`, or every fresh run workspace.
 
 Doctor layer:
 
@@ -192,19 +192,30 @@ trustedPluginArtifactsRoot: C:/maya-stall/trusted-plugin-artifacts
 Host-admin steps:
 
 - Create or allow Maya Stall to create the stable directory.
-- In Maya security preferences for the interactive Windows account, add that
-  exact directory as a trusted plug-in location.
+- In Maya security preferences for the interactive Windows account, add the
+  configured root plus the declared destination and nested plug-in parent
+  directories reported by `doctor --scenario <scenario>`.
 - Or, after approving the host security-policy change, run
-  `maya-stall doctor --host-config <host-config.yaml> --target-profile <profile> --host <host-id> --repair-trusted-plugin-allowlist`.
+  `maya-stall doctor --host-config <host-config.yaml> --target-profile <profile> --host <host-id> --scenario <scenario> --repair-trusted-plugin-allowlist`.
   The repair path backs up existing Maya preferences, preserves existing
-  trusted locations, appends only the configured root, requires Maya to be
-  stopped before repair, requires the target Maya version to have an existing
-  preferences file, and requires a clean Maya restart before proof.
+  trusted locations, appends the configured root plus declared artifact
+  destinations and detected nested plug-in parent directories, requires Maya
+  to be stopped before repair, requires the target Maya version to have an
+  existing preferences file, and requires a clean Maya restart before proof.
 - Keep the value in host config, CI secret material, or runner-owned config,
-  not in `.maya-stall.yaml`.
+  not in `.maya-stall.yaml`; use an absolute Windows drive or UNC path.
+- Avoid Win32-invalid or aliased components, including reserved device names,
+  forbidden filename characters, and names ending in a period or space. Maya
+  Stall rejects them in `workRoot`, `trustedPluginArtifactsRoot`, and derived
+  Plugin Artifact destinations before any TrustCenter repair host access and
+  before Run Payload staging. Ordinary non-repair doctor checks may perform
+  SSH and work-root health probes before reporting the local path error.
 - Declare the Maya version in host config `mayaVersions` or Scenario
   `mayaVersion`; Maya Stall uses that version to locate the durable TrustCenter
-  preferences directory.
+  preferences directory. For a structured `gg-mayasessiond` broker, Maya Stall
+  reads and repairs the broker-owned Maya preferences under
+  `broker.stateDir/maya_app`; this is the isolated `MAYA_APP_DIR` used by Fresh
+  Run Maya sessions, not the interactive account's default Documents folder.
 - Keep the root separate from the run workspace tree; Maya Stall rejects roots
   that are `workRoot`, under `workRoot/runs`, or broad enough to contain
   `workRoot/runs`.
@@ -217,7 +228,11 @@ Run behavior:
   `trustedPluginArtifactsRoot/<repo-relative-path>`.
 - Before staging Plugin Artifacts, `maya-stall run` validates that Maya's
   durable `SafeModeAllowedlistPaths` preference contains
-  `trustedPluginArtifactsRoot`; missing trust fails before Scenario execution.
+  `trustedPluginArtifactsRoot`, declared Plugin Artifact destinations, and
+  parent directories for nested `.mll` and `.py` files under directory
+  artifacts; Python files are treated conservatively because Maya plug-in
+  callbacks can be published dynamically, and missing trust fails before
+  Scenario execution.
 - Each declared trusted destination is removed before upload, so directory
   Plugin Artifacts do not retain stale files.
 - Scenario scripts receive `MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT` and can

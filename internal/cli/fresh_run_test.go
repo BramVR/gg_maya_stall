@@ -42,6 +42,45 @@ func TestFreshRunLifecycleOrdersSetupExecuteAndSettle(t *testing.T) {
 	}
 }
 
+func TestFreshRunLifecycleDoesNotCleanRunStateItDidNotCreate(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	now := time.Date(2026, 7, 6, 12, 30, 0, 0, time.UTC)
+	runID := now.Format("20060102T150405.000000000Z")
+	sentinel := filepath.Join(dir, ".maya-stall", "state", "runs", runID, "owned-by-other-run")
+	mustWriteFile(t, sentinel, "keep\n")
+	runtime := defaultRunRuntime()
+	runtime.Now = func() time.Time { return now }
+
+	_, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
+	if err == nil || !strings.Contains(err.Error(), "create clean run state") {
+		t.Fatalf("Fresh Run error = %v, want existing run-state collision", err)
+	}
+	if content, err := os.ReadFile(sentinel); err != nil || string(content) != "keep\n" {
+		t.Fatalf("Fresh Run changed colliding run state: content=%q err=%v", content, err)
+	}
+}
+
+func TestFreshRunLifecycleCleansOwnedStateAfterPartialDirectorySetup(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	now := time.Date(2026, 7, 6, 12, 30, 0, 0, time.UTC)
+	runID := now.Format("20060102T150405.000000000Z")
+	blockingEvidencePath := filepath.Join(dir, "artifacts", "maya-stall", runID)
+	mustWriteFile(t, blockingEvidencePath, "keep\n")
+	runtime := defaultRunRuntime()
+	runtime.Now = func() time.Time { return now }
+
+	_, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
+	if err == nil {
+		t.Fatal("Fresh Run returned nil error for blocked Evidence directory")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "runs", runID)); !os.IsNotExist(statErr) {
+		t.Fatalf("Fresh Run left owned state after partial setup: %v", statErr)
+	}
+	if content, readErr := os.ReadFile(blockingEvidencePath); readErr != nil || string(content) != "keep\n" {
+		t.Fatalf("Fresh Run changed blocking Evidence path: content=%q err=%v", content, readErr)
+	}
+}
+
 func TestFreshRunLifecycleSettlesStopPolicyAndFailures(t *testing.T) {
 	t.Run("success cleans state and releases Host Lock", func(t *testing.T) {
 		dir := writeRunConfigFixture(t)
@@ -336,6 +375,45 @@ scenarios:
 	}
 	if !strings.Contains(string(events), "run.recovered-after-broker-failure") {
 		t.Fatalf("events missing broker recovery marker:\n%s", string(events))
+	}
+}
+
+func TestFreshRunLifecycleCapturesVisualEvidenceAfterKnownBrokerResponseFailure(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload: {}
+    expectedOutputs:
+      scenarioResult: "outputs/result.json"
+    evidence:
+      screenshots:
+        enabled: true
+    validators:
+      - type: scenarioResultStatus
+        status: passed
+      - type: visualEvidence
+`)
+	runtime := defaultRunRuntime()
+	runtime.Broker = brokerFailureAfterScenarioCompletion{
+		result:                             `{"status":"passed","summary":"Scenario completed before broker response failed"}` + "\n",
+		message:                            "adapter-approved response failure",
+		captureVisualEvidenceAfterRecovery: true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := RunWithRuntime([]string{"run", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	bundle := readEvidenceBundle(t, onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall")))
+	if len(bundle.VisualEvidence) != 1 || bundle.VisualEvidence[0].Kind != "screenshot" {
+		t.Fatalf("recovered Visual Evidence = %+v, want one screenshot", bundle.VisualEvidence)
+	}
+	for _, result := range bundle.Validators {
+		if result.Status != resultStatusPassed {
+			t.Fatalf("validator = %+v, want passed", result)
+		}
 	}
 }
 
@@ -1103,9 +1181,10 @@ func (failingScreenshotSessionBroker) CaptureScreenshot(context runContext, requ
 
 type brokerFailureAfterScenarioCompletion struct {
 	fakeSessionLifecycle
-	result  string
-	files   map[string]string
-	message string
+	result                             string
+	files                              map[string]string
+	message                            string
+	captureVisualEvidenceAfterRecovery bool
 }
 
 func (broker brokerFailureAfterScenarioCompletion) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
@@ -1137,6 +1216,10 @@ func (broker brokerFailureAfterScenarioCompletion) RunScenario(context runContex
 
 func (brokerFailureAfterScenarioCompletion) CaptureScreenshot(context runContext, request screenshotRequest) (visualEvidenceArtifact, error) {
 	return fakeSessionBroker{}.CaptureScreenshot(context, request)
+}
+
+func (broker brokerFailureAfterScenarioCompletion) CaptureVisualEvidenceAfterRecoveredScenario(error) bool {
+	return broker.captureVisualEvidenceAfterRecovery
 }
 
 func requireOutputArtifact(t *testing.T, bundle evidenceBundle, path string) {

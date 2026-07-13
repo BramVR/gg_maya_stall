@@ -193,17 +193,28 @@ func TestKLVPushConsumingRepoSmokeFixtureUsesBuiltPluginArtifact(t *testing.T) {
 		t.Fatalf("load generated Repo Run Config: %v", err)
 	}
 	scenario := config.Scenarios["klv-push-smoke"]
-	if len(scenario.Payload.PluginArtifacts) != 1 || scenario.Payload.PluginArtifacts[0] != "packages/klv_push" {
-		t.Fatalf("pluginArtifacts = %#v, want packages/klv_push", scenario.Payload.PluginArtifacts)
+	if len(scenario.Payload.PluginArtifacts) != 1 || scenario.Payload.PluginArtifacts[0] != "build/maya2025/Release/klv_push" {
+		t.Fatalf("pluginArtifacts = %#v, want nested klv_push artifact", scenario.Payload.PluginArtifacts)
 	}
-	if len(scenario.Payload.IncludePaths) != 1 || scenario.Payload.IncludePaths[0] != "packages/klv_push/scripts" {
+	if len(scenario.Payload.IncludePaths) != 1 || scenario.Payload.IncludePaths[0] != "build/maya2025/Release/klv_push/scripts" {
 		t.Fatalf("includePaths = %#v, want built package scripts", scenario.Payload.IncludePaths)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "packages", "klv_push", "scripts", "klv_push", "klvPush.py")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, "build", "maya2025", "Release", "klv_push", "scripts", "klv_push", "klvPush.py")); err != nil {
 		t.Fatalf("built Plugin Artifact missing klvPush.py: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "maya", "klv_push_smoke.py")); err != nil {
-		t.Fatalf("Maya Script missing: %v", err)
+	scriptBytes, err := os.ReadFile(filepath.Join(dir, "maya", "klv_push_smoke.py"))
+	if err != nil {
+		t.Fatalf("read Maya Script: %v", err)
+	}
+	for _, want := range []string{
+		`os.environ["MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT"]`,
+		"cmds.unloadPlugin(loaded_plugin, force=True)",
+		"cmds.loadPlugin(plugin_path, quiet=True)",
+		"cmds.deformer(marker, type=plugin_node_type)",
+	} {
+		if !strings.Contains(string(scriptBytes), want) {
+			t.Fatalf("Maya Script does not exercise real plug-in loading, missing %q", want)
+		}
 	}
 }
 
@@ -571,10 +582,11 @@ func writeKLVPushConsumingRepoSmokeFixture(t *testing.T, sourceRepoDir string) s
 	}
 
 	dir := t.TempDir()
-	if err := copyPath(filepath.Join(sourceRepoDir, "packages", "klv_push"), filepath.Join(dir, "packages", "klv_push")); err != nil {
+	artifactDir := filepath.Join(dir, "build", "maya2025", "Release", "klv_push")
+	if err := copyPath(filepath.Join(sourceRepoDir, "packages", "klv_push"), artifactDir); err != nil {
 		t.Fatalf("copy klv_push package artifact shell: %v", err)
 	}
-	if err := copyPath(filepath.Join(sourceRepoDir, "src", "klv_push"), filepath.Join(dir, "packages", "klv_push", "scripts", "klv_push")); err != nil {
+	if err := copyPath(filepath.Join(sourceRepoDir, "src", "klv_push"), filepath.Join(artifactDir, "scripts", "klv_push")); err != nil {
 		t.Fatalf("build klv_push Plugin Artifact: %v", err)
 	}
 	mustWriteFile(t, filepath.Join(dir, "pyproject.toml"), "[project]\nname = \"klv-push-consuming-smoke\"\n")
@@ -588,9 +600,9 @@ scenarios:
       scripts:
         - "maya/klv_push_smoke.py"
       pluginArtifacts:
-        - "packages/klv_push"
+        - "build/maya2025/Release/klv_push"
       includePaths:
-        - "packages/klv_push/scripts"
+        - "build/maya2025/Release/klv_push/scripts"
     expectedOutputs:
       files:
         - "outputs/klv-push-smoke-result.json"
@@ -612,6 +624,10 @@ scenarios:
         equals: true
       - type: jsonEquals
         path: "outputs/klv-push-smoke-result.json"
+        jsonPath: "$.artifact.fromTrustedRoot"
+        equals: true
+      - type: jsonEquals
+        path: "outputs/klv-push-smoke-result.json"
         jsonPath: "$.action.ok"
         equals: true
 `)
@@ -627,8 +643,10 @@ import traceback
 import maya.cmds as cmds
 
 result_path = os.environ["MAYA_STALL_SCENARIO_RESULT"]
-artifact_root = os.path.abspath(os.path.join(os.getcwd(), "..", "payload", "pluginArtifacts", "packages", "klv_push"))
+trusted_root = os.environ["MAYA_STALL_TRUSTED_PLUGIN_ARTIFACTS_ROOT"]
+artifact_root = os.path.abspath(os.path.join(trusted_root, "build", "maya2025", "Release", "klv_push"))
 package_scripts = os.path.join(artifact_root, "scripts")
+plugin_path = os.path.join(package_scripts, "klv_push", "klvPush.py")
 
 def write_result(status, summary, **fields):
     payload = {"status": status, "summary": summary}
@@ -641,6 +659,13 @@ def write_result(status, summary, **fields):
         handle.write("\n")
 
 try:
+    cmds.file(new=True, force=True)
+    target_plugin_path = os.path.normcase(os.path.abspath(plugin_path))
+    for loaded_plugin in cmds.pluginInfo(query=True, listPlugins=True) or []:
+        loaded_plugin_path = cmds.pluginInfo(loaded_plugin, query=True, path=True)
+        if loaded_plugin_path and os.path.normcase(os.path.abspath(loaded_plugin_path)) == target_plugin_path:
+            cmds.unloadPlugin(loaded_plugin, force=True)
+
     for module_name in list(sys.modules):
         if module_name == "klv_push" or module_name.startswith("klv_push."):
             sys.modules.pop(module_name, None)
@@ -652,18 +677,25 @@ try:
     if not imported_path.startswith(package_root + os.sep):
         raise RuntimeError("klv_push imported outside staged Plugin Artifact")
 
-    cmds.file(new=True, force=True)
+    loaded_plugins = cmds.loadPlugin(plugin_path, quiet=True)
+    plugin_name = loaded_plugins[0] if loaded_plugins else os.path.basename(plugin_path)
+    loaded_path = os.path.normcase(os.path.abspath(cmds.pluginInfo(plugin_name, query=True, path=True)))
+    if loaded_path != os.path.normcase(os.path.abspath(plugin_path)):
+        raise RuntimeError("klv_push loaded outside staged Plugin Artifact")
+
     marker = cmds.polyCube(name="mayaStallKlvPushImportMarker", width=1, height=1, depth=1)[0]
+    plugin_node_type = getattr(klv_push_plugin, "NODE_NAME", "klvPush")
+    deformer = cmds.deformer(marker, type=plugin_node_type)[0]
     cmds.select(marker, replace=True)
     cmds.refresh(force=True)
     write_result(
         "passed",
-        "klv_push plugin module imported from the staged artifact and a Maya marker object was created.",
+        "klv_push loaded from the staged artifact and registered its Maya deformer node.",
         pluginName="klv_push",
-        action={"ok": True, "createdNodes": [marker], "nodeType": getattr(klv_push_plugin, "NODE_NAME", "klvPush")},
+        action={"ok": True, "createdNodes": [marker, deformer], "nodeType": plugin_node_type, "pluginLoaded": True},
         mayaVersion=str(cmds.about(version=True)),
-        artifact={"name": "packages/klv_push", "builtScriptsPackage": True},
-        **{"import": {"ok": True, "module": getattr(klv_push_plugin, "__name__", "klv_push.klvPush"), "fromStagedArtifact": True}},
+        artifact={"name": "build/maya2025/Release/klv_push", "builtScriptsPackage": True, "fromTrustedRoot": bool(trusted_root)},
+        **{"import": {"ok": True, "module": getattr(klv_push_plugin, "__name__", "klv_push.klvPush"), "fromStagedArtifact": True, "fromTrustedRoot": bool(trusted_root)}},
     )
 except Exception as exc:
     write_result(

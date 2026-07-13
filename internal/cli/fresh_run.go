@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -35,6 +36,8 @@ type freshRunLifecycle struct {
 	stopPolicy                   string
 	followUp                     []string
 	releaseHostLock              bool
+	stopHostLockHeartbeat        func() error
+	checkHostLockHeartbeat       func() error
 	skipSettleArtifactCollection bool
 	skipSettleVisualEvidence     bool
 }
@@ -79,6 +82,12 @@ func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 				}
 			}
 		}
+		if run.stopHostLockHeartbeat != nil {
+			if heartbeatErr := run.stopHostLockHeartbeat(); heartbeatErr != nil {
+				err = errors.Join(err, fmt.Errorf("renew Host Lock for %s: %w", run.host.HostID, heartbeatErr))
+			}
+			run.stopHostLockHeartbeat = nil
+		}
 		if run.releaseHostLock {
 			if releaseErr := run.host.release(); releaseErr != nil {
 				err = errors.Join(err, fmt.Errorf("release Host Lock for %s: %w", run.host.HostID, releaseErr))
@@ -89,7 +98,13 @@ func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 	if err := run.setup(); err != nil {
 		return run.finishFailedRun(err)
 	}
+	if err := run.hostLockHeartbeatError(); err != nil {
+		return run.finishFailedRun(err)
+	}
 	if err := run.execute(); err != nil {
+		return run.finishFailedRun(err)
+	}
+	if err := run.hostLockHeartbeatError(); err != nil {
 		return run.finishFailedRun(err)
 	}
 	outcome, err = run.settle()
@@ -113,7 +128,18 @@ func (run *freshRunLifecycle) setup() error {
 	if err := validateScenarioRemotePaths(scenario.Config); err != nil {
 		return err
 	}
-	host, err := selectHostForRun(run.repoDir, run.options)
+	var resolved resolvedRuntime
+	host, err := selectHostForRunValidated(run.repoDir, run.options, func(config mayaHostConfig) error {
+		if err := validateTrustedPluginArtifactsRoot(config); err != nil {
+			return err
+		}
+		var err error
+		resolved, err = resolveRuntimeForHost(config)
+		if err != nil {
+			return err
+		}
+		return rejectMismatchedRuntimeOverride(resolved, run.runtime)
+	})
 	if err != nil {
 		return err
 	}
@@ -122,20 +148,10 @@ func (run *freshRunLifecycle) setup() error {
 	}
 	run.host = host
 	run.releaseHostLock = true
-	if err := validateTrustedPluginArtifactsRoot(host.Config); err != nil {
-		return err
-	}
-
-	resolved, err := resolveRuntimeForHost(host.Config)
-	if err != nil {
-		return err
-	}
+	run.stopHostLockHeartbeat, run.checkHostLockHeartbeat = startHostLockHeartbeat(run.host.renew)
 	run.resolvedRuntime = resolved
 	if run.runtime.Host == nil {
 		run.runtime.Host = resolved.Host
-	}
-	if err := rejectMismatchedRuntimeOverride(resolved, run.runtime); err != nil {
-		return err
 	}
 	if run.runtime.Broker == nil {
 		run.runtime.Broker = resolved.Broker
@@ -197,7 +213,7 @@ func (run *freshRunLifecycle) setup() error {
 	if err := writeRunRetentionRecord(run.context, newRunRetentionRecord(run.context, run.manifest, host.Config, "running", "")); err != nil {
 		return err
 	}
-	if err := markHostLockActive(run.repoDir, run.host.HostID, run.manifest.RunID); err != nil {
+	if err := run.host.markActive(run.manifest.RunID); err != nil {
 		return err
 	}
 	if err := appendEvent(run.context.EventsPath, "run.started", scenario.Name); err != nil {
@@ -206,10 +222,82 @@ func (run *freshRunLifecycle) setup() error {
 	if err := run.startFreshSession(); err != nil {
 		return err
 	}
+	if err := run.renewHostLockNow(); err != nil {
+		return err
+	}
 	return run.runtime.Host.StagePayload(run.context, scenario.Payload)
 }
 
+func startHostLockHeartbeat(renew func() error) (func() error, func() error) {
+	if renew == nil {
+		return func() error { return nil }, func() error { return nil }
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	var errMu sync.Mutex
+	var renewalErr error
+	go func() {
+		ticker := time.NewTicker(hostSideLockHeartbeatInterval)
+		defer ticker.Stop()
+		defer close(done)
+		for {
+			select {
+			case <-ticker.C:
+				if err := renew(); err != nil {
+					errMu.Lock()
+					if renewalErr == nil {
+						renewalErr = err
+					}
+					errMu.Unlock()
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+	check := func() error {
+		errMu.Lock()
+		defer errMu.Unlock()
+		return renewalErr
+	}
+	var once sync.Once
+	stopHeartbeat := func() error {
+		once.Do(func() {
+			close(stop)
+			<-done
+		})
+		return check()
+	}
+	return stopHeartbeat, check
+}
+
+func (run *freshRunLifecycle) hostLockHeartbeatError() error {
+	if run.checkHostLockHeartbeat == nil {
+		return nil
+	}
+	if err := run.checkHostLockHeartbeat(); err != nil {
+		return fmt.Errorf("renew Host Lock for %s: %w", run.host.HostID, err)
+	}
+	return nil
+}
+
+func (run *freshRunLifecycle) renewHostLockNow() error {
+	if err := run.hostLockHeartbeatError(); err != nil {
+		return err
+	}
+	if run.host.renew == nil {
+		return nil
+	}
+	if err := run.host.renew(); err != nil {
+		return fmt.Errorf("renew Host Lock for %s before host operation: %w", run.host.HostID, err)
+	}
+	return nil
+}
+
 func (run *freshRunLifecycle) startFreshSession() error {
+	if err := run.renewHostLockNow(); err != nil {
+		return err
+	}
 	run.sessionStartAttempted = true
 	session, err := run.runtime.Broker.StartFreshSession(run.context, run.scenario.Config)
 	if err == nil && (session.BrokerAdapter == "" || session.SessionID == "") {
@@ -241,7 +329,13 @@ func (run *freshRunLifecycle) startFreshSession() error {
 }
 
 func (run *freshRunLifecycle) execute() error {
+	if err := run.renewHostLockNow(); err != nil {
+		return err
+	}
 	result, err := run.runtime.Broker.RunScenario(run.context, run.scenario.Config)
+	if lockErr := run.renewHostLockNow(); lockErr != nil {
+		return errors.Join(err, lockErr)
+	}
 	if err != nil {
 		if evidenceErr := run.collectBrokerFailureArtifacts(err); evidenceErr != nil {
 			return errors.Join(err, evidenceErr)
@@ -398,8 +492,17 @@ func appendFile(path string, content string) error {
 }
 
 func (run *freshRunLifecycle) settle() (runOutcome, error) {
+	if err := run.renewHostLockNow(); err != nil {
+		return runOutcome{}, err
+	}
 	if collector, ok := run.runtime.Host.(artifactCollector); ok && !run.skipSettleArtifactCollection {
+		if err := run.renewHostLockNow(); err != nil {
+			return runOutcome{}, err
+		}
 		if err := collector.CollectArtifacts(run.context, run.scenario); err != nil {
+			return runOutcome{}, err
+		}
+		if err := run.hostLockHeartbeatError(); err != nil {
 			return runOutcome{}, err
 		}
 	}
@@ -425,6 +528,9 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 		run.result.Status = resultStatusPassed
 	}
 	if !run.skipSettleVisualEvidence {
+		if err := run.renewHostLockNow(); err != nil {
+			return runOutcome{}, err
+		}
 		run.visualEvidence, err = collectScenarioVisualEvidence(run.runtime.Broker, run.context, run.scenario.Name, run.scenario.Config.Evidence)
 		if err != nil {
 			return runOutcome{}, err
@@ -469,6 +575,9 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 		return runOutcome{}, err
 	}
 	if run.stopPolicy == "stopped" {
+		if err := run.renewHostLockNow(); err != nil {
+			return runOutcome{}, err
+		}
 		if err := run.runtime.Broker.StopSession(run.context, run.session); err != nil {
 			return runOutcome{}, fmt.Errorf("stop Maya UI Session for %s: %w", run.manifest.RunID, err)
 		}
@@ -483,6 +592,9 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 		}
 	}
 	if run.stopPolicy == "kept" {
+		if err := run.hostLockHeartbeatError(); err != nil {
+			return runOutcome{}, err
+		}
 		if err := run.retainSession(run.retentionReason()); err != nil {
 			return runOutcome{}, err
 		}
@@ -503,6 +615,9 @@ func (run *freshRunLifecycle) configureKeptStopPolicy() string {
 }
 
 func (run *freshRunLifecycle) finishFailedRun(runErr error) (runOutcome, error) {
+	if lockErr := run.hostLockHeartbeatError(); lockErr != nil {
+		return runOutcome{}, errors.Join(runErr, lockErr)
+	}
 	if !run.sessionStarted || shouldStopAfter(run.options.StopAfter, resultStatusFailed) {
 		return runOutcome{}, runErr
 	}
@@ -541,7 +656,14 @@ func (run *freshRunLifecycle) retainSession(reason string) error {
 	if !ok || !retention.RetentionCapabilities().RetainOnFailure {
 		return unsupportedBrokerCapabilityError(run.manifest.Runtime.BrokerAdapter, "retain-on-failure")
 	}
-	if err := markHostLockKept(run.repoDir, run.host.HostID, run.manifest.RunID); err != nil {
+	if run.stopHostLockHeartbeat != nil {
+		if err := run.stopHostLockHeartbeat(); err != nil {
+			return fmt.Errorf("renew Host Lock for %s: %w", run.host.HostID, err)
+		}
+		run.stopHostLockHeartbeat = nil
+		run.checkHostLockHeartbeat = nil
+	}
+	if err := run.host.markKept(run.manifest.RunID); err != nil {
 		return err
 	}
 	session, err := retention.RetainRun(run.context, run.manifest, reason)

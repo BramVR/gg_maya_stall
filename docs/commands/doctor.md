@@ -38,6 +38,12 @@ Doctor reports the layer that failed and a repair hint where possible:
 - Visual Evidence support;
 - Host Lock state.
 
+For a real SSH Maya Host, the `host-lock` layer reads the authoritative
+`workRoot/state/locks/host.lock` state from the host. It reports active and kept
+Run IDs, treats unreadable or live ownership as locked, and reports an expired
+lease as recoverable only when `gg_mayasessiond status` proves no Maya UI
+Session is active. Repo-local state is only a compatibility mirror.
+
 The `maya-version` layer probes real Windows Maya Hosts over SSH for installed
 Autodesk Maya versions in standard Autodesk install directories and registry
 install-path entries, requiring an existing `bin/maya.exe`. It compares the

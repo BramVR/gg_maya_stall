@@ -988,7 +988,9 @@ func (broker ggMayaSessiondBroker) probeDesktopRecordingReadiness() (err error) 
 
 func (broker ggMayaSessiondBroker) removeRemotePath(path string) error {
 	script := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
-Remove-Item -LiteralPath %s -Recurse -Force`, powerShellSingleQuoted(path))
+if (Test-Path -LiteralPath %s) {
+  Remove-Item -LiteralPath %s -Recurse -Force
+}`, powerShellSingleQuoted(path), powerShellSingleQuoted(path))
 	_, err := runSSHCommandOutput(broker.host, encodedPowerShellCommand(script), sessiondCommandTimeout)
 	return err
 }

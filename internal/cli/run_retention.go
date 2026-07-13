@@ -32,46 +32,49 @@ type retainedRunStatus struct {
 }
 
 type runRetentionRecord struct {
-	RunID               string                `json:"runId"`
-	Scenario            string                `json:"scenario"`
-	TargetProfile       string                `json:"targetProfile"`
-	Host                string                `json:"host"`
-	Runtime             runtimeMetadata       `json:"runtime"`
-	Status              string                `json:"status"`
-	RetentionReason     string                `json:"retentionReason,omitempty"`
-	LocalStateDir       string                `json:"localStateDir"`
-	LocalEvidenceDir    string                `json:"localEvidenceDir"`
-	LocalWorkspace      string                `json:"localWorkspace"`
-	ScenarioResultPath  string                `json:"scenarioResultPath,omitempty"`
-	RemoteRunRoot       string                `json:"remoteRunRoot,omitempty"`
-	RemoteWorkspace     string                `json:"remoteWorkspace,omitempty"`
-	HostConfig          mayaHostConfig        `json:"hostConfig"`
-	BrokerCapabilities  brokerCapabilities    `json:"brokerCapabilities"`
-	RemoteSession       retainedSessionRecord `json:"remoteSession"`
-	CreatedAt           string                `json:"createdAt"`
-	UpdatedAt           string                `json:"updatedAt"`
-	LegacyMissingRecord bool                  `json:"-"`
+	RunID                 string                `json:"runId"`
+	Scenario              string                `json:"scenario"`
+	TargetProfile         string                `json:"targetProfile"`
+	Host                  string                `json:"host"`
+	Runtime               runtimeMetadata       `json:"runtime"`
+	Status                string                `json:"status"`
+	StopPhase             string                `json:"stopPhase,omitempty"`
+	RetentionReason       string                `json:"retentionReason,omitempty"`
+	LocalStateDir         string                `json:"localStateDir"`
+	LocalEvidenceDir      string                `json:"localEvidenceDir"`
+	LocalWorkspace        string                `json:"localWorkspace"`
+	ScenarioResultPath    string                `json:"scenarioResultPath,omitempty"`
+	RemoteRunRoot         string                `json:"remoteRunRoot,omitempty"`
+	RemoteWorkspace       string                `json:"remoteWorkspace,omitempty"`
+	HostConfig            mayaHostConfig        `json:"hostConfig"`
+	HostLockAuthoritative bool                  `json:"hostLockAuthoritative,omitempty"`
+	BrokerCapabilities    brokerCapabilities    `json:"brokerCapabilities"`
+	RemoteSession         retainedSessionRecord `json:"remoteSession"`
+	CreatedAt             string                `json:"createdAt"`
+	UpdatedAt             string                `json:"updatedAt"`
+	LegacyMissingRecord   bool                  `json:"-"`
 }
 
 func newRunRetentionRecord(context runContext, manifest runManifest, host mayaHostConfig, status string, reason string) runRetentionRecord {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	return runRetentionRecord{
-		RunID:              manifest.RunID,
-		Scenario:           manifest.Scenario,
-		TargetProfile:      manifest.TargetProfile,
-		Host:               manifest.Host,
-		Runtime:            manifest.Runtime,
-		Status:             status,
-		RetentionReason:    reason,
-		LocalStateDir:      context.StateDir,
-		LocalEvidenceDir:   context.EvidenceDir,
-		LocalWorkspace:     context.Workspace,
-		ScenarioResultPath: context.ScenarioResultPath,
-		RemoteRunRoot:      context.RunWorkspace.RemoteRunRoot(),
-		RemoteWorkspace:    context.RunWorkspace.RemoteWorkspace(),
-		HostConfig:         host,
-		CreatedAt:          now,
-		UpdatedAt:          now,
+		RunID:                 manifest.RunID,
+		Scenario:              manifest.Scenario,
+		TargetProfile:         manifest.TargetProfile,
+		Host:                  manifest.Host,
+		Runtime:               manifest.Runtime,
+		Status:                status,
+		RetentionReason:       reason,
+		LocalStateDir:         context.StateDir,
+		LocalEvidenceDir:      context.EvidenceDir,
+		LocalWorkspace:        context.Workspace,
+		ScenarioResultPath:    context.ScenarioResultPath,
+		RemoteRunRoot:         context.RunWorkspace.RemoteRunRoot(),
+		RemoteWorkspace:       context.RunWorkspace.RemoteWorkspace(),
+		HostConfig:            host,
+		HostLockAuthoritative: hasAuthoritativeHostSideLock(host),
+		CreatedAt:             now,
+		UpdatedAt:             now,
 	}
 }
 

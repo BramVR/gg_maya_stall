@@ -146,7 +146,17 @@ artifacts/maya-stall/<run-id>/
 
 ## Host Locking
 
-One active Fresh Run may use a Maya Host at a time.
+One active Fresh Run may use a Maya Host at a time. Real SSH hosts store the
+authoritative lock at `workRoot/state/locks/host.lock`, so independent
+controllers and repo checkouts contend on the same host-owned state. Each
+active lock binds a unique token to its Run ID and renews a bounded lease while
+the controller is alive. A kept run has no expiring lease and remains locked
+until `maya-stall stop <run-id>` verifies ownership and stops it.
+
+An expired lease is recoverable only after the configured Session Broker proves
+that no Maya UI Session is active. Unreadable ownership, a live lease, or an
+unavailable/active broker fails closed. The repo-local lock remains as a mirror
+for local commands and migration, but it is not the authority for an SSH host.
 
 Use `--host-lock-wait <duration>` to wait for a busy host or
 `--host-lock-fail-fast` to fail immediately.

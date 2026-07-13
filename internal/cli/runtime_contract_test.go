@@ -106,6 +106,7 @@ func TestRunScenarioEvidenceRecordsResolvedRuntime(t *testing.T) {
 func TestRunScenarioRejectsInjectedFakeBrokerForSSHSessiond(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	sshBinary := filepath.Join(dir, "fake-ssh-runtime-contract")
 	mustWriteFile(t, hostConfigPath, `version: 1
 targetProfiles:
   ci:
@@ -117,6 +118,7 @@ hostPools:
         transport: ssh
         ssh:
           host: maya-win-01
+          binary: `+sshBinary+`
         workRoot: C:/maya-stall
         broker:
           type: gg-mayasessiond

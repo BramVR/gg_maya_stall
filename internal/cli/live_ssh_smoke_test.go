@@ -2,13 +2,17 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const smokeHostConfigEnv = "MAYA_STALL_SMOKE_HOST_CONFIG"
@@ -127,6 +131,195 @@ func TestOptInRealSSHRunSmoke(t *testing.T) {
 		t.Fatalf("real SSH retention stop missing run id:\n%s", stopStdout.String())
 	}
 	restoreLiveSessionBrokerFixture(t, host)
+}
+
+func TestOptInRealHostLockContentionAndRecoverySmoke(t *testing.T) {
+	options, ok := realSSHSmokeOptionsFromEnv(t)
+	if !ok {
+		return
+	}
+	options.Host = liveSmokeHostForContention(t, options)
+	host := liveSmokeHostConfigByID(t, options, options.Host)
+	restoreLiveSessionBrokerFixture(t, host)
+	t.Cleanup(func() { restoreLiveSessionBrokerFixture(t, host) })
+
+	holderDir := t.TempDir()
+	contenderDir := t.TempDir()
+	readyPath := filepath.Join(t.TempDir(), "holder-ready")
+	crashPath := filepath.Join(t.TempDir(), "holder-crash")
+	holder := startHostLockController(t, options, holderDir, "hold-crash", "contention-holder", readyPath, crashPath)
+	var holderOutput bytes.Buffer
+	holder.Stdout = &holderOutput
+	holder.Stderr = &holderOutput
+	if err := holder.Start(); err != nil {
+		t.Fatalf("start holder controller: %v", err)
+	}
+	holderWaited := false
+	t.Cleanup(func() {
+		_ = os.WriteFile(crashPath, []byte("cleanup\n"), 0o600)
+		if holder.Process != nil && !holderWaited {
+			_ = holder.Process.Kill()
+			_ = holder.Wait()
+			holderWaited = true
+		}
+		broker := ggMayaSessiondBroker{host: host}
+		if status, err := broker.status(); err == nil && sessiondSessionLooksActive(status) {
+			if err := broker.stopSessiondSession(); err != nil {
+				t.Errorf("cleanup Host Lock smoke Session Broker: %v", err)
+			}
+		}
+		if err := releaseHostSideLock(host, "contention-holder"); err != nil && !errors.Is(err, errHostLockOwnershipChanged) {
+			t.Errorf("cleanup crashed holder Host Lock: %v", err)
+		}
+	})
+	waitForFile(t, readyPath, 45*time.Second)
+
+	runHostLockController(t, options, contenderDir, "expect-locked", "contention-contender", "", "")
+	if err := os.WriteFile(crashPath, []byte("crash\n"), 0o600); err != nil {
+		t.Fatalf("signal controller crash: %v", err)
+	}
+	if err := holder.Wait(); err != nil {
+		holderWaited = true
+		t.Fatalf("holder controller did not crash cleanly: %v: %s", err, strings.TrimSpace(holderOutput.String()))
+	}
+	holderWaited = true
+
+	broker := ggMayaSessiondBroker{host: host}
+	status, err := broker.status()
+	if err != nil {
+		t.Fatalf("inspect Session Broker before lease recovery: %v", err)
+	}
+	if sessiondSessionLooksActive(status) {
+		if err := broker.stopSessiondSession(); err != nil {
+			t.Fatalf("stop Session Broker before lease recovery: %v", err)
+		}
+	}
+	status, err = broker.status()
+	if err != nil || sessiondSessionLooksActive(status) {
+		t.Fatalf("Session Broker was not inactive before lease recovery: active=%t err=%v", sessiondSessionLooksActive(status), err)
+	}
+	time.Sleep(3 * time.Second)
+	runHostLockController(t, options, contenderDir, "acquire-release", "lease-recovery-successor", "", "")
+}
+
+func TestHostLockControllerHelper(t *testing.T) {
+	if os.Getenv("MAYA_STALL_HOST_LOCK_HELPER") != "1" {
+		t.Skip("controller subprocess only")
+	}
+	lease, err := time.ParseDuration(os.Getenv("MAYA_STALL_HOST_LOCK_HELPER_LEASE"))
+	if err != nil {
+		t.Fatalf("parse helper lease: %v", err)
+	}
+	hostSideLockLeaseDuration = lease
+	hostSideLockHeartbeatInterval = hostLockContentionHeartbeatInterval(lease)
+	config, err := loadUserHostConfig(os.Getenv("MAYA_STALL_HOST_LOCK_HELPER_CONFIG"))
+	if err != nil {
+		t.Fatalf("load helper Host Config: %v", err)
+	}
+	candidates, err := hostCandidates(config, os.Getenv("MAYA_STALL_HOST_LOCK_HELPER_PROFILE"), os.Getenv("MAYA_STALL_HOST_LOCK_HELPER_HOST"))
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("resolve helper Maya Host: candidates=%d err=%v", len(candidates), err)
+	}
+	lock, locked, err := acquireRunHostLock(os.Getenv("MAYA_STALL_HOST_LOCK_HELPER_REPO"), candidates[0])
+	action := os.Getenv("MAYA_STALL_HOST_LOCK_HELPER_ACTION")
+	if action == "expect-locked" {
+		if err != nil || !locked {
+			t.Fatalf("contender Host Lock result: locked=%t err=%v", locked, err)
+		}
+		return
+	}
+	if err != nil || locked {
+		t.Fatalf("acquire helper Host Lock: locked=%t err=%v", locked, err)
+	}
+	if err := lock.markActive(os.Getenv("MAYA_STALL_HOST_LOCK_HELPER_RUN")); err != nil {
+		t.Fatalf("mark helper Host Lock active: %v", err)
+	}
+	if action == "acquire-release" {
+		if err := lock.release(); err != nil {
+			t.Fatalf("release recovered Host Lock: %v", err)
+		}
+		return
+	}
+	if action != "hold-crash" {
+		t.Fatalf("unknown helper action %q", action)
+	}
+	stopHeartbeat, _ := startHostLockHeartbeat(lock.renew)
+	if err := os.WriteFile(os.Getenv("MAYA_STALL_HOST_LOCK_HELPER_READY"), []byte("ready\n"), 0o600); err != nil {
+		t.Fatalf("write helper readiness: %v", err)
+	}
+	waitForFile(t, os.Getenv("MAYA_STALL_HOST_LOCK_HELPER_CRASH"), 2*time.Minute)
+	if err := stopHeartbeat(); err != nil {
+		t.Fatalf("renew holder Host Lock: %v", err)
+	}
+	os.Exit(0)
+}
+
+func hostLockContentionHeartbeatInterval(lease time.Duration) time.Duration {
+	return lease / 4
+}
+
+func startHostLockController(t *testing.T, options realSSHSmokeOptions, repoDir string, action string, runID string, readyPath string, crashPath string) *exec.Cmd {
+	t.Helper()
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test binary: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	t.Cleanup(cancel)
+	command := exec.CommandContext(ctx, testBinary, "-test.run=^TestHostLockControllerHelper$", "-test.count=1")
+	command.Env = append(os.Environ(),
+		"MAYA_STALL_HOST_LOCK_HELPER=1",
+		"MAYA_STALL_HOST_LOCK_HELPER_LEASE=2s",
+		"MAYA_STALL_HOST_LOCK_HELPER_CONFIG="+options.HostConfig,
+		"MAYA_STALL_HOST_LOCK_HELPER_PROFILE="+options.TargetProfile,
+		"MAYA_STALL_HOST_LOCK_HELPER_HOST="+options.Host,
+		"MAYA_STALL_HOST_LOCK_HELPER_REPO="+repoDir,
+		"MAYA_STALL_HOST_LOCK_HELPER_ACTION="+action,
+		"MAYA_STALL_HOST_LOCK_HELPER_RUN="+runID,
+		"MAYA_STALL_HOST_LOCK_HELPER_READY="+readyPath,
+		"MAYA_STALL_HOST_LOCK_HELPER_CRASH="+crashPath,
+	)
+	return command
+}
+
+func runHostLockController(t *testing.T, options realSSHSmokeOptions, repoDir string, action string, runID string, readyPath string, crashPath string) {
+	t.Helper()
+	command := startHostLockController(t, options, repoDir, action, runID, readyPath, crashPath)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Host Lock controller %s failed: %v: %s", action, err, strings.TrimSpace(string(output)))
+	}
+}
+
+func waitForFile(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", filepath.Base(path))
+}
+
+func liveSmokeHostForContention(t *testing.T, options realSSHSmokeOptions) string {
+	t.Helper()
+	config, err := loadUserHostConfig(options.HostConfig)
+	if err != nil {
+		t.Fatalf("load live Host Config: %v", err)
+	}
+	candidates, err := hostCandidates(config, options.TargetProfile, options.Host)
+	if err != nil {
+		t.Fatalf("resolve live Host Pool: %v", err)
+	}
+	for _, candidate := range candidates {
+		resolved, resolveErr := resolveRuntimeForHost(candidate)
+		if resolveErr == nil && isHealthyHost(candidate) && candidate.usesRealSSH() && resolved.Metadata.LiveProofEligible {
+			return candidate.ID
+		}
+	}
+	t.Fatalf("no healthy real SSH Maya Host available for Target Profile %q", options.TargetProfile)
+	return ""
 }
 
 func runKLVPushConsumingRepoSmoke(t *testing.T, options realSSHSmokeOptions) {

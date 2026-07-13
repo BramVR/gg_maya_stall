@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -72,6 +73,22 @@ func TestOptInRealSSHRunSmoke(t *testing.T) {
 	options.Host = bundle.Host
 	host := liveSmokeHostConfigByID(t, options, bundle.Host)
 	requireLiveScenarioRecordingArtifact(t, evidenceDir, bundle)
+	assertLiveFreshRunSessionStopped(t, host, bundle.BrokerSession)
+
+	var secondRunStdout, secondRunStderr bytes.Buffer
+	secondRunCode := Run(options.runArgs("smoke"), &secondRunStdout, &secondRunStderr, dir, "test-version")
+	if secondRunCode != 0 {
+		t.Fatalf("second real SSH smoke run exit code = %d, want 0; stdout: %s stderr: %s", secondRunCode, secondRunStdout.String(), secondRunStderr.String())
+	}
+	secondEvidenceDir := smokeOutputValue(secondRunStdout.String(), "evidence")
+	if secondEvidenceDir == "" {
+		t.Fatalf("second real SSH smoke run did not print Evidence Bundle path:\n%s", secondRunStdout.String())
+	}
+	secondBundle := assertLiveSmokeEvidenceBundle(t, secondEvidenceDir)
+	if secondBundle.BrokerSession.SessionID == bundle.BrokerSession.SessionID {
+		t.Fatalf("two consecutive Fresh Runs reused broker session %q", bundle.BrokerSession.SessionID)
+	}
+	assertLiveFreshRunSessionStopped(t, host, secondBundle.BrokerSession)
 
 	var keptStdout, keptStderr bytes.Buffer
 	keptCode := Run(options.runArgs("retention-failure", "--keep-on-failure"), &keptStdout, &keptStderr, dir, "test-version")
@@ -362,6 +379,9 @@ func assertLiveSmokeEvidenceBundle(t *testing.T, evidenceDir string) evidenceBun
 	if bundle.Runtime.Profile != "ssh-sessiond" || bundle.Runtime.HostAdapter != "ssh" || bundle.Runtime.BrokerAdapter != "gg-mayasessiond" || !bundle.Runtime.LiveProofEligible {
 		t.Fatalf("Evidence Bundle runtime = %+v, want live-proof-eligible ssh-sessiond", bundle.Runtime)
 	}
+	if bundle.BrokerSession == nil || bundle.BrokerSession.BrokerAdapter != "gg-mayasessiond" || bundle.BrokerSession.SessionID == "" {
+		t.Fatalf("Evidence Bundle broker session = %+v, want identified gg-mayasessiond Maya UI Session", bundle.BrokerSession)
+	}
 	if len(bundle.VisualEvidence) == 0 {
 		t.Fatalf("Evidence Bundle missing Visual Evidence")
 	}
@@ -406,6 +426,114 @@ func assertLiveSmokeEvidenceBundle(t *testing.T, evidenceDir string) evidenceBun
 		}
 	}
 	return bundle
+}
+
+func assertLiveFreshRunSessionStopped(t *testing.T, host mayaHostConfig, session *brokerSessionIdentity) {
+	t.Helper()
+	if session == nil || session.SessionID == "" {
+		t.Fatal("cannot verify stopped Fresh Run without broker session identity")
+	}
+	status, err := (ggMayaSessiondBroker{host: host}).status()
+	if err != nil {
+		t.Fatalf("query gg_mayasessiond after stopped Fresh Run %q: %v", session.SessionID, err)
+	}
+	if err := freshRunStoppedProofError(status, session); err != nil {
+		t.Fatalf("stopped Fresh Run %q failed post-stop proof: %v", session.SessionID, err)
+	}
+}
+
+func freshRunStoppedProofError(status sessiondStatusResult, session *brokerSessionIdentity) error {
+	if session == nil || session.SessionID == "" {
+		return fmt.Errorf("missing broker session identity")
+	}
+	if status.State.SessionID == "" {
+		missingState := !status.HasState && strings.EqualFold(sessiondEffectiveStatus(status), "missing")
+		stoppedTombstone := status.HasState && strings.EqualFold(status.DerivedStatus, "stopped") && strings.EqualFold(status.State.Status, "stopped")
+		if !missingState && !stoppedTombstone {
+			return fmt.Errorf("session identity disappeared without an inactive broker state")
+		}
+	} else if status.State.SessionID != session.SessionID {
+		return fmt.Errorf("evidence session %q does not match status session %q", session.SessionID, status.State.SessionID)
+	}
+	if sessiondSessionLooksActive(status) {
+		return fmt.Errorf("broker reports active session %q with status %q", status.State.SessionID, status.DerivedStatus)
+	}
+	for process, alive := range status.ProcessAlive {
+		if alive {
+			return fmt.Errorf("broker process %q remains alive", process)
+		}
+	}
+	return nil
+}
+
+func TestFreshRunStoppedProof(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    sessiondStatusResult
+		wantError bool
+	}{
+		{
+			name:   "matching stopped tombstone",
+			status: stoppedSessiondStatus("session-owned"),
+		},
+		{
+			name:   "anonymous stopped tombstone",
+			status: stoppedSessiondStatus(""),
+		},
+		{
+			name:   "state removed after stop",
+			status: missingSessiondStatus(),
+		},
+		{
+			name:      "different stopped session",
+			status:    stoppedSessiondStatus("session-other"),
+			wantError: true,
+		},
+		{
+			name:      "missing state with live process",
+			status:    missingSessiondStatusWithLiveProcess(),
+			wantError: true,
+		},
+		{
+			name:      "matching active session",
+			status:    activeSessiondStatus("session-owned"),
+			wantError: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := freshRunStoppedProofError(test.status, &brokerSessionIdentity{SessionID: "session-owned"})
+			if (err != nil) != test.wantError {
+				t.Fatalf("freshRunStoppedProofError() error = %v, wantError %t", err, test.wantError)
+			}
+		})
+	}
+}
+
+func stoppedSessiondStatus(sessionID string) sessiondStatusResult {
+	status := sessiondStatusResult{HasState: true, DerivedStatus: "stopped", ProcessAlive: map[string]bool{"daemon": false, "maya": false, "mcp": false}}
+	status.State.Status = "stopped"
+	status.State.SessionID = sessionID
+	return status
+}
+
+func missingSessiondStatus() sessiondStatusResult {
+	return sessiondStatusResult{DerivedStatus: "missing", ProcessAlive: map[string]bool{}}
+}
+
+func missingSessiondStatusWithLiveProcess() sessiondStatusResult {
+	status := missingSessiondStatus()
+	status.ProcessAlive["maya"] = true
+	return status
+}
+
+func activeSessiondStatus(sessionID string) sessiondStatusResult {
+	status := sessiondStatusResult{HasState: true, DerivedStatus: "running", ProcessAlive: map[string]bool{"daemon": true, "maya": true, "mcp": true}}
+	status.State.Status = "running"
+	status.State.SessionID = sessionID
+	status.State.MayaAlive = true
+	status.State.MCPAlive = true
+	return status
 }
 
 func requireLiveScenarioRecordingArtifact(t *testing.T, evidenceDir string, bundle evidenceBundle) visualEvidenceArtifact {

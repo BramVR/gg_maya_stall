@@ -19,6 +19,8 @@ import (
 const (
 	sessiondScenarioTimeout       = 10 * time.Minute
 	sessiondCommandTimeout        = 2 * time.Minute
+	sessiondSessionStartTimeout   = 5 * time.Minute
+	sessiondSessionPollInterval   = 5 * time.Second
 	sessiondRecoveryTimeout       = 3 * time.Minute
 	defaultSessiondRecoveryTask   = "MayaStallSessiondUI"
 	sessiondReasonCommandPortDown = "command-port-unreachable"
@@ -88,6 +90,127 @@ func sessionBrokerForConfig(host mayaHostConfig) sessionBroker {
 	return fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "fake Scenario completed"}}
 }
 
+func (broker ggMayaSessiondBroker) StartFreshSession(context runContext, scenario scenarioConfig) (brokerSessionIdentity, error) {
+	if err := broker.validate(); err != nil {
+		return brokerSessionIdentity{}, err
+	}
+	status, err := broker.status()
+	if err != nil {
+		return brokerSessionIdentity{}, fmt.Errorf("inspect inherited gg_mayasessiond Maya UI Session: %w", err)
+	}
+	previousSessionID := status.State.SessionID
+	if sessiondSessionLooksActive(status) {
+		if err := broker.stopSessiondSession(); err != nil {
+			return brokerSessionIdentity{}, fmt.Errorf("stop inherited gg_mayasessiond Maya UI Session: %w", err)
+		}
+	}
+	started := brokerSessionIdentity{BrokerAdapter: "gg-mayasessiond"}
+	if err := broker.restartSessionBrokerTask("fresh-run"); err != nil {
+		return started, fmt.Errorf("restart gg_mayasessiond for a fresh Maya UI Session: %w", err)
+	}
+	identity, err := broker.awaitFreshSession(previousSessionID)
+	if err != nil {
+		if identity.BrokerAdapter == "" {
+			identity = started
+		}
+		return identity, err
+	}
+	if err := appendEvent(context.EventsPath, "broker.session.fresh", identity.SessionID); err != nil {
+		return identity, err
+	}
+	return identity, nil
+}
+
+func (broker ggMayaSessiondBroker) StopSession(context runContext, session brokerSessionIdentity) error {
+	if err := broker.validate(); err != nil {
+		return err
+	}
+	status, err := broker.status()
+	if err != nil {
+		return err
+	}
+	if session.SessionID == "" {
+		return fmt.Errorf("refusing to stop gg_mayasessiond without this Fresh Run's session id")
+	}
+	if status.State.SessionID == "" {
+		return fmt.Errorf("gg_mayasessiond did not report a session id; refusing to stop a session this run cannot prove it owns")
+	}
+	if status.State.SessionID != session.SessionID {
+		return fmt.Errorf("gg_mayasessiond session id changed from %s to %s since this Fresh Run started; refusing to stop a session this run does not own", session.SessionID, status.State.SessionID)
+	}
+	if sessiondSessionLooksActive(status) {
+		if err := broker.stopSessiondSession(); err != nil {
+			return err
+		}
+	}
+	return appendEvent(context.EventsPath, "broker.session.stopped", session.SessionID)
+}
+
+func sessiondSessionLooksActive(status sessiondStatusResult) bool {
+	derived := sessiondEffectiveStatus(status)
+	return status.State.MayaAlive || status.State.MCPAlive || (status.HasState && derived != "" && !strings.EqualFold(derived, "stopped"))
+}
+
+func sessiondEffectiveStatus(status sessiondStatusResult) string {
+	if status.DerivedStatus != "" {
+		return status.DerivedStatus
+	}
+	return status.State.Status
+}
+
+func sessiondFreshSessionReady(status sessiondStatusResult) bool {
+	return strings.EqualFold(sessiondEffectiveStatus(status), "running") && status.State.CallServerReady && status.State.SessionID != ""
+}
+
+func (broker ggMayaSessiondBroker) awaitFreshSession(previousSessionID string) (brokerSessionIdentity, error) {
+	deadline := time.Now().Add(sessiondSessionStartTimeout)
+	var lastDetail string
+	identity := brokerSessionIdentity{BrokerAdapter: "gg-mayasessiond"}
+	for {
+		status, err := broker.status()
+		if err == nil && status.State.SessionID != "" {
+			identity.SessionID = status.State.SessionID
+		}
+		switch {
+		case err != nil:
+			lastDetail = err.Error()
+		case !strings.EqualFold(sessiondEffectiveStatus(status), "running"):
+			lastDetail = fmt.Sprintf("gg_mayasessiond session status is %q, not running", sessiondEffectiveStatus(status))
+		case !status.State.CallServerReady:
+			lastDetail = "gg_mayasessiond call server is not ready yet"
+		case status.State.SessionID == "":
+			lastDetail = "gg_mayasessiond did not report a broker session id"
+		case previousSessionID != "" && status.State.SessionID == previousSessionID:
+			lastDetail = fmt.Sprintf("gg_mayasessiond still reports inherited session %s", previousSessionID)
+		case sessiondFreshSessionReady(status):
+			return identity, nil
+		}
+		if !time.Now().Before(deadline) {
+			return identity, fmt.Errorf("fresh gg_mayasessiond Maya UI Session was not ready within %s: %s", sessiondSessionStartTimeout, lastDetail)
+		}
+		time.Sleep(sessiondSessionPollInterval)
+	}
+}
+
+func (broker ggMayaSessiondBroker) stopSessiondSession() error {
+	raw, err := broker.runSessiondCLI([]string{"stop", "--state-dir", broker.host.Broker.StateDir, "--wait-timeout-seconds", "120", "--json"}, sessiondCommandTimeout+2*time.Minute)
+	if err != nil {
+		return err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return fmt.Errorf("parse gg_mayasessiond stop JSON: %w", err)
+	}
+	ok, found := result["ok"].(bool)
+	if !found || !ok {
+		if message, _ := result["error"].(string); message != "" {
+			return fmt.Errorf("gg_mayasessiond stop failed: %s", message)
+		}
+		return fmt.Errorf("gg_mayasessiond stop failed")
+	}
+	return nil
+}
+
 func (broker ggMayaSessiondBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
 	if err := broker.validate(); err != nil {
 		return ScenarioResult{}, err
@@ -120,20 +243,6 @@ func (broker ggMayaSessiondBroker) RunScenario(context runContext, scenario scen
 		return ScenarioResult{}, err
 	}
 	return ScenarioResult{Status: resultStatusPassed, Summary: "gg_mayasessiond Scenario completed"}, nil
-}
-
-func (broker ggMayaSessiondBroker) PrepareForRun() error {
-	health, err := broker.ensureRunPreflight()
-	if err != nil {
-		return fmt.Errorf("session-broker preflight failed: %w", err)
-	}
-	if health.OK {
-		return nil
-	}
-	if health.Reason != "" {
-		return fmt.Errorf("session-broker preflight failed (%s): %s", health.Reason, health.Detail)
-	}
-	return fmt.Errorf("session-broker preflight failed: %s", health.Detail)
 }
 
 func (broker ggMayaSessiondBroker) CaptureScreenshot(context runContext, request screenshotRequest) (visualEvidenceArtifact, error) {
@@ -205,6 +314,9 @@ func (broker ggMayaSessiondBroker) RetentionCapabilities() brokerCapabilities {
 }
 
 func (broker ggMayaSessiondBroker) RetainRun(context runContext, manifest runManifest, reason string) (retainedSessionRecord, error) {
+	if manifest.BrokerSession == nil || manifest.BrokerSession.SessionID == "" {
+		return retainedSessionRecord{}, fmt.Errorf("cannot retain run %s without its broker session identity", manifest.RunID)
+	}
 	status, err := broker.status()
 	if err != nil {
 		return retainedSessionRecord{}, err
@@ -212,9 +324,15 @@ func (broker ggMayaSessiondBroker) RetainRun(context runContext, manifest runMan
 	if status.DerivedStatus == "" {
 		status.DerivedStatus = status.State.Status
 	}
+	if status.State.SessionID != manifest.BrokerSession.SessionID {
+		return retainedSessionRecord{}, fmt.Errorf("gg_mayasessiond session id changed from %s to %s before retention; refusing to retain a session this run does not own", manifest.BrokerSession.SessionID, status.State.SessionID)
+	}
+	if !sessiondSessionLooksActive(status) {
+		return retainedSessionRecord{}, fmt.Errorf("gg_mayasessiond session %s is not active; refusing to report it as retained", manifest.BrokerSession.SessionID)
+	}
 	return retainedSessionRecord{
-		BrokerAdapter: "gg-mayasessiond",
-		SessionID:     status.State.SessionID,
+		BrokerAdapter: manifest.BrokerSession.BrokerAdapter,
+		SessionID:     manifest.BrokerSession.SessionID,
 		Status:        status.DerivedStatus,
 		Metadata: map[string]any{
 			"reason":             reason,
@@ -305,22 +423,8 @@ func (broker ggMayaSessiondBroker) StopRetainedRun(record runRetentionRecord) er
 		if strings.TrimSpace(remoteRunRoot) == "" {
 			return fmt.Errorf("refusing to stop retained run %s because broker state is %s and no remote workspace cleanup path is recorded: %s", record.RunID, status.State, status.Detail)
 		}
-	} else {
-		raw, err := broker.runSessiondCLI([]string{"stop", "--state-dir", broker.host.Broker.StateDir, "--wait-timeout-seconds", "120", "--json"}, sessiondCommandTimeout+2*time.Minute)
-		if err != nil {
-			return err
-		}
-		var result map[string]any
-		if err := json.Unmarshal(raw, &result); err != nil {
-			return fmt.Errorf("parse gg_mayasessiond stop JSON: %w", err)
-		}
-		ok, found := result["ok"].(bool)
-		if !found || !ok {
-			if message, _ := result["error"].(string); message != "" {
-				return fmt.Errorf("gg_mayasessiond stop failed: %s", message)
-			}
-			return fmt.Errorf("gg_mayasessiond stop failed")
-		}
+	} else if err := broker.stopSessiondSession(); err != nil {
+		return err
 	}
 	if strings.TrimSpace(remoteRunRoot) != "" {
 		if err := broker.removeRemotePath(remoteRunRoot); err != nil {
@@ -423,53 +527,6 @@ func (broker ggMayaSessiondBroker) ensureReady() (sessiondHealthResult, error) {
 	return health, nil
 }
 
-func (broker ggMayaSessiondBroker) ensureRunPreflight() (sessiondHealthResult, error) {
-	health := broker.runPreflightHealth()
-	if health.OK || !health.Recoverable {
-		return health, nil
-	}
-	if err := broker.recoverSessionBroker(health.Reason); err != nil {
-		health.Detail = fmt.Sprintf("%s; automatic recovery failed: %v", health.Detail, err)
-		return health, nil
-	}
-	deadline := time.Now().Add(sessiondRecoveryTimeout)
-	var last sessiondHealthResult
-	for time.Now().Before(deadline) {
-		last = broker.runPreflightHealth()
-		if last.OK {
-			last.Recovered = true
-			return last, nil
-		}
-		time.Sleep(time.Second)
-	}
-	if last.Detail != "" {
-		health = last
-	}
-	health.Detail = fmt.Sprintf("%s; automatic recovery did not restore gg_mayasessiond commandPort health", health.Detail)
-	return health, nil
-}
-
-func (broker ggMayaSessiondBroker) runPreflightHealth() sessiondHealthResult {
-	if err := broker.validate(); err != nil {
-		return unrecoverableSessiondHealth("broker-config-invalid", err.Error(), "Configure gg_mayasessiond paths in host config. See docs/setup/windows-maya-host.md#session-broker.")
-	}
-	status, err := broker.status()
-	if err != nil {
-		return unrecoverableSessiondHealth("sessiond-status-unavailable", err.Error(), "Start or repair gg_mayasessiond on this Maya Host. See docs/setup/windows-maya-host.md#session-broker.")
-	}
-	effectiveStatus := status.DerivedStatus
-	if effectiveStatus == "" {
-		effectiveStatus = status.State.Status
-	}
-	if effectiveStatus != "running" {
-		return unrecoverableSessiondHealth("sessiond-not-running", "gg_mayasessiond is not running", "Start the interactive gg_mayasessiond broker. See docs/setup/windows-maya-host.md#session-broker.")
-	}
-	if !status.State.CallServerReady {
-		return recoverableSessiondHealth("command-port-not-ready", "gg_mayasessiond commandPort call server is not ready", "Restart the interactive gg_mayasessiond broker so Maya commandPort localhost:7001 is reacquired. See docs/setup/windows-maya-host.md#session-broker.")
-	}
-	return sessiondHealthResult{OK: true, Detail: "gg_mayasessiond commandPort ready"}
-}
-
 func (broker ggMayaSessiondBroker) sessionBrokerHealth() sessiondHealthResult {
 	if err := broker.validate(); err != nil {
 		return unrecoverableSessiondHealth("broker-config-invalid", err.Error(), "Configure gg_mayasessiond paths in host config. See docs/setup/windows-maya-host.md#session-broker.")
@@ -522,7 +579,11 @@ func (broker ggMayaSessiondBroker) sessionBrokerHealth() sessiondHealthResult {
 			reason = sessiondReasonCommandPortDown
 			hint = "Restart the interactive gg_mayasessiond broker so Maya commandPort localhost:7001 is reacquired. See docs/setup/windows-maya-host.md#session-broker."
 		}
-		if reason == sessiondReasonCommandPortDown {
+		if isKnownSessiondScriptExecuteResponseError(err) {
+			reason = "script-execute-invalid-response"
+			hint = "Restart the interactive gg_mayasessiond broker so script.execute returns a valid tool result. See docs/setup/windows-maya-host.md#session-broker."
+		}
+		if reason == sessiondReasonCommandPortDown || reason == "script-execute-invalid-response" {
 			return recoverableSessiondHealth(reason, err.Error(), hint)
 		}
 		return unrecoverableSessiondHealth(reason, err.Error(), hint)
@@ -543,12 +604,54 @@ func isCommandPortError(err error) bool {
 	return strings.Contains(message, "commandport") || strings.Contains(message, "localhost:7001")
 }
 
+// Older live broker sessions can retain a handler that returns a malformed
+// tool result instead of the expected object; restarting the session repairs it.
+func isKnownSessiondScriptExecuteResponseError(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "'int' object has no attribute 'get'") ||
+		strings.Contains(message, "expecting value: line 1 column 1 (char 0)")
+}
+
 func (broker ggMayaSessiondBroker) recoverSessionBroker(reason string) error {
 	taskName := sessiondRecoveryTaskName(broker.host)
 	if _, err := runSSHCommandOutput(broker.host, encodedPowerShellCommand(sessiondRecoveryScript(broker.host, taskName, reason)), sessiondCommandTimeout+2*time.Minute); err != nil {
 		return fmt.Errorf("restart scheduled task %q: %w", taskName, err)
 	}
 	return nil
+}
+
+func (broker ggMayaSessiondBroker) restartSessionBrokerTask(reason string) error {
+	taskName := sessiondRecoveryTaskName(broker.host)
+	if _, err := runSSHCommandOutput(broker.host, encodedPowerShellCommand(sessiondTaskRestartScript(taskName, reason)), sessiondCommandTimeout+2*time.Minute); err != nil {
+		return fmt.Errorf("restart scheduled task %q: %w", taskName, err)
+	}
+	return nil
+}
+
+func sessiondTaskRestartScript(taskName string, reason string) string {
+	return fmt.Sprintf(`$ErrorActionPreference = 'Stop'
+$taskName = %s
+$task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+if ($task.State -eq 'Running') {
+  Stop-ScheduledTask -InputObject $task
+  $stopped = $false
+  for ($attempt = 0; $attempt -lt 90; $attempt++) {
+    Start-Sleep -Seconds 1
+    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+    if ($task.State -ne 'Running') {
+      $stopped = $true
+      break
+    }
+  }
+  if (-not $stopped) {
+    throw "scheduled task $taskName did not stop before restart"
+  }
+}
+Start-ScheduledTask -InputObject $task
+[pscustomobject]@{ok=$true; task=$taskName; reason=%s} | ConvertTo-Json -Compress`,
+		powerShellSingleQuoted(taskName),
+		powerShellSingleQuoted(reason),
+	)
 }
 
 func sessiondRecoveryScript(host mayaHostConfig, taskName string, reason string) string {
@@ -773,6 +876,11 @@ Set-Location -LiteralPath %s
 & %s -m gg_maya_sessiond.cli @(%s)`, powerShellSingleQuoted(broker.host.Broker.Repo), powerShellSingleQuoted(broker.host.Broker.Python), strings.Join(quoted, ","))
 	raw, err := runSSHCommandOutput(broker.host, encodedPowerShellCommand(script), timeout)
 	if err != nil {
+		if args[0] == "status" {
+			if jsonOutput, ok := sessiondStatusJSONFromFailedOutput(raw); ok {
+				return jsonOutput, nil
+			}
+		}
 		if jsonOutput, ok := sessiondJSONFromFailedOutput(raw); ok {
 			return jsonOutput, nil
 		}
@@ -980,6 +1088,9 @@ func isSessiondJSONDocument(document []byte) bool {
 			return hasAnyJSONKey(object, "tool", "checks", "content", "output", "error", "status")
 		}
 	}
+	if isSessiondStatusJSONObject(object) {
+		return true
+	}
 	if raw, ok := object["state"]; ok && !hasAnyJSONKey(object, "level", "msg") {
 		var state map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &state); err == nil {
@@ -987,6 +1098,22 @@ func isSessiondJSONDocument(document []byte) bool {
 		}
 	}
 	return false
+}
+
+func isSessiondStatusJSONObject(object map[string]json.RawMessage) bool {
+	if hasAnyJSONKey(object, "level", "msg") {
+		return false
+	}
+	var hasState bool
+	if err := json.Unmarshal(object["has_state"], &hasState); err != nil {
+		return false
+	}
+	var derivedStatus string
+	if err := json.Unmarshal(object["derived_status"], &derivedStatus); err != nil || strings.TrimSpace(derivedStatus) == "" {
+		return false
+	}
+	var state map[string]json.RawMessage
+	return json.Unmarshal(object["state"], &state) == nil
 }
 
 func hasAnyJSONKey(object map[string]json.RawMessage, keys ...string) bool {
@@ -1012,6 +1139,38 @@ func sessiondJSONFromFailedOutput(raw []byte) ([]byte, bool) {
 	}
 	okValue, ok := object["ok"].(bool)
 	if !ok || okValue {
+		return nil, false
+	}
+	return jsonOutput, true
+}
+
+func sessiondStatusJSONFromFailedOutput(raw []byte) ([]byte, bool) {
+	jsonOutput := trimToJSON(raw)
+	if !isSessiondJSONDocument(jsonOutput) {
+		return nil, false
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(jsonOutput, &object); err != nil || !isSessiondStatusJSONObject(object) {
+		return nil, false
+	}
+	var hasState bool
+	if err := json.Unmarshal(object["has_state"], &hasState); err != nil {
+		return nil, false
+	}
+	var derivedStatus string
+	if err := json.Unmarshal(object["derived_status"], &derivedStatus); err != nil {
+		return nil, false
+	}
+	if !hasState {
+		return jsonOutput, derivedStatus == "missing"
+	}
+	if derivedStatus != "stopped" {
+		return nil, false
+	}
+	var state struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(object["state"], &state); err != nil || state.Status != "stopped" {
 		return nil, false
 	}
 	return jsonOutput, true

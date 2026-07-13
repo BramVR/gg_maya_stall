@@ -7,9 +7,11 @@ const defaultPolicyPath = path.join(root, "proof", "live-maya-policy.json");
 const args = parseArgs(process.argv.slice(2));
 const policyPath = path.resolve(root, args.policy ?? defaultPolicyPath);
 const outputPath = path.resolve(root, args.output ?? path.join("artifacts", "proof", "proof-manifest.json"));
-const policy = readJSON(policyPath);
-const changedFiles = uniqueChangedFiles(readChangedFiles(args));
-const liveReasons = selectLiveReasons(policy, changedFiles);
+const policies = [readJSON(policyPath)];
+if (args.additional_policy) policies.push(readJSON(path.resolve(root, args.additional_policy)));
+const rawChangedFiles = readChangedFiles(args);
+const changedFiles = args.changed_files_json || args.diff_mode === "exact" ? uniqueStructuredPaths(rawChangedFiles) : uniqueChangedFiles(rawChangedFiles);
+const liveReasons = uniqueLiveReasons(policies.flatMap((policy) => selectLiveReasons(policy, changedFiles)));
 const liveRequired = liveReasons.length > 0;
 
 const manifest = {
@@ -27,7 +29,7 @@ const manifest = {
     artifacts: { status: "pending", required: true },
     live_maya: {
       status: liveRequired ? "required" : "not_required",
-      command: "go test ./internal/cli -run TestOptInRealVisualEvidenceSmoke -count=1 && go test ./internal/cli -run TestOptInRealDesktopControlModalSmoke -count=1 && go test ./internal/cli -run TestOptInRealSSHDoctorSmoke -count=1 && go test ./internal/cli -run TestOptInRealSSHConsumingRepoSmoke -count=1 && go test ./internal/cli -run TestOptInRealSSHRunSmoke -count=1 && go test ./internal/cli -run TestOptInRealRunScopedDesktopOpsSmoke -count=1",
+      command: "go test -json ./internal/cli -run '^(TestOptInRealVisualEvidenceSmoke|TestOptInRealDesktopControlModalSmoke|TestOptInRealSSHDoctorSmoke|TestOptInRealSSHConsumingRepoSmoke|TestOptInRealSSHRunSmoke|TestOptInRealRunScopedDesktopOpsSmoke)$' -count=1 -parallel=1 -timeout=20m",
       fail_closed: liveRequired,
     },
   },
@@ -55,6 +57,9 @@ function parseArgs(argv) {
       case "--policy":
       case "--output":
       case "--changed-files":
+      case "--changed-files-json":
+      case "--additional-policy":
+      case "--diff-mode":
       case "--base":
       case "--head":
         i++;
@@ -73,7 +78,22 @@ function parseArgs(argv) {
   return parsed;
 }
 
+function uniqueLiveReasons(reasons) {
+  const seen = new Set();
+  return reasons.filter((reason) => {
+    const key = `${reason.path}\0${reason.rule}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function readChangedFiles(options) {
+  if (options.changed_files_json) {
+    const value = readJSON(path.resolve(root, options.changed_files_json));
+    if (!Array.isArray(value) || value.some((file) => typeof file !== "string")) fail("--changed-files-json must contain an array of strings");
+    return value;
+  }
   if (options.changedFiles) {
     return fs.readFileSync(path.resolve(root, options.changedFiles), "utf8").split(/\r?\n/);
   }
@@ -83,10 +103,26 @@ function readChangedFiles(options) {
       encoding: "utf8",
     }).split(/\r?\n/);
   }
+  if (options.diff_mode && options.diff_mode !== "exact") fail("--diff-mode must be exact");
+  if (options.diff_mode === "exact") {
+    const output = execFileSync("git", ["diff", "--name-status", "-z", "--diff-filter=ACDMRT", options.base, options.head], { cwd: root });
+    return changedFilesFromNulNameStatus(output);
+  }
   return execFileSync("git", ["diff", "--name-status", "--diff-filter=ACDMRT", `${options.base}...${options.head}`], {
     cwd: root,
     encoding: "utf8",
   }).split(/\r?\n/);
+}
+
+function changedFilesFromNulNameStatus(output) {
+  const fields = output.toString("utf8").split("\0");
+  const files = [];
+  for (let i = 0; i < fields.length && fields[i];) {
+    const status = fields[i++];
+    if (/^[RC]\d*/.test(status)) files.push(fields[i++], fields[i++]);
+    else files.push(fields[i++]);
+  }
+  return files;
 }
 
 function uniqueChangedFiles(lines) {
@@ -98,6 +134,19 @@ function uniqueChangedFiles(lines) {
         seen.add(file);
         files.push(file);
       }
+    }
+  }
+  return files;
+}
+
+function uniqueStructuredPaths(paths) {
+  const seen = new Set();
+  const files = [];
+  for (const file of paths) {
+    const normalized = file.replaceAll("\\", "/").replace(/^\.\/+/, "");
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      files.push(normalized);
     }
   }
   return files;

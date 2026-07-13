@@ -44,11 +44,25 @@ type failureArtifactCollector interface {
 }
 
 type sessionBroker interface {
+	// StartFreshSession makes sure the run begins from a clean Maya UI
+	// Session instead of inheriting prior broker state, and returns the
+	// session identity for run evidence.
+	StartFreshSession(runContext, scenarioConfig) (brokerSessionIdentity, error)
 	RunScenario(runContext, scenarioConfig) (ScenarioResult, error)
+	// StopSession stops the Maya UI Session identified by the given
+	// identity so `stopPolicy: stopped` means the session is stopped, not
+	// only that the remote workspace is removed. Later callers (kept-session
+	// expiry, debug attach) can stop a session by identity through the same
+	// method.
+	StopSession(runContext, brokerSessionIdentity) error
 }
 
-type sessionBrokerPreflighter interface {
-	PrepareForRun() error
+// brokerSessionIdentity identifies the Maya UI Session a Session Broker
+// started or stopped for a run. It lands in run evidence as an additive
+// `brokerSession` field.
+type brokerSessionIdentity struct {
+	BrokerAdapter string `json:"brokerAdapter"`
+	SessionID     string `json:"sessionId,omitempty"`
 }
 
 type runRetentionBroker interface {
@@ -114,13 +128,14 @@ type runOutcome struct {
 }
 
 type runManifest struct {
-	RunID         string            `json:"runId"`
-	Scenario      string            `json:"scenario"`
-	TargetProfile string            `json:"targetProfile"`
-	Host          string            `json:"host"`
-	Runtime       runtimeMetadata   `json:"runtime"`
-	ConfigPath    string            `json:"configPath"`
-	Payload       []manifestPayload `json:"payload"`
+	RunID         string                 `json:"runId"`
+	Scenario      string                 `json:"scenario"`
+	TargetProfile string                 `json:"targetProfile"`
+	Host          string                 `json:"host"`
+	Runtime       runtimeMetadata        `json:"runtime"`
+	BrokerSession *brokerSessionIdentity `json:"brokerSession,omitempty"`
+	ConfigPath    string                 `json:"configPath"`
+	Payload       []manifestPayload      `json:"payload"`
 }
 
 type manifestPayload struct {
@@ -146,6 +161,7 @@ type evidenceBundle struct {
 	TargetProfile  string                   `json:"targetProfile"`
 	Host           string                   `json:"host"`
 	Runtime        runtimeMetadata          `json:"runtime"`
+	BrokerSession  *brokerSessionIdentity   `json:"brokerSession,omitempty"`
 	Manifest       string                   `json:"manifest"`
 	Events         string                   `json:"events"`
 	Log            string                   `json:"log"`
@@ -740,6 +756,7 @@ func writeEvidenceBundle(context runContext, manifest runManifest, scenario scen
 		TargetProfile:  manifest.TargetProfile,
 		Host:           manifest.Host,
 		Runtime:        manifest.Runtime,
+		BrokerSession:  manifest.BrokerSession,
 		Manifest:       evidenceManifestFileName,
 		Events:         evidenceEventsFileName,
 		Log:            evidenceLogPath,
@@ -1035,7 +1052,28 @@ func ensurePayloadPathHasNoSymlinkAncestor(repoDir string, relativePath string) 
 	return nil
 }
 
+// fakeSessionLifecycle implements the fake Session Broker session lifecycle.
+// It is embeddable so test brokers share the same fresh-session and stop
+// behavior as fakeSessionBroker.
+type fakeSessionLifecycle struct{}
+
+func (fakeSessionLifecycle) StartFreshSession(context runContext, scenario scenarioConfig) (brokerSessionIdentity, error) {
+	identity := brokerSessionIdentity{
+		BrokerAdapter: "fake",
+		SessionID:     "fake-" + context.RunWorkspace.RunID(),
+	}
+	if err := appendEvent(context.EventsPath, "broker.session.fresh", identity.SessionID); err != nil {
+		return brokerSessionIdentity{}, err
+	}
+	return identity, nil
+}
+
+func (fakeSessionLifecycle) StopSession(context runContext, session brokerSessionIdentity) error {
+	return appendEvent(context.EventsPath, "broker.session.stopped", session.SessionID)
+}
+
 type fakeSessionBroker struct {
+	fakeSessionLifecycle
 	Result ScenarioResult
 }
 
@@ -1126,8 +1164,16 @@ type invalidSessionBroker struct {
 	err error
 }
 
+func (broker invalidSessionBroker) StartFreshSession(runContext, scenarioConfig) (brokerSessionIdentity, error) {
+	return brokerSessionIdentity{}, broker.err
+}
+
 func (broker invalidSessionBroker) RunScenario(runContext, scenarioConfig) (ScenarioResult, error) {
 	return ScenarioResult{}, broker.err
+}
+
+func (broker invalidSessionBroker) StopSession(runContext, brokerSessionIdentity) error {
+	return broker.err
 }
 
 func (broker invalidSessionBroker) CaptureScreenshot(runContext, screenshotRequest) (visualEvidenceArtifact, error) {

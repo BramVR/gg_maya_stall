@@ -1,0 +1,74 @@
+name: CI Hosted
+
+on:
+  pull_request:
+    types: [edited, opened, reopened, synchronize, ready_for_review]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-hosted-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  go_tests:
+    name: Go Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with: {ref: "${{ github.event.pull_request.head.sha || github.sha }}", persist-credentials: false}
+      - uses: actions/setup-go@v6
+        with: {go-version-file: go.mod, cache: false}
+      - run: go test -race ./...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v7
+        with: {ref: "${{ github.event.pull_request.head.sha || github.sha }}", fetch-depth: 0, persist-credentials: false}
+      - uses: actions/setup-go@v6
+        with: {go-version-file: go.mod, cache: false}
+      - name: Select lint base
+        id: lint_base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            BASE_SHA="$(git rev-parse HEAD^)"
+          fi
+          echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+      - uses: golangci/golangci-lint-action@v9.3.0
+        with: {version: v2.12.2, args: "--new-from-rev=${{ steps.lint_base.outputs.base_sha }}", skip-cache: true}
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with: {ref: "${{ github.event.pull_request.head.sha || github.sha }}", persist-credentials: false}
+      - uses: actions/setup-node@v6
+        with: {node-version: 22}
+      - run: scripts/check-docs.sh
+
+  proof_scripts:
+    name: Proof Policy And Helpers
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v7
+        with: {ref: "${{ github.event.pull_request.head.sha || github.sha }}", persist-credentials: false}
+      - uses: actions/setup-node@v6
+        with: {node-version: 22}
+      - uses: actions/setup-go@v6
+        with: {go-version: "1.25.x", cache: false}
+      - run: |
+          node --test scripts/proof/*.test.mjs scripts/windows/*.test.mjs
+          node scripts/proof/audit-live-policy.mjs
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/*.yml

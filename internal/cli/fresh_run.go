@@ -22,6 +22,9 @@ type freshRunLifecycle struct {
 	resolvedRuntime              resolvedRuntime
 	context                      runContext
 	manifest                     runManifest
+	session                      brokerSessionIdentity
+	sessionStarted               bool
+	sessionSettled               bool
 	brokerResult                 ScenarioResult
 	result                       ScenarioResult
 	visualEvidence               []visualEvidenceArtifact
@@ -47,6 +50,21 @@ func newFreshRun(repoDir string, options runOptions, runtime runRuntime) freshRu
 
 func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 	defer func() {
+		if run.sessionStarted && !run.sessionSettled {
+			if stopErr := run.runtime.Broker.StopSession(run.context, run.session); stopErr != nil {
+				err = errors.Join(err, fmt.Errorf("stop Maya UI Session for %s after run failure: %w", run.manifest.RunID, stopErr))
+				run.releaseHostLock = false
+			} else {
+				run.sessionSettled = true
+				if syncErr := run.syncEvidenceEvents(); syncErr != nil {
+					err = errors.Join(err, syncErr)
+				}
+				if cleanupErr := run.cleanupStoppedRun(); cleanupErr != nil {
+					err = errors.Join(err, cleanupErr)
+					run.releaseHostLock = false
+				}
+			}
+		}
 		if run.releaseHostLock {
 			if releaseErr := run.host.release(); releaseErr != nil {
 				err = errors.Join(err, fmt.Errorf("release Host Lock for %s: %w", run.host.HostID, releaseErr))
@@ -55,18 +73,10 @@ func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 	}()
 
 	if err := run.setup(); err != nil {
-		return runOutcome{}, err
+		return run.finishFailedRun(err)
 	}
-	defer func() {
-		if err == nil && outcome.StopPolicy == "stopped" {
-			if cleanupErr := cleanupRunState(run.repoDir, outcome.RunID); cleanupErr != nil {
-				err = fmt.Errorf("clean up Fresh Run state for %s: %w", outcome.RunID, cleanupErr)
-			}
-		}
-	}()
-
 	if err := run.execute(); err != nil {
-		return runOutcome{}, err
+		return run.finishFailedRun(err)
 	}
 	outcome, err = run.settle()
 	return outcome, err
@@ -122,11 +132,6 @@ func (run *freshRunLifecycle) setup() error {
 	if err := rejectUnsupportedEvidenceConfig(run.runtime.Broker, scenario.Config); err != nil {
 		return err
 	}
-	if preflighter, ok := run.runtime.Broker.(sessionBrokerPreflighter); ok {
-		if err := preflighter.PrepareForRun(); err != nil {
-			return err
-		}
-	}
 	if err := ensureTrustedPluginArtifactsAllowlistedForRun(run.repoDir, host.Config, scenario); err != nil {
 		return err
 	}
@@ -155,9 +160,6 @@ func (run *freshRunLifecycle) setup() error {
 	if err := createCleanRunDirs(run.context); err != nil {
 		return err
 	}
-	if err := run.runtime.Host.StagePayload(run.context, scenario.Payload); err != nil {
-		return err
-	}
 
 	run.manifest = runManifest{
 		RunID:         runID,
@@ -177,7 +179,43 @@ func (run *freshRunLifecycle) setup() error {
 	if err := markHostLockActive(run.repoDir, run.host.HostID, run.manifest.RunID); err != nil {
 		return err
 	}
-	return appendEvent(run.context.EventsPath, "run.started", scenario.Name)
+	if err := appendEvent(run.context.EventsPath, "run.started", scenario.Name); err != nil {
+		return err
+	}
+	if err := run.startFreshSession(); err != nil {
+		return err
+	}
+	return run.runtime.Host.StagePayload(run.context, scenario.Payload)
+}
+
+func (run *freshRunLifecycle) startFreshSession() error {
+	session, err := run.runtime.Broker.StartFreshSession(run.context, run.scenario.Config)
+	if err == nil && (session.BrokerAdapter == "" || session.SessionID == "") {
+		run.releaseHostLock = false
+		err = fmt.Errorf("session broker started without an owned session identity")
+	}
+	if session.BrokerAdapter != "" {
+		run.session = session
+		run.sessionStarted = true
+		run.manifest.BrokerSession = &session
+		if manifestErr := writeJSONFile(filepath.Join(run.context.StateDir, "manifest.json"), run.manifest); manifestErr != nil {
+			return errors.Join(err, manifestErr)
+		}
+	}
+	if err != nil {
+		if evidenceErr := ensureFailureLog(run.context, err); evidenceErr != nil {
+			return errors.Join(err, evidenceErr)
+		}
+		if evidenceErr := appendEvent(run.context.EventsPath, "run.failed-before-result-collection", err.Error()); evidenceErr != nil {
+			return errors.Join(err, evidenceErr)
+		}
+		if evidenceErr := run.writeBrokerFailureEvidence(err); evidenceErr != nil {
+			return errors.Join(err, evidenceErr)
+		}
+		run.result = ScenarioResult{Status: resultStatusFailed, Summary: fmt.Sprintf("Scenario failed before result collection: %v", err)}
+		return err
+	}
+	return nil
 }
 
 func (run *freshRunLifecycle) execute() error {
@@ -193,6 +231,7 @@ func (run *freshRunLifecycle) execute() error {
 		if recovered {
 			return nil
 		}
+		run.result = ScenarioResult{Status: resultStatusFailed, Summary: fmt.Sprintf("Scenario failed before result collection: %v", err)}
 		if evidenceErr := run.writeBrokerFailureEvidence(err); evidenceErr != nil {
 			return errors.Join(err, evidenceErr)
 		}
@@ -396,12 +435,7 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 		run.visualEvidence = mergeVisualEvidence(run.visualEvidence, artifacts)
 	}
 	if !shouldStopAfter(run.options.StopAfter, run.result.Status) {
-		run.stopPolicy = "kept"
-		run.followUp = append(run.followUp,
-			fmt.Sprintf("maya-stall status --run %s", run.manifest.RunID),
-			fmt.Sprintf("maya-stall attach %s", run.manifest.RunID),
-			fmt.Sprintf("maya-stall stop %s", run.manifest.RunID),
-		)
+		run.configureKeptStopPolicy()
 	}
 	if err := appendEvent(run.context.EventsPath, "run.completed", run.result.Status); err != nil {
 		return runOutcome{}, err
@@ -409,34 +443,101 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 	if err := writeEvidenceBundle(run.context, run.manifest, run.scenario, run.result, run.visualEvidence, run.validatorResult); err != nil {
 		return runOutcome{}, err
 	}
-	if run.stopPolicy == "kept" {
-		retention, ok := run.runtime.Broker.(runRetentionBroker)
-		if !ok || !retention.RetentionCapabilities().RetainOnFailure {
-			return runOutcome{}, unsupportedBrokerCapabilityError(run.manifest.Runtime.BrokerAdapter, "retain-on-failure")
+	if run.stopPolicy == "stopped" {
+		if err := run.runtime.Broker.StopSession(run.context, run.session); err != nil {
+			return runOutcome{}, fmt.Errorf("stop Maya UI Session for %s: %w", run.manifest.RunID, err)
 		}
-		reason := "stop-after-" + run.options.StopAfter
-		if run.options.StopAfter == stopAfterSuccess && run.result.Status != resultStatusPassed {
-			reason = "keep-on-failure"
+		run.sessionSettled = true
+		syncErr := run.syncEvidenceEvents()
+		cleanupErr := run.cleanupStoppedRun()
+		if cleanupErr != nil {
+			run.releaseHostLock = false
 		}
-		if err := markHostLockKept(run.repoDir, run.host.HostID, run.manifest.RunID); err != nil {
-			return runOutcome{}, err
-		}
-		run.releaseHostLock = false
-		session, err := retention.RetainRun(run.context, run.manifest, reason)
-		if err != nil {
-			return runOutcome{}, err
-		}
-		record := newRunRetentionRecord(run.context, run.manifest, run.host.Config, "kept", reason)
-		record.BrokerCapabilities = retention.RetentionCapabilities()
-		record.RemoteSession = session
-		if err := writeRunRetentionRecord(run.context, record); err != nil {
-			return runOutcome{}, err
-		}
-	} else if retention, ok := run.runtime.Broker.(runRetentionBroker); ok && retention.RetentionCapabilities().CleanupRetainedWorkspace {
-		if err := retention.CleanupRun(run.context); err != nil {
-			return runOutcome{}, fmt.Errorf("clean up remote run workspace for %s: %w", run.manifest.RunID, err)
+		if syncErr != nil || cleanupErr != nil {
+			return runOutcome{}, errors.Join(syncErr, cleanupErr)
 		}
 	}
+	if run.stopPolicy == "kept" {
+		if err := run.retainSession(run.retentionReason()); err != nil {
+			return runOutcome{}, err
+		}
+	}
+	return run.currentOutcome(), nil
+}
+
+func (run *freshRunLifecycle) configureKeptStopPolicy() string {
+	run.stopPolicy = "kept"
+	if len(run.followUp) == 0 {
+		run.followUp = append(run.followUp,
+			fmt.Sprintf("maya-stall status --run %s", run.manifest.RunID),
+			fmt.Sprintf("maya-stall attach %s", run.manifest.RunID),
+			fmt.Sprintf("maya-stall stop %s", run.manifest.RunID),
+		)
+	}
+	return run.retentionReason()
+}
+
+func (run *freshRunLifecycle) finishFailedRun(runErr error) (runOutcome, error) {
+	if !run.sessionStarted || shouldStopAfter(run.options.StopAfter, resultStatusFailed) {
+		return runOutcome{}, runErr
+	}
+	if run.result.Status == "" {
+		run.result = ScenarioResult{Status: resultStatusFailed, Summary: fmt.Sprintf("Scenario failed before result collection: %v", runErr)}
+	}
+	if _, err := os.Stat(filepath.Join(run.context.EvidenceDir, evidenceBundleFileName)); errors.Is(err, os.ErrNotExist) {
+		if evidenceErr := ensureFailureLog(run.context, runErr); evidenceErr != nil {
+			return runOutcome{}, errors.Join(runErr, evidenceErr)
+		}
+		if evidenceErr := appendEvent(run.context.EventsPath, "run.failed-before-result-collection", runErr.Error()); evidenceErr != nil {
+			return runOutcome{}, errors.Join(runErr, evidenceErr)
+		}
+		if evidenceErr := run.writeBrokerFailureEvidence(runErr); evidenceErr != nil {
+			return runOutcome{}, errors.Join(runErr, evidenceErr)
+		}
+	} else if err != nil {
+		return runOutcome{}, errors.Join(runErr, err)
+	}
+	reason := run.configureKeptStopPolicy()
+	if retainErr := run.retainSession(reason); retainErr != nil {
+		return runOutcome{}, errors.Join(runErr, retainErr)
+	}
+	return run.currentOutcome(), runErr
+}
+
+func (run *freshRunLifecycle) retentionReason() string {
+	if run.options.StopAfter == stopAfterSuccess {
+		return "keep-on-failure"
+	}
+	return "stop-after-" + run.options.StopAfter
+}
+
+func (run *freshRunLifecycle) retainSession(reason string) error {
+	retention, ok := run.runtime.Broker.(runRetentionBroker)
+	if !ok || !retention.RetentionCapabilities().RetainOnFailure {
+		return unsupportedBrokerCapabilityError(run.manifest.Runtime.BrokerAdapter, "retain-on-failure")
+	}
+	if err := markHostLockKept(run.repoDir, run.host.HostID, run.manifest.RunID); err != nil {
+		return err
+	}
+	session, err := retention.RetainRun(run.context, run.manifest, reason)
+	if err != nil {
+		return err
+	}
+	if session.BrokerAdapter != run.session.BrokerAdapter || session.SessionID != run.session.SessionID {
+		return fmt.Errorf("session broker retained a different Maya UI Session: started %s/%s, retained %s/%s", run.session.BrokerAdapter, run.session.SessionID, session.BrokerAdapter, session.SessionID)
+	}
+	record := newRunRetentionRecord(run.context, run.manifest, run.host.Config, "kept", reason)
+	record.BrokerCapabilities = retention.RetentionCapabilities()
+	record.RemoteSession = session
+	if err := writeRunRetentionRecord(run.context, record); err != nil {
+		return err
+	}
+	run.sessionSettled = true
+	run.releaseHostLock = false
+	return run.syncEvidenceEvents()
+}
+
+func (run *freshRunLifecycle) currentOutcome() runOutcome {
 	return runOutcome{
 		RunID:            run.manifest.RunID,
 		Scenario:         run.scenario.Name,
@@ -448,5 +549,36 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 		Validators:       run.validatorResult,
 		StopPolicy:       run.stopPolicy,
 		FollowUpCommands: run.followUp,
-	}, nil
+	}
+}
+
+func (run *freshRunLifecycle) cleanupStoppedRun() error {
+	if retention, ok := run.runtime.Broker.(runRetentionBroker); ok && retention.RetentionCapabilities().CleanupRetainedWorkspace {
+		if err := retention.CleanupRun(run.context); err != nil {
+			return fmt.Errorf("clean up remote run workspace for %s: %w", run.manifest.RunID, err)
+		}
+	}
+	if run.manifest.RunID != "" {
+		if err := cleanupRunState(run.repoDir, run.manifest.RunID); err != nil {
+			return fmt.Errorf("clean up Fresh Run state for %s: %w", run.manifest.RunID, err)
+		}
+	}
+	return nil
+}
+
+func (run *freshRunLifecycle) syncEvidenceEvents() error {
+	if _, err := os.Stat(run.context.EvidenceDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	events, err := os.ReadFile(run.context.EventsPath)
+	if err != nil {
+		return fmt.Errorf("read run events after stopping run: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(run.context.EvidenceDir, evidenceEventsFileName), events, 0o644); err != nil {
+		return fmt.Errorf("update Evidence Bundle events after stopping run: %w", err)
+	}
+	return nil
 }

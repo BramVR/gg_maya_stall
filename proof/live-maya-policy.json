@@ -6,10 +6,12 @@
       "id": "proof-gate",
       "reason": "proof gate policy, scripts, or workflow changed",
       "paths": [
-        ".github/workflows/proof.yml",
+        ".github/workflows/ci-hosted.yml",
+        ".github/workflows/ci-required.yml",
         "proof/live-maya-policy.json"
       ],
       "prefixes": [
+        ".github/workflows/",
         "scripts/proof/"
       ]
     },

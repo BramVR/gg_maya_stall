@@ -291,6 +291,12 @@ func TestScreenshotCapturesVisualEvidenceArtifact(t *testing.T) {
 	if got.TargetProfile != "default" || got.Host != defaultFakeHostID {
 		t.Fatalf("visual evidence target metadata = %+v", got)
 	}
+	if got.Origin != visualEvidenceOriginFakeBrokerCapture {
+		t.Fatalf("visual evidence origin = %q, want %q", got.Origin, visualEvidenceOriginFakeBrokerCapture)
+	}
+	if got.SHA256 != "e9a524f5fbb36de6c8725271e42cce2f536219c0f05f5b10163668b548cf63d7" {
+		t.Fatalf("visual evidence sha256 = %q, want fake screenshot digest", got.SHA256)
+	}
 }
 
 func TestRecordCapturesVisualEvidenceArtifactWithCrabboxDefaults(t *testing.T) {

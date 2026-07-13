@@ -1282,6 +1282,11 @@ func copyFile(source string, destination string) error {
 	}
 	defer input.Close()
 	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	// Overlapping payload declarations merge into one immutable snapshot. The
+	// first copy wins so a later source mutation cannot change checked bytes.
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}

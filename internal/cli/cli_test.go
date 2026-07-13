@@ -1549,6 +1549,35 @@ scenarios:
 	}
 }
 
+func TestRunScenarioSnapshotsOverlappingPayloadDeclarations(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "package", "plugin.py"), "# plug-in\n")
+	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    payload:
+      pluginArtifacts:
+        - "package"
+        - "package/plugin.py"
+    expectedOutputs:
+      scenarioResult: "outputs/smoke-result.json"
+`)
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"run", "--stop-after", "never", "smoke"}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	runState := onlyRunDir(t, filepath.Join(dir, ".maya-stall", "state", "runs"))
+	content, err := os.ReadFile(filepath.Join(runState, "payload", "pluginArtifacts", "package", "plugin.py"))
+	if err != nil {
+		t.Fatalf("read overlapping payload snapshot: %v", err)
+	}
+	if string(content) != "# plug-in\n" {
+		t.Fatalf("overlapping payload snapshot = %q", content)
+	}
+}
+
 func TestRunScenarioReportsMissingTypedPayloadPath(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, ".maya-stall.yaml"), `version: 1

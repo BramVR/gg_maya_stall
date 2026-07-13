@@ -277,6 +277,7 @@ func trustedPluginAllowlistRequiredPaths(repoDir string, host mayaHostConfig, pa
 		return nil, nil
 	}
 	required := []string{root}
+	validationPaths := []string{root}
 	for _, item := range payload {
 		if item.Kind != "pluginArtifacts" {
 			continue
@@ -285,6 +286,7 @@ func trustedPluginAllowlistRequiredPaths(repoDir string, host mayaHostConfig, pa
 		if destination == "" {
 			continue
 		}
+		validationPaths = append(validationPaths, destination)
 		if err := validatePayloadPathForTransport(repoDir, item.Source); err != nil {
 			return nil, fmt.Errorf("inspect Plugin Artifact %s: %w", item.Source, err)
 		}
@@ -301,6 +303,13 @@ func trustedPluginAllowlistRequiredPaths(repoDir string, host mayaHostConfig, pa
 		err = filepath.WalkDir(sourcePath, func(localPath string, entry os.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return walkErr
+			}
+			relativePath, err := filepath.Rel(sourcePath, localPath)
+			if err != nil {
+				return err
+			}
+			if relativePath != "." {
+				validationPaths = append(validationPaths, remoteJoin(destination, filepath.ToSlash(relativePath)))
 			}
 			if entry.IsDir() {
 				return nil
@@ -320,7 +329,7 @@ func trustedPluginAllowlistRequiredPaths(repoDir string, host mayaHostConfig, pa
 			return nil, fmt.Errorf("inspect Plugin Artifact %s: %w", item.Source, err)
 		}
 	}
-	for _, destination := range required {
+	for _, destination := range compactTrustedPluginAllowlistPaths(validationPaths) {
 		if hasWin32TrimmedPathComponent(destination) {
 			return nil, fmt.Errorf("inspect trusted Plugin Artifact destination %q: Windows path components ending in a space or period are not allowed", destination)
 		}

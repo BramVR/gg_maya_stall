@@ -1806,6 +1806,29 @@ func TestDoctorRepairTrustedPluginAllowlistValidatesNestedDestinationsBeforeHost
 	}
 }
 
+func TestDoctorRepairTrustedPluginAllowlistValidatesArtifactLeafBeforeHostAccess(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	configPath := filepath.Join(dir, ".maya-stall.yaml")
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config fixture: %v", err)
+	}
+	mustWriteFile(t, configPath, strings.Replace(string(configBytes), "build/demo.mll", "build/demo?.mll", 1))
+	mustWriteFile(t, filepath.Join(dir, "build", "demo?.mll"), "fake plug-in\n")
+	sshLog := filepath.Join(dir, "ssh.log")
+	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, nil)
+	hostConfigPath := writeTrustedPluginHostConfig(t, dir, sshPath, "")
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha", "--scenario", "smoke", "--repair-trusted-plugin-allowlist"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(sshLog); !os.IsNotExist(err) {
+		t.Fatalf("TrustCenter repair touched the host before validating the artifact leaf, stat err = %v", err)
+	}
+}
+
 func TestDoctorRepairTrustedPluginAllowlistReusesPrevalidatedDestinations(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	configPath := filepath.Join(dir, ".maya-stall.yaml")
@@ -2098,6 +2121,36 @@ func TestTrustedPluginAllowlistRequiredPathsRejectInvalidWin32Components(t *test
 			_, err := trustedPluginAllowlistRequiredPaths(dir, host, payload)
 			if err == nil || !strings.Contains(err.Error(), "invalid Windows path component") {
 				t.Fatalf("required allowlist paths error = %v, want invalid Win32 component rejection", err)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginAllowlistRequiredPathsRejectInvalidWin32ArtifactLeaves(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		source  string
+		isDir   bool
+		content string
+	}{
+		{name: "file artifact", source: "build/demo?.mll", content: "fake plug-in\n"},
+		{name: "reserved file artifact", source: "build/CON.mll", content: "fake plug-in\n"},
+		{name: "nested plugin leaf", source: "package/plugin?.py", isDir: true, content: "# Python plug-in\n"},
+		{name: "nested support leaf", source: "package/notes?.txt", isDir: true, content: "support\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mustWriteFile(t, filepath.Join(dir, filepath.FromSlash(test.source)), test.content)
+			payloadSource := test.source
+			if test.isDir {
+				payloadSource = "package"
+			}
+			host := mayaHostConfig{TrustedPluginArtifactsRoot: "C:/maya-stall/trusted-plugin-artifacts"}
+			payload := []manifestPayload{{Kind: "pluginArtifacts", Source: payloadSource}}
+
+			_, err := trustedPluginAllowlistRequiredPaths(dir, host, payload)
+			if err == nil || !strings.Contains(err.Error(), "invalid Windows path component") {
+				t.Fatalf("required allowlist paths error = %v, want invalid artifact leaf rejection", err)
 			}
 		})
 	}

@@ -293,6 +293,9 @@ func trustedPluginAllowlistRequiredPaths(repoDir string, host mayaHostConfig, pa
 		if item.Kind != "pluginArtifacts" {
 			continue
 		}
+		if err := rejectSFTPRepoPath(item.Source); err != nil {
+			return nil, fmt.Errorf("inspect Plugin Artifact %s: %w", item.Source, err)
+		}
 		destination := trustedPluginArtifactPath(host, item)
 		if destination == "" {
 			continue
@@ -319,8 +322,12 @@ func trustedPluginAllowlistRequiredPaths(repoDir string, host mayaHostConfig, pa
 			if err != nil {
 				return err
 			}
+			relativePath = filepath.ToSlash(relativePath)
+			if err := rejectSFTPRepoPath(relativePath); err != nil {
+				return err
+			}
 			if relativePath != "." {
-				validationPaths = append(validationPaths, remoteJoin(destination, filepath.ToSlash(relativePath)))
+				validationPaths = append(validationPaths, remoteJoin(destination, relativePath))
 			}
 			if entry.IsDir() {
 				return nil
@@ -627,6 +634,22 @@ func validateSessionBrokerRepo(repo string) error {
 	}
 	if repo != trimmed {
 		return fmt.Errorf("broker.repo must not contain surrounding whitespace")
+	}
+	if hasWindowsDevicePrefix(repo) {
+		return fmt.Errorf("broker.repo must not use a Windows device namespace")
+	}
+	if err := rejectSFTPBatchUnsafePath(repo); err != nil {
+		return fmt.Errorf("broker.repo %w", err)
+	}
+	_, _, absolute, traversesRoot := canonicalWindowsPathForComparison(repo)
+	if traversesRoot {
+		return fmt.Errorf("broker.repo must not traverse above its Windows volume root")
+	}
+	if !absolute {
+		return fmt.Errorf("broker.repo must be an absolute Windows path")
+	}
+	if hasWin32TrimmedPathComponent(repo) || hasInvalidWin32PathComponent(repo) {
+		return fmt.Errorf("broker.repo contains an invalid Windows path component")
 	}
 	return nil
 }

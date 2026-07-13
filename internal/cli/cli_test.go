@@ -2192,6 +2192,7 @@ func TestTrustedPluginAllowlistRequiredPathsRejectUnsafeRawArtifactLeaves(t *tes
 		{name: "file control character", entry: "build/demo.mll\n", wantError: "control characters"},
 		{name: "support terminal space", entry: "package/notes.txt ", wantError: "ending in a space or period"},
 		{name: "empty directory terminal period", entry: "package/cache.", emptyDir: true, wantError: "ending in a space or period"},
+		{name: "nested backslash", entry: `package/scripts\bad/plugin.py`, wantError: "forward slashes"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -2382,6 +2383,30 @@ func TestTrustedPluginPrefsRejectWhitespaceAmbiguousSessionBrokerPaths(t *testin
 			}
 			if err := (ggMayaSessiondBroker{host: host}).validate(); err == nil {
 				t.Fatalf("Session Broker accepted whitespace-ambiguous paths: %#v", host.Broker)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginPrefsRejectAmbiguousSessionBrokerRepo(t *testing.T) {
+	for _, repo := range []string{`\tools`, `/tools`, `C:tools`, `\\?\C:\maya-stall\tools`, `C:/../tools`, `C:/maya-stall/CON`} {
+		t.Run(repo, func(t *testing.T) {
+			host := mayaHostConfig{
+				Transport: "ssh",
+				SSH:       sshConfig{Host: "maya-win-01"},
+				WorkRoot:  "C:/maya-stall",
+				Broker: brokerConfig{
+					Structured: true,
+					Type:       "gg-mayasessiond",
+					StateDir:   "sessiond-ui",
+					Python:     "C:/Python/python.exe",
+					Repo:       repo,
+				}}
+			if _, err := trustedPluginPrefsReadScript(host, "2025"); err == nil {
+				t.Fatalf("trusted plug-in prefs accepted ambiguous broker repo %q", repo)
+			}
+			if err := (ggMayaSessiondBroker{host: host}).validate(); err == nil {
+				t.Fatalf("Session Broker accepted ambiguous repo %q", repo)
 			}
 		})
 	}

@@ -228,7 +228,7 @@ func (config brokerConfig) invalidReason() string {
 }
 
 type sshConfig struct {
-	FakeStatus   string
+	FakeStatus   string `yaml:"-"`
 	Host         string `yaml:"host"`
 	User         string `yaml:"user"`
 	Port         int    `yaml:"port"`
@@ -537,7 +537,7 @@ func resolveRuntimeForHost(host mayaHostConfig) (resolvedRuntime, error) {
 		return resolvedRuntime{}, fmt.Errorf("%s", reason)
 	}
 	return resolvedRuntime{
-		Host:   fakeHost{},
+		Host:   fakeHost{SSHStatus: host.SSH.FakeStatus},
 		Broker: fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "fake Scenario completed"}},
 		Metadata: runtimeMetadata{
 			Profile:            "fake-local",

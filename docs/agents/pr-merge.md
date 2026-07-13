@@ -35,10 +35,10 @@ task before proof starts and retained-stop smokes restore it again before the
 next proof step:
 
 ```sh
-go test -json ./internal/cli -run '^(TestOptInRealVisualEvidenceSmoke|TestOptInRealDesktopControlModalSmoke|TestOptInRealSSHDoctorSmoke|TestOptInRealSSHConsumingRepoSmoke|TestOptInRealSSHRunSmoke|TestOptInRealHostLockContentionAndRecoverySmoke|TestOptInRealRunScopedDesktopOpsSmoke)$' -count=1 -parallel=1 -timeout=20m
+go test -json ./internal/cli -run '^(TestOptInRealVisualEvidenceSmoke|TestOptInRealDesktopControlModalSmoke|TestOptInRealSSHDoctorSmoke|TestOptInRealPreRunReadinessSmoke|TestOptInRealSSHConsumingRepoSmoke|TestOptInRealSSHRunSmoke|TestOptInRealHostLockContentionAndRecoverySmoke|TestOptInRealRunScopedDesktopOpsSmoke)$' -count=1 -parallel=1 -timeout=20m
 ```
 
-The single Go process compiles and initializes the package once. All seven named
+The single Go process compiles and initializes the package once. All eight named
 tests must report individual passes; skips fail the live gate. `-parallel=1`
 keeps the one interactive Windows desktop serialized, while `-timeout=20m`
 leaves five minutes of the job budget for setup and proof publication.
@@ -46,6 +46,9 @@ leaves five minutes of the job budget for setup and proof publication.
 That opt-in smoke runs `maya-stall doctor --scenario smoke`, then one real
 `maya-stall run smoke` through `gg_mayasessiond`, and asserts the Evidence
 Bundle, Scenario Result, logs, manifest, and real Visual Evidence bytes.
+It also proves the pre-run readiness boundary by keeping SSH reachable while
+pointing at a deliberately absent broker state, then asserting a
+`session-broker` failure before staging with the Host Lock released.
 It also runs one canonical Consuming Repo Scenario from a checked-out consuming
 repo path, then publishes the Evidence Bundle to a temporary filesystem
 Evidence Store and verifies review-ready artifact files. The live run smoke

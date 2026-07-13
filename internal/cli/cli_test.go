@@ -8847,7 +8847,7 @@ func writeFakeCommand(t *testing.T, dir string, name string, logPath string, exi
 	return path
 }
 
-func freshRunAwareFakeSSHPrelude(dir string, prefix string, freshRunFailure string, inheritedStopFailure string) string {
+func freshRunAwareFakeSSHPrelude(dir string, prefix string, freshRunFailure string, inheritedStopFailure string, defaultReadiness bool) string {
 	lifecyclePath := filepath.Join(dir, prefix+".lifecycle")
 	decodedCommandPath := filepath.Join(dir, prefix+".command")
 	seenFreshRunPath := filepath.Join(dir, prefix+".fresh-seen")
@@ -8860,6 +8860,15 @@ if ! printf '%%s' "$encoded" | base64 --decode > %[1]s 2>/dev/null; then
   printf '%%s' "$encoded" | base64 -D > %[1]s 2>/dev/null || true
 fi
 decoded=$(iconv -f UTF-16LE -t UTF-8 %[1]s 2>/dev/null || true)
+default_readiness=%[6]s
+if [ "$default_readiness" = "1" ] && printf '%%s' "$decoded" | grep -q "maya-stall-prerun-probe-ok"; then
+  printf '%%s\n' 'maya-stall-prerun-probe-ok'
+  exit 0
+fi
+if [ "$default_readiness" = "1" ] && printf '%%s' "$decoded" | grep -q "maya-stall-prerun-session-broker-probe"; then
+  printf '%%s\n' '{"state_dir":"C:/maya-stall/sessiond-ui","has_state":true,"derived_status":"stopped","state":{"status":"stopped","session_id":"session-previous"}}'
+  exit 0
+fi
 if [ ! -f %[2]s ] && printf '%%s' "$decoded" | grep -q "'stop'" && ! printf '%%s' "$decoded" | grep -q "Get-ScheduledTask"; then
   inherited_stop_failure=%[3]s
   if [ -n "$inherited_stop_failure" ]; then
@@ -8885,7 +8894,7 @@ if [ -f %[5]s ] && printf '%%s' "$decoded" | grep -q "'status'"; then
   printf '%%s\n' '{"state_dir":"C:/maya-stall/sessiond-ui","has_state":true,"derived_status":"running","state":{"status":"running","session_id":"session-fresh","call_server_ready":true}}'
   exit 0
 fi
-`, shellQuote(decodedCommandPath), shellQuote(seenFreshRunPath), shellQuote(inheritedStopFailure), shellQuote(freshRunFailure), shellQuote(lifecyclePath))
+`, shellQuote(decodedCommandPath), shellQuote(seenFreshRunPath), shellQuote(inheritedStopFailure), shellQuote(freshRunFailure), shellQuote(lifecyclePath), map[bool]string{true: "1", false: "0"}[defaultReadiness])
 }
 
 func writeSequencedFakeSSHCommand(t *testing.T, dir string, logPath string, outputs []string) string {
@@ -8895,7 +8904,14 @@ func writeSequencedFakeSSHCommand(t *testing.T, dir string, logPath string, outp
 	var cases strings.Builder
 	freshRunFailure := ""
 	inheritedStopFailure := ""
-	for index, output := range outputs {
+	defaultReadiness := true
+	callIndex := 0
+	for _, output := range outputs {
+		if output == "@prerun-explicit" {
+			defaultReadiness = false
+			continue
+		}
+		callIndex++
 		if output == "" {
 			continue
 		}
@@ -8908,20 +8924,20 @@ func writeSequencedFakeSSHCommand(t *testing.T, dir string, logPath string, outp
 			continue
 		}
 		if path, ok := strings.CutPrefix(output, "@file:"); ok {
-			fmt.Fprintf(&cases, "%d) /bin/cat %s\n;;\n", index+1, shellQuote(path))
+			fmt.Fprintf(&cases, "%d) /bin/cat %s\n;;\n", callIndex, shellQuote(path))
 			continue
 		}
 		if message, ok := strings.CutPrefix(output, "@fail:"); ok {
-			fmt.Fprintf(&cases, "%d) printf '%%s\\n' %s >&2; exit 1\n;;\n", index+1, shellQuote(message))
+			fmt.Fprintf(&cases, "%d) printf '%%s\\n' %s >&2; exit 1\n;;\n", callIndex, shellQuote(message))
 			continue
 		}
 		if message, ok := strings.CutPrefix(output, "@stdout-fail:"); ok {
-			fmt.Fprintf(&cases, "%d) printf '%%s\\n' %s; exit 1\n;;\n", index+1, shellQuote(message))
+			fmt.Fprintf(&cases, "%d) printf '%%s\\n' %s; exit 1\n;;\n", callIndex, shellQuote(message))
 			continue
 		}
-		fmt.Fprintf(&cases, "%d) cat <<'JSON'\n%s\nJSON\n;;\n", index+1, output)
+		fmt.Fprintf(&cases, "%d) cat <<'JSON'\n%s\nJSON\n;;\n", callIndex, output)
 	}
-	content := freshRunAwareFakeSSHPrelude(dir, "fake-ssh-sequenced", freshRunFailure, inheritedStopFailure) + fmt.Sprintf(`count=0
+	content := freshRunAwareFakeSSHPrelude(dir, "fake-ssh-sequenced", freshRunFailure, inheritedStopFailure, defaultReadiness) + fmt.Sprintf(`count=0
 if [ -f %[1]s ]; then
   count=$(cat %[1]s)
 fi
@@ -8951,7 +8967,7 @@ func writeMissingTrustedPluginDestinationFakeSSHCommand(t *testing.T, dir string
 		"}\n" +
 		"exit 0\n"
 	expectedCommand := strings.Join(encodedPowerShellCommand(expectedScript), " ")
-	content := freshRunAwareFakeSSHPrelude(dir, "fake-ssh-missing-trusted-plugin", "", "") + fmt.Sprintf(`count=0
+	content := freshRunAwareFakeSSHPrelude(dir, "fake-ssh-missing-trusted-plugin", "", "", true) + fmt.Sprintf(`count=0
 if [ -f %[1]s ]; then
   count=$(cat %[1]s)
 fi
@@ -9017,7 +9033,7 @@ func writeFailingTrustedPluginDestinationRemovalFakeSSHCommand(t *testing.T, dir
 		"}\n" +
 		"exit 0\n"
 	expectedCommand := strings.Join(encodedPowerShellCommand(expectedScript), " ")
-	content := freshRunAwareFakeSSHPrelude(dir, "fake-ssh-failing-trusted-plugin-removal", "", "") + fmt.Sprintf(`count=0
+	content := freshRunAwareFakeSSHPrelude(dir, "fake-ssh-failing-trusted-plugin-removal", "", "", true) + fmt.Sprintf(`count=0
 if [ -f %[1]s ]; then
   count=$(cat %[1]s)
 fi

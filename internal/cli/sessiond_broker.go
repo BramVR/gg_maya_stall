@@ -26,6 +26,8 @@ const (
 	sessiondReasonCommandPortDown = "command-port-unreachable"
 )
 
+var errSSHCommandTimedOut = errors.New("ssh command timed out")
+
 type ggMayaSessiondBroker struct {
 	host mayaHostConfig
 }
@@ -486,7 +488,46 @@ func (broker ggMayaSessiondBroker) validate() error {
 }
 
 func (broker ggMayaSessiondBroker) status() (sessiondStatusResult, error) {
-	raw, err := broker.runSessiondCLI([]string{"status", "--state-dir", broker.host.Broker.StateDir, "--json"}, sessiondCommandTimeout)
+	return broker.statusWithTimeout(sessiondCommandTimeout)
+}
+
+func (broker ggMayaSessiondBroker) ProbeSessionBroker(timeout time.Duration) error {
+	status, err := broker.preRunProbeStatus(timeout)
+	if err != nil {
+		return err
+	}
+	if !status.HasState {
+		return fmt.Errorf("gg_mayasessiond is not running: no canonical state")
+	}
+	derivedStatus := strings.TrimSpace(status.DerivedStatus)
+	stateStatus := strings.TrimSpace(status.State.Status)
+	if derivedStatus == "" || stateStatus == "" || !strings.EqualFold(derivedStatus, stateStatus) {
+		return fmt.Errorf("gg_mayasessiond is not running: inconsistent status")
+	}
+	if !strings.EqualFold(derivedStatus, "running") && !strings.EqualFold(derivedStatus, "stopped") {
+		return fmt.Errorf("gg_mayasessiond is not running")
+	}
+	return nil
+}
+
+func (broker ggMayaSessiondBroker) statusWithTimeout(timeout time.Duration) (sessiondStatusResult, error) {
+	raw, err := broker.runSessiondCLI([]string{"status", "--state-dir", broker.host.Broker.StateDir, "--json"}, timeout)
+	return decodeSessiondStatus(raw, err)
+}
+
+func (broker ggMayaSessiondBroker) preRunProbeStatus(timeout time.Duration) (sessiondStatusResult, error) {
+	// The no-op marker keeps bounded readiness fixture traffic distinct from
+	// lifecycle status calls without changing the Session Broker CLI contract.
+	raw, err := broker.runSessiondCLIWithMarker(
+		[]string{"status", "--state-dir", broker.host.Broker.StateDir, "--json"},
+		timeout,
+		"$null = 'maya-stall-prerun-session-broker-probe'\n",
+		true,
+	)
+	return decodeSessiondStatus(raw, err)
+}
+
+func decodeSessiondStatus(raw []byte, err error) (sessiondStatusResult, error) {
 	if err != nil {
 		return sessiondStatusResult{}, err
 	}
@@ -874,6 +915,10 @@ func (broker ggMayaSessiondBroker) callTool(tool string, args []string, timeout 
 }
 
 func (broker ggMayaSessiondBroker) runSessiondCLI(args []string, timeout time.Duration) ([]byte, error) {
+	return broker.runSessiondCLIWithMarker(args, timeout, "", false)
+}
+
+func (broker ggMayaSessiondBroker) runSessiondCLIWithMarker(args []string, timeout time.Duration, marker string, failClosedOnTimeout bool) ([]byte, error) {
 	if err := broker.validate(); err != nil {
 		return nil, err
 	}
@@ -882,10 +927,14 @@ func (broker ggMayaSessiondBroker) runSessiondCLI(args []string, timeout time.Du
 		quoted = append(quoted, powerShellSingleQuoted(arg))
 	}
 	script := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
+%s
 Set-Location -LiteralPath %s
-& %s -m gg_maya_sessiond.cli @(%s)`, powerShellSingleQuoted(broker.host.Broker.Repo), powerShellSingleQuoted(broker.host.Broker.Python), strings.Join(quoted, ","))
+& %s -m gg_maya_sessiond.cli @(%s)`, marker, powerShellSingleQuoted(broker.host.Broker.Repo), powerShellSingleQuoted(broker.host.Broker.Python), strings.Join(quoted, ","))
 	raw, err := runSSHCommandOutput(broker.host, encodedPowerShellCommand(script), timeout)
 	if err != nil {
+		if failClosedOnTimeout && errors.Is(err, errSSHCommandTimedOut) {
+			return nil, fmt.Errorf("run gg_mayasessiond %s: %w", args[0], err)
+		}
 		if args[0] == "status" {
 			if jsonOutput, ok := sessiondStatusJSONFromFailedOutput(raw); ok {
 				return jsonOutput, nil
@@ -1212,7 +1261,7 @@ func runSSHCommandOutputWithInput(host mayaHostConfig, remoteCommand []string, i
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return stdout.Bytes(), fmt.Errorf("ssh command timed out after %s", timeout)
+			return stdout.Bytes(), fmt.Errorf("%w after %s", errSSHCommandTimedOut, timeout)
 		}
 		detail := firstUsefulStderrLine(stderr.String())
 		if detail != "" {

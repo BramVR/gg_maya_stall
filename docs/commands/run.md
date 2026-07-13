@@ -89,6 +89,12 @@ screenshot Visual Evidence, `run` also best-effort captures
 `screenshots/failure-desktop.png` for unrecovered failures.
 `manifest.json` and `evidence.json` record the resolved runtime profile, host
 adapter, broker adapter, broker config source, and live-proof eligibility.
+Every Visual Evidence artifact in `evidence.json` records Visual Evidence
+Provenance: an `origin` (`broker-capture`, `fake-broker-capture`, or
+`discovered`) plus a `sha256` content hash, and Session Broker captures append
+`*.capture-requested` and `*.captured` provenance events to `events.jsonl`.
+Live-proof-eligible runs fail closed if the Evidence Bundle would contain
+Visual Evidence that was not captured through the Session Broker.
 Scenario normalization owns Run Payload paths, Expected Outputs, evidence
 policy, and Validator config, so local run validation, Doctor, SSH output
 downloads, and Evidence Bundle output discovery use the same paths.

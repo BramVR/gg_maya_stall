@@ -200,8 +200,8 @@ func TestLiveVisualEvidenceProofRejectsInvalidProofShapes(t *testing.T) {
 			runtime:   liveRuntime,
 			processes: console,
 			visual: []visualEvidenceArtifact{
-				{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png"},
-				{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4"},
+				{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(pngHeaderBytes())},
+				{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(mp4HeaderBytes())},
 			},
 			files: map[string][]byte{
 				"screenshots/desktop-screenshot.png": pngHeaderBytes(),
@@ -222,6 +222,62 @@ func TestLiveVisualEvidenceProofRejectsInvalidProofShapes(t *testing.T) {
 				"recordings/desktop-recording.mp4":   mp4HeaderBytes(),
 			},
 			wantErr: "live-proof-eligible ssh-sessiond",
+		},
+		{
+			name:      "discovered visual artifact",
+			runtime:   liveRuntime,
+			processes: console,
+			visual: []visualEvidenceArtifact{
+				{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(pngHeaderBytes())},
+				{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4", Origin: visualEvidenceOriginDiscovered, SHA256: sha256HexOfBytes(mp4HeaderBytes())},
+			},
+			files: map[string][]byte{
+				"screenshots/desktop-screenshot.png": pngHeaderBytes(),
+				"recordings/desktop-recording.mp4":   mp4HeaderBytes(),
+			},
+			wantErr: `origin "discovered"`,
+		},
+		{
+			name:      "fake broker capture origin",
+			runtime:   liveRuntime,
+			processes: console,
+			visual: []visualEvidenceArtifact{
+				{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png", Origin: visualEvidenceOriginFakeBrokerCapture, SHA256: sha256HexOfBytes(pngHeaderBytes())},
+				{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(mp4HeaderBytes())},
+			},
+			files: map[string][]byte{
+				"screenshots/desktop-screenshot.png": pngHeaderBytes(),
+				"recordings/desktop-recording.mp4":   mp4HeaderBytes(),
+			},
+			wantErr: `origin "fake-broker-capture"`,
+		},
+		{
+			name:      "missing provenance hash",
+			runtime:   liveRuntime,
+			processes: console,
+			visual: []visualEvidenceArtifact{
+				{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(pngHeaderBytes())},
+				{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4", Origin: visualEvidenceOriginBrokerCapture},
+			},
+			files: map[string][]byte{
+				"screenshots/desktop-screenshot.png": pngHeaderBytes(),
+				"recordings/desktop-recording.mp4":   mp4HeaderBytes(),
+			},
+			wantErr: "sha256 provenance hash",
+		},
+		{
+			name:      "mismatched provenance hash",
+			runtime:   liveRuntime,
+			processes: console,
+			visual: []visualEvidenceArtifact{
+				{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(pngHeaderBytes())},
+				{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes([]byte("replaced after capture"))},
+			},
+			files: map[string][]byte{
+				"screenshots/desktop-screenshot.png": pngHeaderBytes(),
+				"recordings/desktop-recording.mp4":   mp4HeaderBytes(),
+			},
+			wantErr: "does not match recorded provenance hash",
 		},
 		{
 			name:      "viewport screenshot only",
@@ -252,8 +308,8 @@ func TestLiveVisualEvidenceProofRejectsInvalidProofShapes(t *testing.T) {
 			runtime:   liveRuntime,
 			processes: console,
 			visual: []visualEvidenceArtifact{
-				{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png"},
-				{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4"},
+				{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes([]byte("fake screenshot"))},
+				{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes([]byte("fake recording"))},
 			},
 			files: map[string][]byte{
 				"screenshots/desktop-screenshot.png": []byte("fake screenshot"),
@@ -367,10 +423,20 @@ func TestLiveRecordCommandProofRejectsInvalidProofShapes(t *testing.T) {
 			runtime:   liveRuntime,
 			processes: console,
 			visual: []visualEvidenceArtifact{
-				{Kind: "recording", Path: "recordings/recording.mp4", MediaType: "video/mp4", DurationSeconds: defaultRecordingDuration.Seconds(), FPS: defaultRecordingFPS, TargetProfile: "ci", Host: "maya-win-01"},
+				{Kind: "recording", Path: "recordings/recording.mp4", MediaType: "video/mp4", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(mp4HeaderBytes()), DurationSeconds: defaultRecordingDuration.Seconds(), FPS: defaultRecordingFPS, TargetProfile: "ci", Host: "maya-win-01"},
 			},
 			files:     map[string][]byte{"recordings/recording.mp4": mp4HeaderBytes()},
 			wantValid: true,
+		},
+		{
+			name:      "discovered recording origin",
+			runtime:   liveRuntime,
+			processes: console,
+			visual: []visualEvidenceArtifact{
+				{Kind: "recording", Path: "recordings/recording.mp4", MediaType: "video/mp4", Origin: visualEvidenceOriginDiscovered, SHA256: sha256HexOfBytes(mp4HeaderBytes()), DurationSeconds: defaultRecordingDuration.Seconds(), FPS: defaultRecordingFPS, TargetProfile: "ci", Host: "maya-win-01"},
+			},
+			files:   map[string][]byte{"recordings/recording.mp4": mp4HeaderBytes()},
+			wantErr: `origin "discovered"`,
 		},
 		{
 			name:      "missing recording metadata",
@@ -397,7 +463,7 @@ func TestLiveRecordCommandProofRejectsInvalidProofShapes(t *testing.T) {
 			runtime:   liveRuntime,
 			processes: console,
 			visual: []visualEvidenceArtifact{
-				{Kind: "recording", Path: "recordings/recording.mp4", MediaType: "video/mp4", DurationSeconds: defaultRecordingDuration.Seconds(), FPS: defaultRecordingFPS, TargetProfile: "ci", Host: "maya-win-01"},
+				{Kind: "recording", Path: "recordings/recording.mp4", MediaType: "video/mp4", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes([]byte("fake recording")), DurationSeconds: defaultRecordingDuration.Seconds(), FPS: defaultRecordingFPS, TargetProfile: "ci", Host: "maya-win-01"},
 			},
 			files:   map[string][]byte{"recordings/recording.mp4": []byte("fake recording")},
 			wantErr: "does not look like an MP4",
@@ -676,11 +742,18 @@ func requireLiveRunScopedScreenshotArtifact(t *testing.T, evidenceDir string, bu
 	t.Helper()
 	for _, artifact := range bundle.VisualEvidence {
 		if artifact.Kind == "screenshot" && artifact.MediaType == "image/png" && artifact.Path == "screenshots/"+runScopedScreenshotName {
-			if _, err := os.Stat(filepath.Join(evidenceDir, filepath.FromSlash(artifact.Path))); err != nil {
+			content, err := os.ReadFile(filepath.Join(evidenceDir, filepath.FromSlash(artifact.Path)))
+			if err != nil {
 				t.Fatalf("missing run-scoped Visual Evidence artifact %s: %v", artifact.Path, err)
 			}
 			if artifact.TargetProfile != bundle.TargetProfile || artifact.Host != bundle.Host {
 				t.Fatalf("run-scoped screenshot target metadata = %+v, want bundle target %q host %q", artifact, bundle.TargetProfile, bundle.Host)
+			}
+			if artifact.Origin != visualEvidenceOriginBrokerCapture || artifact.SHA256 != sha256HexOfBytes(content) {
+				t.Fatalf("run-scoped screenshot provenance = %+v, want broker capture with byte-matched sha256", artifact)
+			}
+			if err := requireBrokerCaptureProvenanceEvents(evidenceDir, bundle); err != nil {
+				t.Fatalf("run-scoped screenshot provenance events: %v", err)
 			}
 			return artifact
 		}
@@ -1075,21 +1148,17 @@ func addLiveDesktopScreenshotForProofArtifact(t *testing.T, repoDir string, evid
 	if err := requireConsoleMayaProcess(processes); err != nil {
 		t.Fatal(err)
 	}
-	remoteRoot := remoteJoin(host.WorkRoot, "artifacts", "live-visual-evidence-"+bundle.RunID)
-	defer func() {
-		_ = ggMayaSessiondBroker{host: host}.removeRemotePath(remoteRoot)
-	}()
-	screenshotBytes, err := captureWindowsDesktopScreenshot(sshWindowsDesktopTransport(host), remoteRoot)
-	if err != nil {
-		t.Fatalf("capture desktop screenshot for proof artifact: %v", err)
-	}
 	context := runContext{
+		RunWorkspace: runWorkspace{
+			runID:          bundle.RunID,
+			remoteWorkRoot: remotePath(host.WorkRoot),
+		},
 		EvidenceDir: evidenceDir,
 		EventsPath:  filepath.Join(evidenceDir, evidenceEventsFileName),
 	}
-	screenshot, err := registerVisualEvidenceBytes(context, "screenshot", "desktop-screenshot.png", "image/png", screenshotBytes)
+	screenshot, err := (ggMayaSessiondBroker{host: host}).CaptureScreenshot(context, screenshotRequest{Name: "desktop-screenshot.png"})
 	if err != nil {
-		t.Fatalf("register desktop screenshot for proof artifact: %v", err)
+		t.Fatalf("capture desktop screenshot through Session Broker for proof artifact: %v", err)
 	}
 	screenshot.TargetProfile = bundle.TargetProfile
 	screenshot.Host = bundle.Host
@@ -1262,6 +1331,12 @@ func validateLiveRecordCommandProofBundle(evidenceDir string, processes []window
 	if recording.TargetProfile != bundle.TargetProfile || recording.Host != bundle.Host {
 		return evidenceBundle{}, fmt.Errorf("recording target metadata = %+v, want Target Profile %q and Maya Host %q", recording, bundle.TargetProfile, bundle.Host)
 	}
+	if err := requireBrokerCapturedVisualEvidence(evidenceDir, bundle); err != nil {
+		return evidenceBundle{}, err
+	}
+	if err := requireBrokerCaptureProvenanceEvents(evidenceDir, bundle); err != nil {
+		return evidenceBundle{}, err
+	}
 	recordingBytes, err := os.ReadFile(filepath.Join(evidenceDir, filepath.FromSlash(recording.Path)))
 	if err != nil {
 		return evidenceBundle{}, err
@@ -1344,6 +1419,12 @@ func validateLiveVisualEvidenceProofBundle(evidenceDir string, processes []windo
 	if err != nil {
 		return evidenceBundle{}, err
 	}
+	if err := requireBrokerCapturedVisualEvidence(evidenceDir, bundle); err != nil {
+		return evidenceBundle{}, err
+	}
+	if err := requireBrokerCaptureProvenanceEvents(evidenceDir, bundle); err != nil {
+		return evidenceBundle{}, err
+	}
 	screenshotBytes, err := os.ReadFile(filepath.Join(evidenceDir, filepath.FromSlash(screenshot.Path)))
 	if err != nil {
 		return evidenceBundle{}, err
@@ -1404,7 +1485,13 @@ func writeLiveVisualEvidenceProofBundle(t *testing.T, runtime runtimeMetadata, v
 	t.Helper()
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, evidenceManifestFileName), "{}\n")
-	mustWriteFile(t, filepath.Join(dir, evidenceEventsFileName), "{}\n")
+	var events strings.Builder
+	for _, artifact := range visual {
+		path, requestedEvent, capturedEvent := visualEvidenceEventDetails(artifact.Kind, artifact.Path)
+		fmt.Fprintf(&events, "{\"event\":%q,\"detail\":%q,\"origin\":%q}\n", requestedEvent, path, artifact.Origin)
+		fmt.Fprintf(&events, "{\"event\":%q,\"detail\":%q,\"origin\":%q,\"sha256\":%q}\n", capturedEvent, path, artifact.Origin, artifact.SHA256)
+	}
+	mustWriteFile(t, filepath.Join(dir, evidenceEventsFileName), events.String())
 	mustWriteFile(t, filepath.Join(dir, evidenceLogPath), "log\n")
 	mustWriteFile(t, filepath.Join(dir, evidenceScenarioResultFileName), `{"status":"passed"}`+"\n")
 	for relative, content := range files {

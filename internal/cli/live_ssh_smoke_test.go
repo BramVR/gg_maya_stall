@@ -636,6 +636,9 @@ func assertLiveSmokeEvidenceBundle(t *testing.T, evidenceDir string) evidenceBun
 		if artifact.TargetProfile != bundle.TargetProfile || artifact.Host != bundle.Host {
 			t.Fatalf("Visual Evidence target metadata = %+v, want Target Profile %q and Maya Host %q", artifact, bundle.TargetProfile, bundle.Host)
 		}
+		if artifact.Origin != visualEvidenceOriginBrokerCapture {
+			t.Fatalf("Visual Evidence artifact origin = %q, want Session Broker capture provenance: %+v", artifact.Origin, artifact)
+		}
 		visualPath := filepath.Join(evidenceDir, filepath.FromSlash(artifact.Path))
 		content, err := os.ReadFile(visualPath)
 		if err != nil {
@@ -643,6 +646,9 @@ func assertLiveSmokeEvidenceBundle(t *testing.T, evidenceDir string) evidenceBun
 		}
 		if len(content) == 0 {
 			t.Fatalf("Visual Evidence artifact %s is empty", artifact.Path)
+		}
+		if artifact.SHA256 != sha256HexOfBytes(content) {
+			t.Fatalf("Visual Evidence artifact %s sha256 provenance = %q, want %q", artifact.Path, artifact.SHA256, sha256HexOfBytes(content))
 		}
 		switch artifact.Kind {
 		case "recording":
@@ -660,6 +666,9 @@ func assertLiveSmokeEvidenceBundle(t *testing.T, evidenceDir string) evidenceBun
 				t.Fatalf("Visual Evidence artifact %s does not match media type %s", artifact.Path, artifact.MediaType)
 			}
 		}
+	}
+	if err := requireBrokerCaptureProvenanceEvents(evidenceDir, bundle); err != nil {
+		t.Fatalf("Visual Evidence provenance events: %v", err)
 	}
 	return bundle
 }

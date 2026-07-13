@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -143,6 +144,12 @@ func publishLiveVisualEvidenceProofArtifact(evidenceDir string, options liveVisu
 	if err != nil {
 		return "", err
 	}
+	if err := requireBrokerCapturedVisualEvidence(evidenceDir, bundle); err != nil {
+		return "", err
+	}
+	if err := requireBrokerCaptureProvenanceEvents(evidenceDir, bundle); err != nil {
+		return "", err
+	}
 	if !options.MediaReviewed {
 		return "", fmt.Errorf("live proof artifact requires reviewed desktop media; set %s=true only for a controlled public-proof desktop", liveProofMediaReviewedEnv)
 	}
@@ -276,6 +283,99 @@ func publishLiveVisualEvidenceProofArtifact(evidenceDir string, options liveVisu
 func requireLiveRuntime(runtime runtimeMetadata) error {
 	if runtime.Profile != "ssh-sessiond" || runtime.HostAdapter != "ssh" || runtime.BrokerAdapter != "gg-mayasessiond" || !runtime.LiveProofEligible {
 		return fmt.Errorf("visual evidence proof runtime = %+v, want live-proof-eligible ssh-sessiond", runtime)
+	}
+	return nil
+}
+
+func requireBrokerCapturedVisualEvidence(evidenceDir string, bundle evidenceBundle) error {
+	if len(bundle.VisualEvidence) == 0 {
+		return fmt.Errorf("live Visual Evidence proof requires Visual Evidence artifacts")
+	}
+	for _, artifact := range bundle.VisualEvidence {
+		clean := cleanEvidenceArtifactPath(artifact.Path)
+		if clean == "" {
+			return fmt.Errorf("invalid Visual Evidence artifact path %q: must stay inside the Evidence Bundle", artifact.Path)
+		}
+		if artifact.Origin != visualEvidenceOriginBrokerCapture {
+			return fmt.Errorf("live Visual Evidence proof requires Session Broker captured artifacts: %s has origin %q", clean, visualEvidenceOriginLabel(artifact.Origin))
+		}
+		if artifact.SHA256 == "" {
+			return fmt.Errorf("live Visual Evidence proof requires a sha256 provenance hash for %s", clean)
+		}
+		hash, err := fileSHA256Hex(filepath.Join(evidenceDir, filepath.FromSlash(clean)))
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(hash, artifact.SHA256) {
+			return fmt.Errorf("detected Visual Evidence artifact %s sha256 %s that does not match recorded provenance hash %s", clean, hash, artifact.SHA256)
+		}
+	}
+	return nil
+}
+
+type visualEvidenceProvenanceEvent struct {
+	Event  string `json:"event"`
+	Detail string `json:"detail"`
+	Origin string `json:"origin"`
+	SHA256 string `json:"sha256"`
+}
+
+func requireBrokerCaptureProvenanceEvents(evidenceDir string, bundle evidenceBundle) error {
+	eventsPath := cleanEvidenceArtifactPath(bundle.Events)
+	if eventsPath == "" {
+		return fmt.Errorf("live Visual Evidence proof requires an events.jsonl path")
+	}
+	file, err := os.Open(filepath.Join(evidenceDir, filepath.FromSlash(eventsPath)))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+
+	var events []visualEvidenceProvenanceEvent
+	decoder := json.NewDecoder(file)
+	for {
+		var event visualEvidenceProvenanceEvent
+		if err := decoder.Decode(&event); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("parse Visual Evidence provenance event: %w", err)
+		}
+		events = append(events, event)
+	}
+
+	for _, artifact := range bundle.VisualEvidence {
+		path := cleanEvidenceArtifactPath(artifact.Path)
+		_, requestedEvent, capturedEvent := visualEvidenceEventDetails(artifact.Kind, path)
+		requestedIndex := -1
+		capturedBeforeRequest := false
+		capturedFound := false
+		for index, event := range events {
+			if event.Event == requestedEvent && event.Detail == path && event.Origin == artifact.Origin {
+				requestedIndex = index
+				continue
+			}
+			if event.Event != capturedEvent || event.Detail != path || event.Origin != artifact.Origin || !strings.EqualFold(event.SHA256, artifact.SHA256) {
+				continue
+			}
+			if requestedIndex < 0 {
+				capturedBeforeRequest = true
+				continue
+			}
+			capturedFound = true
+			break
+		}
+		if requestedIndex < 0 {
+			return fmt.Errorf("missing capture-requested provenance for Visual Evidence artifact %s", path)
+		}
+		if !capturedFound {
+			if capturedBeforeRequest {
+				return fmt.Errorf("captured provenance for Visual Evidence artifact %s appears before matching capture-requested provenance", path)
+			}
+			return fmt.Errorf("missing matching captured provenance for Visual Evidence artifact %s", path)
+		}
 	}
 	return nil
 }

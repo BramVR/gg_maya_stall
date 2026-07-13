@@ -291,6 +291,12 @@ func TestScreenshotCapturesVisualEvidenceArtifact(t *testing.T) {
 	if got.TargetProfile != "default" || got.Host != defaultFakeHostID {
 		t.Fatalf("visual evidence target metadata = %+v", got)
 	}
+	if got.Origin != visualEvidenceOriginFakeBrokerCapture {
+		t.Fatalf("visual evidence origin = %q, want %q", got.Origin, visualEvidenceOriginFakeBrokerCapture)
+	}
+	if got.SHA256 != "e9a524f5fbb36de6c8725271e42cce2f536219c0f05f5b10163668b548cf63d7" {
+		t.Fatalf("visual evidence sha256 = %q, want fake screenshot digest", got.SHA256)
+	}
 }
 
 func TestRecordCapturesVisualEvidenceArtifactWithCrabboxDefaults(t *testing.T) {
@@ -400,15 +406,22 @@ func TestAttachRunScreenshotCapturesThroughOwnedHostLock(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "artifacts", "maya-stall", runID, "screenshots", "run-scoped-screenshot.png")); err != nil {
 		t.Fatalf("expected run-scoped screenshot artifact: %v", err)
 	}
-	bundle := readEvidenceBundle(t, filepath.Join(dir, "artifacts", "maya-stall", runID))
+	evidenceDir := filepath.Join(dir, "artifacts", "maya-stall", runID)
+	bundle := readEvidenceBundle(t, evidenceDir)
 	found := false
 	for _, artifact := range bundle.VisualEvidence {
 		if artifact.Kind == "screenshot" && artifact.Path == "screenshots/run-scoped-screenshot.png" && artifact.TargetProfile == "default" && artifact.Host == defaultFakeHostID {
+			if artifact.Origin != visualEvidenceOriginFakeBrokerCapture || artifact.SHA256 != sha256HexOfBytes([]byte("fake screenshot\n")) {
+				t.Fatalf("run-scoped screenshot provenance = %+v", artifact)
+			}
 			found = true
 		}
 	}
 	if !found {
 		t.Fatalf("Evidence Bundle missing run-scoped screenshot metadata: %+v", bundle.VisualEvidence)
+	}
+	if err := requireBrokerCaptureProvenanceEvents(evidenceDir, bundle); err != nil {
+		t.Fatalf("run-scoped screenshot bundle provenance events: %v", err)
 	}
 }
 

@@ -24,6 +24,22 @@ The bundle includes:
 
 Validator failures are recorded in `evidence.json` and mark the run failed.
 
+Every Visual Evidence artifact carries Visual Evidence Provenance in
+`evidence.json`: an `origin` value plus a `sha256` content hash computed at
+capture or collection time. Origin values are:
+
+- `broker-capture`: captured through a real Session Broker.
+- `fake-broker-capture`: captured by the fake Session Broker.
+- `discovered`: a file found under `screenshots/` or `recordings/` that was not
+  registered by a Session Broker capture.
+
+Session Broker captures also append `broker.screenshot.capture-requested`,
+`broker.screenshot.captured`, `broker.recording.capture-requested`, and
+`broker.recording.captured` provenance events (with origin and sha256) to
+`events.jsonl`. Live-proof-eligible bundles fail on `discovered` Visual
+Evidence; `fake-broker-capture` artifacts are only accepted in the fake
+runtime.
+
 The fake broker supports configured Visual Evidence. With
 `broker.type: gg-mayasessiond`, screenshot and recording Visual Evidence use an
 interactive Windows scheduled task to capture the visible desktop session that
@@ -54,6 +70,10 @@ Publishing writes:
 Publishing the same run again replaces the previous published run directory so
 stale files do not survive.
 
+`artifact-manifest.json` carries each Visual Evidence artifact's `origin` and
+`sha256` through from the Evidence Bundle, so published manifests match bundle
+manifests.
+
 ## live proof artifact
 
 The protected GitHub Actions live proof workflow can also publish a sanitized
@@ -72,6 +92,10 @@ The artifact contains only reviewer-facing proof:
 The MP4 comes from the standalone `maya-stall record` Evidence Bundle. The live
 proof smoke also validates a recording-enabled Scenario through the paired live
 run gate before accepting the PR.
+
+The live proof artifact only accepts bundles whose Visual Evidence carries
+`broker-capture` provenance with a `sha256` that matches the artifact bytes;
+`discovered` or `fake-broker-capture` origins fail the publish.
 
 Retention is short and configurable with
 `MAYA_STALL_LIVE_PROOF_RETENTION_DAYS` or the matching workflow variable.

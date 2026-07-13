@@ -65,6 +65,11 @@ func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 				}
 			}
 		}
+		if !run.sessionStarted && run.manifest.RunID != "" {
+			if cleanupErr := cleanupRunState(run.repoDir, run.manifest.RunID); cleanupErr != nil {
+				err = errors.Join(err, fmt.Errorf("clean up pre-session Fresh Run state for %s: %w", run.manifest.RunID, cleanupErr))
+			}
+		}
 		if run.releaseHostLock {
 			if releaseErr := run.host.release(); releaseErr != nil {
 				err = errors.Join(err, fmt.Errorf("release Host Lock for %s: %w", run.host.HostID, releaseErr))
@@ -153,6 +158,15 @@ func (run *freshRunLifecycle) setup() error {
 	if root := trustedPluginArtifactsRoot(host.Config); root != "" {
 		run.context.Environment[trustedPluginArtifactsRootEnvVar] = root
 	}
+	run.manifest = runManifest{
+		RunID:         runID,
+		Scenario:      scenario.Name,
+		TargetProfile: host.TargetProfile,
+		Host:          host.HostID,
+		Runtime:       resolved.Metadata,
+		ConfigPath:    repoRelativePath(run.repoDir, configPath),
+		Payload:       scenario.Payload,
+	}
 	if err := createCleanRunDirs(run.context); err != nil {
 		return err
 	}
@@ -165,15 +179,6 @@ func (run *freshRunLifecycle) setup() error {
 		return err
 	}
 
-	run.manifest = runManifest{
-		RunID:         runID,
-		Scenario:      scenario.Name,
-		TargetProfile: host.TargetProfile,
-		Host:          host.HostID,
-		Runtime:       resolved.Metadata,
-		ConfigPath:    repoRelativePath(run.repoDir, configPath),
-		Payload:       scenario.Payload,
-	}
 	if err := writeJSONFile(filepath.Join(run.context.StateDir, "manifest.json"), run.manifest); err != nil {
 		return err
 	}

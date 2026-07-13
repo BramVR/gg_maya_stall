@@ -26,14 +26,15 @@ settle flow:
    provided.
 4. Resolve the Host/Broker runtime contract.
 5. Acquire a Host Lock.
-6. Ask the Session Broker to stop any inherited Maya UI Session and start a new identified Maya UI Session.
-7. Stage only declared Run Payload paths.
-8. Provide `MAYA_STALL_SCENARIO_RESULT` to the Scenario.
-9. Run through the resolved fake-local or ssh-sessiond runtime.
-10. Collect outputs, logs, runtime metadata, broker session identity, Scenario Result, and Visual Evidence into an
+6. Run bounded live SSH and Session Broker status probes; release the Host Lock and fail at the named layer if either is unavailable.
+7. Ask the Session Broker to stop any inherited Maya UI Session and start a new identified Maya UI Session.
+8. Stage only declared Run Payload paths.
+9. Provide `MAYA_STALL_SCENARIO_RESULT` to the Scenario.
+10. Run through the resolved fake-local or ssh-sessiond runtime.
+11. Collect outputs, logs, runtime metadata, broker session identity, Scenario Result, and Visual Evidence into an
    Evidence Bundle.
-11. Run Validators.
-12. Apply the Stop Policy to that Maya UI Session and release or retain the Host Lock.
+12. Run Validators.
+13. Apply the Stop Policy to that Maya UI Session and release or retain the Host Lock.
 
 Supported runtime profiles:
 
@@ -43,6 +44,13 @@ Supported runtime profiles:
 An SSH Maya Host without structured `gg_mayasessiond` broker config fails before
 payload staging. SSH Host plus fake broker, fake Host plus real broker, and
 malformed broker config are not silently downgraded.
+
+After Host Lock acquisition and before Run ID creation or Run Payload staging,
+`run` performs one bounded SSH reachability check and one bounded Session Broker
+status check. Each layer has a 10-second ceiling. Failure releases the Host Lock,
+leaves no run/staging residue, and reports the failing layer plus its setup-guide
+repair link. A canonical stopped broker is accepted because the Fresh Run
+lifecycle restarts it with a new owned Maya UI Session.
 
 With `broker.type: gg-mayasessiond`, `run` stages declared payloads under
 `workRoot/runs/<run-id>/`, writes a small Scenario wrapper into the remote

@@ -38,6 +38,49 @@ func TestOptInRealSSHDoctorSmoke(t *testing.T) {
 	}
 }
 
+func TestOptInRealPreRunReadinessSmoke(t *testing.T) {
+	options, ok := realSSHSmokeOptionsFromEnv(t)
+	if !ok {
+		return
+	}
+	dir := writeRunConfigFixture(t)
+	options.Host = liveSmokeHostForContention(t, options)
+	selected := liveSmokeHostConfigByID(t, options, options.Host)
+	probeHost := selected
+	probeHost.Broker.StateDir = remoteJoin(selected.WorkRoot, "state", "proof", fmt.Sprintf("pre-run-readiness-missing-%d", time.Now().UnixNano()))
+	runtime := defaultRunRuntime()
+	runtime.ReadinessHost = realSSHHost{host: probeHost}
+	runtime.ReadinessBroker = ggMayaSessiondBroker{host: probeHost}
+	var stdout, stderr bytes.Buffer
+
+	code := RunWithRuntime(options.runArgs("smoke"), &stdout, &stderr, dir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("real pre-run readiness exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"pre-run readiness failed at session-broker layer for Maya Host " + selected.ID,
+		"gg_mayasessiond is not running",
+		"docs/setup/windows-maya-host.md#session-broker",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("real pre-run readiness stderr missing %q:\n%s", want, stderr.String())
+		}
+	}
+	for _, path := range []string{
+		filepath.Join(dir, ".maya-stall", "state", "runs"),
+		filepath.Join(dir, "artifacts", "maya-stall"),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("real pre-run readiness left local run residue at %s: %v", path, err)
+		}
+	}
+	lockLayer := remoteHostLockLayer(selected)
+	if lockLayer.Status != "ok" || lockLayer.State != "unlocked" {
+		t.Fatalf("real pre-run readiness did not release Host Lock: %+v", lockLayer)
+	}
+	t.Log("real SSH reachability passed; real Session Broker status failed closed before staging; Host Lock released")
+}
+
 func TestOptInRealSSHConsumingRepoSmoke(t *testing.T) {
 	options, ok := realSSHSmokeOptionsFromEnv(t)
 	if !ok {

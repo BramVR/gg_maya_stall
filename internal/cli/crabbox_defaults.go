@@ -6,4 +6,5 @@ import "time"
 const (
 	defaultRecordingDuration = 10 * time.Second
 	defaultRecordingFPS      = 15
+	preRunProbeLayerTimeout  = 10 * time.Second
 )

@@ -162,6 +162,17 @@ func (run *freshRunLifecycle) setup() error {
 	if err := rejectUnsupportedEvidenceConfig(run.runtime.Broker, scenario.Config); err != nil {
 		return err
 	}
+	readinessHost := resolved.Host
+	if run.runtime.ReadinessHost != nil {
+		readinessHost = run.runtime.ReadinessHost
+	}
+	readinessBroker := resolved.Broker
+	if run.runtime.ReadinessBroker != nil {
+		readinessBroker = run.runtime.ReadinessBroker
+	}
+	if err := probeHostReadiness(readinessHost, readinessBroker, host.HostID, preRunProbeLayerTimeout); err != nil {
+		return err
+	}
 	runID := run.runtime.Now().UTC().Format("20060102T150405.000000000Z")
 	workspace, err := newRunWorkspace(run.repoDir, runID, host.Config.WorkRoot, scenario.ScenarioResultPath)
 	if err != nil {

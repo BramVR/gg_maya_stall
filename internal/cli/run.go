@@ -26,9 +26,11 @@ const stopAfterAlways = "always"
 const stopAfterNever = "never"
 
 type runRuntime struct {
-	Host   runHost
-	Broker sessionBroker
-	Now    func() time.Time
+	Host            runHost
+	Broker          sessionBroker
+	ReadinessHost   runHost
+	ReadinessBroker sessionBroker
+	Now             func() time.Time
 }
 
 type runHost interface {
@@ -1081,7 +1083,20 @@ func decodeJSONUseNumber(content []byte, value any) error {
 	return nil
 }
 
-type fakeHost struct{}
+type fakeHost struct {
+	SSHStatus string
+}
+
+func (fakeHost) ValidateTransportConfig() error { return nil }
+
+func (host fakeHost) ProbeTransport(time.Duration) error {
+	switch strings.ToLower(strings.TrimSpace(host.SSHStatus)) {
+	case "", "ok", "healthy", "reachable":
+		return nil
+	default:
+		return fmt.Errorf("fake SSH transport is %q", strings.TrimSpace(host.SSHStatus))
+	}
+}
 
 func (fakeHost) StagePayload(context runContext, payload []manifestPayload) error {
 	return validatePayloadSnapshotForStage(context, payload)
@@ -1106,6 +1121,8 @@ func ensurePayloadPathHasNoSymlinkAncestor(repoDir string, relativePath string) 
 // It is embeddable so test brokers share the same fresh-session and stop
 // behavior as fakeSessionBroker.
 type fakeSessionLifecycle struct{}
+
+func (fakeSessionLifecycle) ProbeSessionBroker(time.Duration) error { return nil }
 
 func (fakeSessionLifecycle) StartFreshSession(context runContext, scenario scenarioConfig) (brokerSessionIdentity, error) {
 	identity := brokerSessionIdentity{

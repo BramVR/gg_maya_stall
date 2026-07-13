@@ -6,6 +6,7 @@ Release history starts with `v0.1.0`.
 
 ## Unreleased
 
+- Added a bounded fail-closed SSH and Session Broker readiness probe after Host Lock acquisition and before Run Payload staging, with layer-specific repair guidance and real-host proof: https://github.com/BramVR/gg_maya_stall/pull/108.
 - Moved SSH Host Locks into each Maya Host work root with renewable token-fenced leases, cross-controller contention, Session Broker-verified stale recovery, and host-side doctor reporting: https://github.com/BramVR/gg_maya_stall/pull/140.
 - Replaced the serial lint/proof workflows with one trusted, cancelable CI pipeline that parallelizes hosted gates, schedules live Maya proof only for sensitive same-repository changes, and publishes one stable required check.
 - Changed Fresh Runs to start a new broker-owned Maya UI Session, record its identity in evidence, and stop that exact session for stopped Stop Policy outcomes instead of only cleaning the run workspace.

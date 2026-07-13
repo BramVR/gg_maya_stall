@@ -302,7 +302,7 @@ func TestLiveVisualEvidenceProofWorkflowRequiresSmokePass(t *testing.T) {
 		"MAYA_STALL_LIVE_PROOF_MEDIA_REVIEWED",
 		"live-visual-evidence-proof",
 		"assert-public-artifact-confidentiality.mjs",
-		"all seven individual live smoke tests must pass without skips",
+		"all eight individual live smoke tests must pass without skips",
 		"failed_missing_visual_evidence_proof_artifact",
 		"failed_visual_evidence_proof_confidentiality",
 		"failed_visual_evidence_proof_upload",

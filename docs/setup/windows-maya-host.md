@@ -94,6 +94,7 @@ Doctor layer:
   available. Maya Stall uses SSH for commands and SFTP for payload/output
   transfer.
 - Confirm SSH reaches the expected Windows account and does not expose passwords or private keys in repo config.
+- `maya-stall run` rechecks SSH live after acquiring the Host Lock and fails before staging if the 10-second readiness probe cannot connect.
 - Keep host aliases and private network addresses in operator config such as SSH config, CI secrets, or host config.
 - Enable real SSH transport only in user or CI host config, not in `.maya-stall.yaml`:
 
@@ -251,6 +252,7 @@ operator owns which Maya Host locations are trusted.
 - Allow `script.execute` to run scripts staged under `workRoot/runs`, such as `--mcp-script-dirs C:/maya-stall/runs` for `gg_mayasessiond`.
 - Keep host-specific paths in host-managed config; do not bake them into consuming repos.
 - Treat Host and Session Broker as one runtime contract. Default local tests use `fake-local` (fake Maya Host plus fake Session Broker). Real SSH Maya Hosts use `ssh-sessiond` (SSH Windows Maya Host plus `gg_mayasessiond`). SSH Host plus fake broker, missing broker config, malformed `gg_mayasessiond` config, or fake Host plus real broker fail before payload staging or proof capture.
+- Before creating run state or staging payloads, `maya-stall run` gives Session Broker `status` 10 seconds and accepts only `running` or the restartable canonical `stopped` state; other states fail closed and release the Host Lock.
 - Configure the broker as a structured host-config block:
 
 ```yaml
@@ -439,7 +441,7 @@ To run the full live smoke, use:
 MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/ci-hosts.yaml go test ./internal/cli -run 'TestOptInRealSSH(Doctor|Run)Smoke' -count=1
 ```
 
-`TestOptInRealSSHRunSmoke` first runs `doctor --scenario smoke`, then runs two consecutive generated `smoke` Scenarios through the configured `gg_mayasessiond` Session Broker. It requires distinct broker session identities, verifies each stopped run leaves the broker session stopped, requires screenshot and recording Visual Evidence, and checks that the local Evidence Bundle contains `evidence.json`, events, logs, Scenario Result, the captured screenshot, and an MP4 recording with duration/FPS plus selected Target Profile and Maya Host metadata. `TestOptInRealHostLockContentionAndRecoverySmoke` starts separate controller processes against one SSH Maya Host, proves cross-checkout contention, leaves an expired lease as if its controller crashed, proves the Session Broker is inactive, and recovers the lease through the real SSH/Session Broker boundary. `TestOptInRealRunScopedDesktopOpsSmoke` keeps a failed run locked, proves standalone screenshot fails closed while the Host Lock is held, captures a run-scoped desktop screenshot, and clears a controlled modal through `attach <run-id> control click`. Live smokes restart the documented interactive `MayaStallSessiondUI` task before proof starts and after retained-stop tests, or the task named by `MAYA_STALL_SMOKE_SESSIOND_UI_TASK`.
+`TestOptInRealPreRunReadinessSmoke` keeps real SSH reachable, points the probe at a deliberately absent broker state, and proves `run` fails at the `session-broker` layer before staging while releasing the Host Lock. `TestOptInRealSSHRunSmoke` first runs `doctor --scenario smoke`, then runs two consecutive generated `smoke` Scenarios through the configured `gg_mayasessiond` Session Broker. It requires distinct broker session identities, verifies each stopped run leaves the broker session stopped, requires screenshot and recording Visual Evidence, and checks that the local Evidence Bundle contains `evidence.json`, events, logs, Scenario Result, the captured screenshot, and an MP4 recording with duration/FPS plus selected Target Profile and Maya Host metadata. `TestOptInRealHostLockContentionAndRecoverySmoke` starts separate controller processes against one SSH Maya Host, proves cross-checkout contention, leaves an expired lease as if its controller crashed, proves the Session Broker is inactive, and recovers the lease through the real SSH/Session Broker boundary. `TestOptInRealRunScopedDesktopOpsSmoke` keeps a failed run locked, proves standalone screenshot fails closed while the Host Lock is held, captures a run-scoped desktop screenshot, and clears a controlled modal through `attach <run-id> control click`. Live smokes restart the documented interactive `MayaStallSessiondUI` task before proof starts and after retained-stop tests, or the task named by `MAYA_STALL_SMOKE_SESSIOND_UI_TASK`.
 
 To include the canonical Consuming Repo smoke, add a checked-out consuming repo path and run:
 

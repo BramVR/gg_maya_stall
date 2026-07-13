@@ -25,7 +25,16 @@ func runHostForConfig(host mayaHostConfig) runHost {
 	if host.usesRealSSH() {
 		return realSSHHost{host: host}
 	}
-	return fakeHost{}
+	return fakeHost{SSHStatus: host.SSH.FakeStatus}
+}
+
+func (host realSSHHost) ValidateTransportConfig() error {
+	return validateRealSSHConfig(host.host)
+}
+
+func (host realSSHHost) ProbeTransport(timeout time.Duration) error {
+	_, err := runSSHCommandOutput(host.host, encodedPowerShellCommand(`Write-Output 'maya-stall-prerun-probe-ok'`), timeout)
+	return err
 }
 
 func realSSHLayer(host mayaHostConfig) doctorCheck {

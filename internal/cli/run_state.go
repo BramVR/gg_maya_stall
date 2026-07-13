@@ -162,19 +162,28 @@ func stopRun(repoDir string, runID string) error {
 		return err
 	}
 	lockPath := filepath.Join(repoDir, ".maya-stall", "state", "locks", "hosts", manifest.Host+".lock")
-	keptRun, found, err := readHostLockKeptRun(lockPath)
-	if err != nil {
-		return err
-	}
-	if !found {
-		return fmt.Errorf("Host Lock for %s is not a kept run lock", manifest.Host)
-	}
-	if found && keptRun != runID {
-		return fmt.Errorf("Host Lock for %s belongs to kept run %s, not %s", manifest.Host, keptRun, runID)
-	}
 	record, err := readRunRetentionRecord(repoDir, stateDir, manifest)
 	if err != nil {
 		return err
+	}
+	if err := ensureRunHasKeptLock(repoDir, manifest, runID, record.HostLockAuthoritative); err != nil {
+		return err
+	}
+	if record.HostLockAuthoritative {
+		if record.StopPhase == "" {
+			if err := verifyHostSideLockForRun(record.HostConfig, runID); err != nil {
+				return err
+			}
+		}
+	}
+	if record.StopPhase == "host-lock-released" {
+		if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err := cleanupRunState(repoDir, runID); err != nil {
+			return err
+		}
+		return nil
 	}
 	if record.LegacyMissingRecord && manifest.Runtime.BrokerAdapter != "fake" {
 		if err := cleanupRunState(repoDir, runID); err != nil {
@@ -193,13 +202,30 @@ func stopRun(repoDir string, runID string) error {
 	if err := requireRetentionCapability(broker, manifest.Runtime.BrokerAdapter, "stop retained session", capabilities.StopRetainedSession); err != nil {
 		return err
 	}
-	if err := broker.StopRetainedRun(record); err != nil {
-		return err
+	if record.StopPhase == "" {
+		if err := broker.StopRetainedRun(record); err != nil {
+			return err
+		}
+		record.StopPhase = "broker-stopped"
+		if err := writeRunRetentionRecord(runContext{StateDir: stateDir}, record); err != nil {
+			return err
+		}
 	}
-	if err := cleanupRunState(repoDir, runID); err != nil {
+	if record.HostLockAuthoritative {
+		if err := releaseHostSideLock(record.HostConfig, runID); err != nil {
+			if !errors.Is(err, errHostLockOwnershipChanged) {
+				return err
+			}
+		}
+	}
+	record.StopPhase = "host-lock-released"
+	if err := writeRunRetentionRecord(runContext{StateDir: stateDir}, record); err != nil {
 		return err
 	}
 	if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := cleanupRunState(repoDir, runID); err != nil {
 		return err
 	}
 	return nil
@@ -252,6 +278,13 @@ func releaseMatchingKeptHostLock(repoDir string, runID string) error {
 			return err
 		}
 		if found && keptRun == runID {
+			content, err := os.ReadFile(lockPath)
+			if err != nil {
+				return err
+			}
+			if parseHostLockOwner(string(content)).Authoritative {
+				return fmt.Errorf("kept run %q is missing its run record; refusing to release only the repo-local Host Lock mirror", runID)
+			}
 			return os.Remove(lockPath)
 		}
 	}
@@ -330,12 +363,17 @@ func readKeptRunState(repoDir string, runID string) (keptRun, error) {
 	if err != nil {
 		return keptRun{}, err
 	}
-	if err := ensureRunHasKeptLock(repoDir, manifest, runID); err != nil {
-		return keptRun{}, err
-	}
 	record, err := readRunRetentionRecord(repoDir, stateDir, manifest)
 	if err != nil {
 		return keptRun{}, err
+	}
+	if err := ensureRunHasKeptLock(repoDir, manifest, runID, record.HostLockAuthoritative); err != nil {
+		return keptRun{}, err
+	}
+	if record.HostLockAuthoritative {
+		if err := verifyHostSideLockForRun(record.HostConfig, runID); err != nil {
+			return keptRun{}, err
+		}
 	}
 	return keptRun{RunID: runID, StateDir: stateDir, Manifest: manifest, Record: record}, nil
 }
@@ -406,7 +444,7 @@ func readKeptRunManifest(repoDir string, runID string) (runManifest, string, err
 	return manifest, stateDir, nil
 }
 
-func ensureRunHasKeptLock(repoDir string, manifest runManifest, runID string) error {
+func ensureRunHasKeptLock(repoDir string, manifest runManifest, runID string, allowMissingMirror bool) error {
 	if err := validateHostID(manifest.Host); err != nil {
 		return err
 	}
@@ -419,6 +457,9 @@ func ensureRunHasKeptLock(repoDir string, manifest runManifest, runID string) er
 		return err
 	}
 	if !found {
+		if allowMissingMirror {
+			return nil
+		}
 		return fmt.Errorf("Host Lock for %s is not a kept run lock", manifest.Host)
 	}
 	if keptRun != runID {

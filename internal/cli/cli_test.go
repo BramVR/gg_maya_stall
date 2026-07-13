@@ -19,6 +19,16 @@ import (
 	"time"
 )
 
+func init() {
+	fakeSSHHostSideLockDirHook = func(host mayaHostConfig) (string, bool) {
+		if !strings.HasPrefix(filepath.Base(host.SSH.Binary), "fake-ssh-") {
+			return "", false
+		}
+		identity := sha256.Sum256([]byte(host.SSH.Host + "\x00" + host.WorkRoot))
+		return filepath.Join(filepath.Dir(host.SSH.Binary), "fake-ssh-host", fmt.Sprintf("%x", identity[:8]), "state", "locks", "hosts"), true
+	}
+}
+
 func TestHelpAndVersion(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
@@ -3760,6 +3770,30 @@ hostPools:
 }
 
 func TestDoctorHostHealthRepresentsHostLockState(t *testing.T) {
+	t.Run("host-side lock is authoritative across checkouts", func(t *testing.T) {
+		secondDir := writeRunConfigFixture(t)
+		hostRoot := t.TempDir()
+		hostConfigPath := writeSingleHealthyHostConfigWithWorkRoot(t, secondDir, hostRoot)
+		host := mayaHostConfig{ID: "alpha", WorkRoot: hostRoot}
+		lock, locked, err := acquireHostSideLock(host)
+		if err != nil || locked {
+			t.Fatalf("acquire host-side Host Lock: locked=%t err=%v", locked, err)
+		}
+		if err := lock.markActive(host.ID, "run-from-first-checkout"); err != nil {
+			t.Fatalf("mark host-side Host Lock active: %v", err)
+		}
+		t.Cleanup(func() { _ = lock.release() })
+
+		report := runDoctor(secondDir, doctorOptions{HostConfig: hostConfigPath, TargetProfile: "ci", HostPin: "alpha"})
+		lockLayer := requireHostHealthLayer(t, report, "host-lock")
+		if lockLayer.Status != "fail" || lockLayer.State != "active" || lockLayer.Source != "maya-host" || lockLayer.ActiveRun != "run-from-first-checkout" {
+			t.Fatalf("host-side Host Lock layer = %+v", lockLayer)
+		}
+		if formatted := formatHostHealthReport(report); !strings.Contains(formatted, "activeRun:run-from-first-checkout") {
+			t.Fatalf("formatted Host Health omitted active Run ID: %s", formatted)
+		}
+	})
+
 	t.Run("kept run blocks with kept run id", func(t *testing.T) {
 		dir := writeRunConfigFixture(t)
 		hostConfigPath := writeSingleHealthyHostConfig(t, dir)
@@ -7004,6 +7038,92 @@ func TestRunScenarioHostLockPreventsConcurrentFailFastRun(t *testing.T) {
 	}
 }
 
+func TestRunScenarioHostSideLockPreventsConcurrentRunAcrossCheckouts(t *testing.T) {
+	firstDir := writeRunConfigFixture(t)
+	secondDir := writeRunConfigFixture(t)
+	hostRoot := t.TempDir()
+	firstHostConfigPath := writeSingleHealthyHostConfigWithWorkRoot(t, firstDir, hostRoot)
+	secondHostConfigPath := writeSingleHealthyHostConfigWithWorkRoot(t, secondDir, hostRoot)
+	firstBroker := newBlockingBroker(ScenarioResult{Status: "passed", Summary: "first done"})
+	firstDone := make(chan int, 1)
+	go func() {
+		var stdout, stderr bytes.Buffer
+		runtime := defaultRunRuntime()
+		runtime.Broker = firstBroker
+		firstDone <- RunWithRuntime([]string{"run", "--host-config", firstHostConfigPath, "--target-profile", "ci", "smoke"}, &stdout, &stderr, firstDir, "test-version", runtime)
+	}()
+	<-firstBroker.started
+	hostLockPath := filepath.Join(hostRoot, "state", "locks", "hosts", "alpha.lock")
+	hostLockBytes, err := os.ReadFile(hostLockPath)
+	if err != nil {
+		t.Fatalf("active run did not hold host-side Host Lock: %v", err)
+	}
+	hostLockOwner := parseHostLockOwner(string(hostLockBytes))
+	if hostLockOwner.ActiveRun == "" || hostLockOwner.LockToken == "" {
+		t.Fatalf("active host-side Host Lock did not bind Run ID and token: %q", hostLockBytes)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"run", "--host-config", secondHostConfigPath, "--target-profile", "ci", "--host-lock-fail-fast", "smoke"}, &stdout, &stderr, secondDir, "test-version")
+	if code != 1 {
+		t.Fatalf("concurrent cross-checkout run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `no healthy unlocked Maya Host available in Target Profile "ci"`) {
+		t.Fatalf("cross-checkout lock error = %q", stderr.String())
+	}
+
+	close(firstBroker.release)
+	select {
+	case code := <-firstDone:
+		if code != 0 {
+			t.Fatalf("first run exit code = %d, want 0", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first run did not finish after release")
+	}
+	if _, err := os.Stat(hostLockPath); !os.IsNotExist(err) {
+		t.Fatalf("host-side Host Lock was not released: %v", err)
+	}
+}
+
+func TestRunScenarioRenewsHostSideLockAcrossLeaseBoundary(t *testing.T) {
+	oldLease := hostSideLockLeaseDuration
+	oldHeartbeat := hostSideLockHeartbeatInterval
+	hostSideLockLeaseDuration = 150 * time.Millisecond
+	hostSideLockHeartbeatInterval = 25 * time.Millisecond
+	t.Cleanup(func() {
+		hostSideLockLeaseDuration = oldLease
+		hostSideLockHeartbeatInterval = oldHeartbeat
+	})
+
+	firstDir := writeRunConfigFixture(t)
+	secondDir := writeRunConfigFixture(t)
+	hostRoot := t.TempDir()
+	firstConfig := writeSingleHealthyHostConfigWithWorkRoot(t, firstDir, hostRoot)
+	secondConfig := writeSingleHealthyHostConfigWithWorkRoot(t, secondDir, hostRoot)
+	firstBroker := newBlockingBroker(ScenarioResult{Status: "passed"})
+	firstDone := make(chan int, 1)
+	go func() {
+		var stdout, stderr bytes.Buffer
+		runtime := defaultRunRuntime()
+		runtime.Broker = firstBroker
+		firstDone <- RunWithRuntime([]string{"run", "--host-config", firstConfig, "--target-profile", "ci", "smoke"}, &stdout, &stderr, firstDir, "test-version", runtime)
+	}()
+	<-firstBroker.started
+	time.Sleep(2 * hostSideLockLeaseDuration)
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"run", "--host-config", secondConfig, "--target-profile", "ci", "--host-lock-fail-fast", "smoke"}, &stdout, &stderr, secondDir, "test-version")
+	if code != 1 || !strings.Contains(stderr.String(), "no healthy unlocked Maya Host available") {
+		t.Fatalf("successor crossed renewed lease: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	close(firstBroker.release)
+	if code := <-firstDone; code != 0 {
+		t.Fatalf("first run exit code = %d, want 0", code)
+	}
+}
+
 func TestRunScenarioCleansUpFreshRunStateAndReleasesHostLockByDefault(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	hostConfigPath := writeSingleHealthyHostConfig(t, dir)
@@ -7094,6 +7214,132 @@ func TestKeepOnFailureLeavesSessionForStatusAttachAndStop(t *testing.T) {
 	}
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 		t.Fatalf("kept Host Lock after stop = %v, want missing", err)
+	}
+}
+
+func TestStopReleasesKeptHostSideLock(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostRoot := t.TempDir()
+	hostConfigPath := writeSingleHealthyHostConfigWithWorkRoot(t, dir, hostRoot)
+	runtime := defaultRunRuntime()
+	runtime.Broker = fakeSessionBroker{Result: ScenarioResult{Status: "failed", Summary: "keep for inspection"}}
+	var stdout, stderr bytes.Buffer
+	code := RunWithRuntime([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--keep-on-failure", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("kept run exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+	hostLockPath := filepath.Join(hostRoot, "state", "locks", "hosts", "alpha.lock")
+	content, err := os.ReadFile(hostLockPath)
+	if err != nil {
+		t.Fatalf("read kept host-side Host Lock: %v", err)
+	}
+	if owner := parseHostLockOwner(string(content)); owner.KeptRun != runID {
+		t.Fatalf("host-side Host Lock owner = %+v, want kept run %s", owner, runID)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"stop", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("stop exit code = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(hostLockPath); !os.IsNotExist(err) {
+		t.Fatalf("host-side Host Lock after stop = %v, want missing", err)
+	}
+}
+
+func TestStopReconcilesAlreadyReleasedHostSideLock(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostRoot := t.TempDir()
+	hostConfigPath := writeSingleHealthyHostConfigWithWorkRoot(t, dir, hostRoot)
+	runtime := defaultRunRuntime()
+	runtime.Broker = fakeSessionBroker{Result: ScenarioResult{Status: "failed", Summary: "keep for retry"}}
+	var stdout, stderr bytes.Buffer
+	code := RunWithRuntime([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--keep-on-failure", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("kept run exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+	hostLockPath := filepath.Join(hostRoot, "state", "locks", "hosts", "alpha.lock")
+	stateDir := filepath.Join(dir, ".maya-stall", "state", "runs", runID)
+	manifest := readRunManifestFile(t, filepath.Join(stateDir, "manifest.json"))
+	record, err := readRunRetentionRecord(dir, stateDir, manifest)
+	if err != nil {
+		t.Fatalf("read kept run record: %v", err)
+	}
+	record.StopPhase = "broker-stopped"
+	if err := writeRunRetentionRecord(runContext{StateDir: stateDir}, record); err != nil {
+		t.Fatalf("record completed broker stop phase: %v", err)
+	}
+	if err := os.Remove(hostLockPath); err != nil {
+		t.Fatalf("simulate prior authoritative release: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"stop", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 0 {
+		t.Fatalf("retry stop exit code = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
+		t.Fatalf("run state after retry stop = %v, want missing", err)
+	}
+}
+
+func TestStopRefusesToReleaseOnlyAuthoritativeLocalMirrorWithoutRunRecord(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostRoot := t.TempDir()
+	hostConfigPath := writeSingleHealthyHostConfigWithWorkRoot(t, dir, hostRoot)
+	runtime := defaultRunRuntime()
+	runtime.Broker = fakeSessionBroker{Result: ScenarioResult{Status: "failed", Summary: "keep without record"}}
+	var stdout, stderr bytes.Buffer
+	code := RunWithRuntime([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--keep-on-failure", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("kept run exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+	stateDir := filepath.Join(dir, ".maya-stall", "state", "runs", runID)
+	if err := os.RemoveAll(stateDir); err != nil {
+		t.Fatalf("simulate missing run record: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"stop", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 1 || !strings.Contains(stderr.String(), "refusing to release only the repo-local Host Lock mirror") {
+		t.Fatalf("recordless stop result: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	for _, lockPath := range []string{
+		filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", "alpha.lock"),
+		filepath.Join(hostRoot, "state", "locks", "hosts", "alpha.lock"),
+	} {
+		if _, err := os.Stat(lockPath); err != nil {
+			t.Fatalf("recordless stop removed lock %s: %v", lockPath, err)
+		}
+	}
+}
+
+func TestStatusRejectsStaleLocalOwnerAfterHostSideLockChanges(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	hostRoot := t.TempDir()
+	hostConfigPath := writeSingleHealthyHostConfigWithWorkRoot(t, dir, hostRoot)
+	runtime := defaultRunRuntime()
+	runtime.Broker = fakeSessionBroker{Result: ScenarioResult{Status: "failed"}}
+	var stdout, stderr bytes.Buffer
+	code := RunWithRuntime([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--keep-on-failure", "smoke"}, &stdout, &stderr, dir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("kept run exit code = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+	hostLockPath := filepath.Join(hostRoot, "state", "locks", "hosts", "alpha.lock")
+	mustWriteFile(t, hostLockPath, "host: alpha\nlockToken: successor-token\nkeptRun: successor-run\ncreatedAt: 2026-07-13T00:00:00Z\n")
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"status", "--run", runID}, &stdout, &stderr, dir, "test-version")
+	if code != 1 || !strings.Contains(stderr.String(), "Host Lock ownership changed") {
+		t.Fatalf("status trusted stale local ownership: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 }
 
@@ -8195,6 +8441,23 @@ hostPools:
     hosts:
       - id: alpha
         health: healthy
+`)
+	return hostConfigPath
+}
+
+func writeSingleHealthyHostConfigWithWorkRoot(t *testing.T, dir string, workRoot string) string {
+	t.Helper()
+	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")
+	mustWriteFile(t, hostConfigPath, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows-maya
+hostPools:
+  windows-maya:
+    hosts:
+      - id: alpha
+        health: healthy
+        workRoot: `+strconv.Quote(workRoot)+`
 `)
 	return hostConfigPath
 }

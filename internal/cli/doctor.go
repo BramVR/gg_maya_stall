@@ -33,6 +33,7 @@ type hostHealthLayer struct {
 	Source             string
 	State              string
 	BlockedBy          string
+	ActiveRun          string
 	KeptRun            string
 	InteractiveDesktop bool
 }
@@ -219,7 +220,7 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 		add(statusLayer("fake-ssh", host.SSH.FakeStatus, "reachable", []string{"", "ok", "healthy", "reachable"}, "Fix SSH reachability for this Maya Host. See docs/setup/windows-maya-host.md#openssh-reachability."))
 		add(statusLayer("work-root", host.WorkRoot, "writable", []string{"", "ok", "writable"}, "Fix the host work root path or permissions. See docs/setup/windows-maya-host.md#work-root."))
 	}
-	lockCheck := hostLockLayer(repoDir, host.ID)
+	lockCheck := hostLockLayer(repoDir, host)
 	add(lockCheck)
 	resolved, runtimeErr := resolveRuntimeForHost(host)
 	if runtimeErr != nil {
@@ -228,13 +229,32 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 		report.Runtime = resolved.Metadata
 		add(withSource(okCheck("runtime", resolved.Metadata.Profile), resolved.Metadata.Profile))
 	}
+	probeLockDetail := ""
+	needsProbeLock := runtimeErr == nil && host.Broker.isGGMayaSessiond()
+	if options.RepairTrustedPluginAllowlist && host.usesRealSSH() {
+		needsProbeLock = true
+	}
+	if needsProbeLock && lockCheck.Status == "ok" {
+		lock, locked, err := acquireRunHostLock(repoDir, host)
+		if err != nil {
+			probeLockDetail = err.Error()
+		} else if locked {
+			probeLockDetail = fmt.Sprintf("%s locked", host.ID)
+		} else {
+			defer func() {
+				if err := lock.release(); err != nil {
+					add(failedCheck("host-lock-release", fmt.Sprintf("release doctor probe lock for %s: %v", host.ID, err), "Inspect the Host Lock state and permissions. See docs/setup/windows-maya-host.md#host-lock-and-retention."))
+				}
+			}()
+		}
+	}
 	if options.RepairTrustedPluginAllowlist {
-		if host.usesRealSSH() && lockCheck.Status != "ok" {
+		if host.usesRealSSH() && (lockCheck.Status != "ok" || probeLockDetail != "") {
 			add(withBlockedBy(failedCheck("maya-version", "skipped because Host Lock is not clear", "Wait for the active Fresh Run or clear the stale Host Lock before probing installed Maya versions. See docs/setup/windows-maya-host.md#host-lock-and-retention."), "host-lock"))
 		} else {
 			add(mayaVersionLayer(options, host, scenario.Config))
 		}
-		add(trustedPluginAllowlistDoctorLayer(repoDir, host, scenario, repairRequiredPaths, true, sshOK, lockCheck.Status == "ok"))
+		add(trustedPluginAllowlistDoctorLayer(repoDir, host, scenario, repairRequiredPaths, true, sshOK, lockCheck.Status == "ok" && probeLockDetail == ""))
 		add(withSource(okCheck("session-broker", "skipped during TrustCenter repair"), "repair"))
 		add(withSource(okCheck("visual-evidence", "skipped during TrustCenter repair"), "repair"))
 		add(withSource(okCheck("desktop-control", "skipped during TrustCenter repair"), "repair"))
@@ -249,21 +269,6 @@ func checkHostLayers(repoDir string, options doctorOptions, host mayaHostConfig,
 		brokerLayerInvalidReason = brokerInvalidReason
 	}
 	sessionBrokerOK := false
-	probeLockDetail := ""
-	if runtimeErr == nil && host.Broker.isGGMayaSessiond() && lockCheck.Status == "ok" {
-		release, locked, err := acquireHostLock(repoDir, host.ID)
-		if err != nil {
-			probeLockDetail = err.Error()
-		} else if locked {
-			probeLockDetail = fmt.Sprintf("%s locked", host.ID)
-		} else {
-			defer func() {
-				if err := release(); err != nil {
-					add(failedCheck("host-lock-release", fmt.Sprintf("release doctor probe lock for %s: %v", host.ID, err), "Inspect the Host Lock state directory and permissions. See docs/setup/windows-maya-host.md#host-lock-and-retention."))
-				}
-			}()
-		}
-	}
 	if runtimeErr == nil && host.Broker.isGGMayaSessiond() {
 		broker := resolved.Broker.(ggMayaSessiondBroker)
 		var check hostHealthLayer
@@ -553,8 +558,35 @@ func mayaVersionMismatchHint(required string, installed string) string {
 	return fmt.Sprintf("Install Autodesk Maya %s or choose a Maya Host with %s installed; detected %s. See docs/setup/windows-maya-host.md#autodesk-maya.", required, required, installed)
 }
 
-func hostLockLayer(repoDir string, hostID string) doctorCheck {
-	lockPath := filepath.Join(repoDir, ".maya-stall", "state", "locks", "hosts", hostID+".lock")
+func hostLockLayer(repoDir string, host mayaHostConfig) doctorCheck {
+	if lockDir, ok := fakeHostSideLockDir(host); ok {
+		check := withSource(localHostLockLayer(filepath.Join(lockDir, host.ID+".lock"), host.ID, isStaleHostSideLock), "maya-host")
+		return hostLockLayerWithLegacyLocal(repoDir, host.ID, check)
+	}
+	if host.usesRealSSH() {
+		if lockDir, ok := fakeSSHHostSideLockDir(host); ok {
+			check := withSource(localHostLockLayer(filepath.Join(lockDir, "host.lock"), host.ID, isStaleHostSideLock), "maya-host")
+			return hostLockLayerWithLegacyLocal(repoDir, host.ID, check)
+		}
+		return hostLockLayerWithLegacyLocal(repoDir, host.ID, withSource(remoteHostLockLayer(host), "maya-host"))
+	}
+	lockPath := filepath.Join(repoDir, ".maya-stall", "state", "locks", "hosts", host.ID+".lock")
+	return withSource(localHostLockLayer(lockPath, host.ID, isStaleHostLock), "local")
+}
+
+func hostLockLayerWithLegacyLocal(repoDir string, hostID string, hostSide doctorCheck) doctorCheck {
+	if hostSide.Status != "ok" {
+		return hostSide
+	}
+	localPath := filepath.Join(repoDir, ".maya-stall", "state", "locks", "hosts", hostID+".lock")
+	local := withSource(localHostLockLayer(localPath, hostID, isStaleHostLock), "local")
+	if local.Status != "ok" {
+		return local
+	}
+	return hostSide
+}
+
+func localHostLockLayer(lockPath string, hostID string, isStale func(string) (bool, error)) doctorCheck {
 	_, err := os.Stat(lockPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return withState(okCheck("host-lock", "unlocked"), "unlocked")
@@ -569,14 +601,70 @@ func hostLockLayer(repoDir string, hostID string) doctorCheck {
 		check.KeptRun = keptRun
 		return check
 	}
-	stale, err := isStaleHostLock(lockPath)
+	stale, err := isStale(lockPath)
 	if err != nil {
 		return failedCheck("host-lock", err.Error(), "Inspect or remove the unreadable Host Lock file. See docs/setup/windows-maya-host.md#host-lock-and-retention.")
 	}
 	if stale {
 		return withState(okCheck("host-lock", "unlocked"), "stale")
 	}
-	return withState(failedCheck("host-lock", fmt.Sprintf("%s locked", hostID), "Wait for the active Fresh Run or clear the stale Host Lock after verifying no run is active. See docs/setup/windows-maya-host.md#host-lock-and-retention."), "active")
+	content, err := os.ReadFile(lockPath)
+	if err != nil {
+		return failedCheck("host-lock", err.Error(), "Inspect or remove the unreadable Host Lock file. See docs/setup/windows-maya-host.md#host-lock-and-retention.")
+	}
+	activeRun := parseHostLockOwner(string(content)).ActiveRun
+	detail := fmt.Sprintf("%s locked", hostID)
+	if activeRun != "" {
+		detail += " by active run " + activeRun
+	}
+	check := withState(failedCheck("host-lock", detail, "Wait for the active Fresh Run or clear the stale Host Lock after verifying no run is active. See docs/setup/windows-maya-host.md#host-lock-and-retention."), "active")
+	check.ActiveRun = activeRun
+	return check
+}
+
+func remoteHostLockLayer(host mayaHostConfig) doctorCheck {
+	lockPath, err := remoteHostLockPath(host)
+	if err != nil {
+		return failedCheck("host-lock", err.Error(), "Fix the Maya Host work root before checking Host Lock state. See docs/setup/windows-maya-host.md#host-lock-and-retention.")
+	}
+	result, err := readRemoteHostLockState(host, lockPath)
+	if err != nil {
+		return failedCheck("host-lock", err.Error(), "Inspect the Host Lock under the Maya Host work root. See docs/setup/windows-maya-host.md#host-lock-and-retention.")
+	}
+	if result.Error != "" {
+		return failedCheck("host-lock", result.Error, "Inspect the Host Lock under the Maya Host work root. See docs/setup/windows-maya-host.md#host-lock-and-retention.")
+	}
+	switch result.State {
+	case "", "unlocked":
+		return withState(okCheck("host-lock", "unlocked"), "unlocked")
+	case "kept":
+		check := withState(failedCheck("host-lock", fmt.Sprintf("%s locked", host.ID), "Stop the Kept Session before reusing this Maya Host. See docs/setup/windows-maya-host.md#host-lock-and-retention."), "kept")
+		check.KeptRun = result.KeptRun
+		return check
+	}
+	if result.LeaseExpired {
+		inactive, statusErr := remoteHostLockSessionInactive(host, result)
+		if statusErr != nil {
+			check := withState(failedCheck("host-lock", "expired lease; Session Broker state unavailable", "Repair Session Broker status and verify the Maya UI Session before recovering this Host Lock. See docs/setup/windows-maya-host.md#host-lock-and-retention."), "stale-unverified")
+			check.ActiveRun = result.ActiveRun
+			return check
+		}
+		if inactive {
+			check := withState(okCheck("host-lock", "expired lease; Session Broker inactive"), "stale")
+			check.ActiveRun = result.ActiveRun
+			return check
+		}
+		check := withState(failedCheck("host-lock", "expired lease but Session Broker remains active", "Stop and verify the owned Maya UI Session before recovering this Host Lock. See docs/setup/windows-maya-host.md#host-lock-and-retention."), "active")
+		check.ActiveRun = result.ActiveRun
+		return check
+	}
+	detail := fmt.Sprintf("%s locked", host.ID)
+	if result.ActiveRun != "" {
+		detail += " by active run " + result.ActiveRun
+	}
+	check := withState(failedCheck("host-lock", detail, "Wait for the active Fresh Run. See docs/setup/windows-maya-host.md#host-lock-and-retention."), "active")
+	check.ActiveRun = result.ActiveRun
+	return check
 }
 
 func okCheck(layer string, detail string) doctorCheck {
@@ -620,6 +708,9 @@ func formatHostHealthReport(report hostHealthReport) string {
 		}
 		if check.State != "" {
 			part += " state:" + check.State
+		}
+		if check.ActiveRun != "" {
+			part += " activeRun:" + check.ActiveRun
 		}
 		if check.KeptRun != "" {
 			part += " keptRun:" + check.KeptRun

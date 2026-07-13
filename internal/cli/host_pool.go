@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -8,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -16,12 +19,92 @@ import (
 const defaultFakeHostID = "fake-local"
 
 var hostIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+var errHostLockOwnershipChanged = errors.New("Host Lock ownership changed") //nolint:staticcheck // Host Lock is a product term.
+var fakeSSHHostSideLockDirHook func(mayaHostConfig) (string, bool)
 
 type hostRuntime struct {
 	TargetProfile string
 	HostID        string
 	Config        mayaHostConfig
 	release       func() error
+	renew         func() error
+	markActive    func(string) error
+	markKept      func(string) error
+}
+
+type runHostLock struct {
+	release    func() error
+	renew      func() error
+	markActive func(string) error
+	markKept   func(string) error
+}
+
+type hostLockOwner struct {
+	ClientMachine  string
+	ClientPid      string
+	LockToken      string
+	ActiveRun      string
+	KeptRun        string
+	CreatedAt      string
+	LeaseExpiresAt string
+	BrokerStateDir string
+	BrokerPython   string
+	BrokerRepo     string
+	Authoritative  bool
+	LeaseExpired   bool
+	HostClockLease bool
+}
+
+type hostSideLock struct {
+	mu           sync.Mutex
+	expected     string
+	replaceOwner func(string, string) error
+	remove       func(string) error
+}
+
+func (lock *hostSideLock) release() error {
+	lock.mu.Lock()
+	defer lock.mu.Unlock()
+	return lock.remove(lock.expected)
+}
+
+func (lock *hostSideLock) renew(hostID string) error {
+	lock.mu.Lock()
+	defer lock.mu.Unlock()
+	owner := parseHostLockOwner(lock.expected)
+	if owner.KeptRun != "" {
+		return nil
+	}
+	content := hostSideLockOwnerContent(hostID, owner, owner.ActiveRun, "", true)
+	if err := lock.replaceOwner(lock.expected, content); err != nil {
+		return err
+	}
+	lock.expected = content
+	return nil
+}
+
+func (lock *hostSideLock) markActive(hostID string, runID string) error {
+	lock.mu.Lock()
+	defer lock.mu.Unlock()
+	owner := parseHostLockOwner(lock.expected)
+	content := hostSideLockOwnerContent(hostID, owner, runID, "", true)
+	if err := lock.replaceOwner(lock.expected, content); err != nil {
+		return err
+	}
+	lock.expected = content
+	return nil
+}
+
+func (lock *hostSideLock) markKept(hostID string, runID string) error {
+	lock.mu.Lock()
+	defer lock.mu.Unlock()
+	owner := parseHostLockOwner(lock.expected)
+	content := hostSideLockOwnerContent(hostID, owner, "", runID, false)
+	if err := lock.replaceOwner(lock.expected, content); err != nil {
+		return err
+	}
+	lock.expected = content
+	return nil
 }
 
 type resolvedRuntime struct {
@@ -271,6 +354,10 @@ func rejectUnknownYAMLMergeFields(value *yaml.Node, known map[string]struct{}, t
 }
 
 func selectHostForRun(repoDir string, options runOptions) (hostRuntime, error) {
+	return selectHostForRunValidated(repoDir, options, nil)
+}
+
+func selectHostForRunValidated(repoDir string, options runOptions, validate func(mayaHostConfig) error) (hostRuntime, error) {
 	config, err := loadUserHostConfig(options.HostConfig)
 	if err != nil {
 		return hostRuntime{}, err
@@ -284,13 +371,20 @@ func selectHostForRun(repoDir string, options runOptions) (hostRuntime, error) {
 	}
 
 	deadline := time.Now().Add(options.HostLockWait)
+	retryDelay := 25 * time.Millisecond
+	for _, candidate := range candidates {
+		if candidate.usesRealSSH() {
+			retryDelay = 250 * time.Millisecond
+			break
+		}
+	}
 	for {
 		var sawLocked bool
 		for _, candidate := range candidates {
 			if !isHealthyHost(candidate) {
 				continue
 			}
-			release, locked, err := acquireHostLock(repoDir, candidate.ID)
+			lock, locked, err := acquireRunHostLock(repoDir, candidate)
 			if err != nil {
 				return hostRuntime{}, err
 			}
@@ -298,7 +392,20 @@ func selectHostForRun(repoDir string, options runOptions) (hostRuntime, error) {
 				sawLocked = true
 				continue
 			}
-			return hostRuntime{TargetProfile: options.TargetProfile, HostID: candidate.ID, Config: candidate, release: release}, nil
+			if validate != nil {
+				if err := validate(candidate); err != nil {
+					return hostRuntime{}, errors.Join(err, lock.release())
+				}
+			}
+			return hostRuntime{
+				TargetProfile: options.TargetProfile,
+				HostID:        candidate.ID,
+				Config:        candidate,
+				release:       lock.release,
+				renew:         lock.renew,
+				markActive:    lock.markActive,
+				markKept:      lock.markKept,
+			}, nil
 		}
 
 		if options.HostLockWait <= 0 || time.Now().After(deadline) {
@@ -310,7 +417,18 @@ func selectHostForRun(repoDir string, options runOptions) (hostRuntime, error) {
 			}
 			return hostRuntime{}, fmt.Errorf("no healthy Maya Host available in Target Profile %q", options.TargetProfile)
 		}
-		time.Sleep(25 * time.Millisecond)
+		remaining := time.Until(deadline)
+		if remaining < retryDelay {
+			time.Sleep(remaining)
+		} else {
+			time.Sleep(retryDelay)
+		}
+		if retryDelay >= 250*time.Millisecond && retryDelay < 2*time.Second {
+			retryDelay *= 2
+			if retryDelay > 2*time.Second {
+				retryDelay = 2 * time.Second
+			}
+		}
 	}
 }
 
@@ -439,6 +557,211 @@ func acquireHostLock(repoDir string, hostID string) (func() error, bool, error) 
 		return nil, false, err
 	}
 	lockDir := filepath.Join(repoDir, ".maya-stall", "state", "locks", "hosts")
+	return acquireHostLockAtDir(lockDir, hostID)
+}
+
+func acquireRunHostLock(repoDir string, host mayaHostConfig) (runHostLock, bool, error) {
+	hostSideLock, locked, err := acquireHostSideLock(host)
+	if err != nil || locked {
+		return runHostLock{}, locked, err
+	}
+	localRelease, locked, err := acquireHostLock(repoDir, host.ID)
+	if err != nil || locked {
+		err = errors.Join(err, hostSideLock.release())
+		return runHostLock{}, locked, err
+	}
+	return runHostLock{
+		release: func() error {
+			return errors.Join(hostSideLock.release(), localRelease())
+		},
+		renew: func() error {
+			return hostSideLock.renew(host.ID)
+		},
+		markActive: func(runID string) error {
+			if err := hostSideLock.markActive(host.ID, runID); err != nil {
+				return err
+			}
+			return markHostLockActiveWithAuthority(repoDir, host.ID, runID, hasAuthoritativeHostSideLock(host))
+		},
+		markKept: func(runID string) error {
+			if err := hostSideLock.markKept(host.ID, runID); err != nil {
+				return err
+			}
+			return markHostLockKeptWithAuthority(repoDir, host.ID, runID, hasAuthoritativeHostSideLock(host))
+		},
+	}, false, nil
+}
+
+func fakeHostSideLockDir(host mayaHostConfig) (string, bool) {
+	if host.usesRealSSH() || host.WorkRoot == "" || !filepath.IsAbs(host.WorkRoot) {
+		return "", false
+	}
+	return filepath.Join(host.WorkRoot, "state", "locks", "hosts"), true
+}
+
+func fakeSSHHostSideLockDir(host mayaHostConfig) (string, bool) {
+	if fakeSSHHostSideLockDirHook == nil {
+		return "", false
+	}
+	return fakeSSHHostSideLockDirHook(host)
+}
+
+func hasAuthoritativeHostSideLock(host mayaHostConfig) bool {
+	if host.usesRealSSH() {
+		return true
+	}
+	_, ok := fakeHostSideLockDir(host)
+	return ok
+}
+
+func releaseHostSideLock(host mayaHostConfig, runID string) error {
+	if host.usesRealSSH() {
+		if lockDir, ok := fakeSSHHostSideLockDir(host); ok {
+			return removeHostSideLockForRunAtDir(lockDir, "host", runID)
+		}
+		return removeRemoteHostLockForRun(host, runID)
+	}
+	if lockDir, ok := fakeHostSideLockDir(host); ok {
+		return removeHostSideLockForRunAtDir(lockDir, host.ID, runID)
+	}
+	return nil
+}
+
+func verifyHostSideLockForRun(host mayaHostConfig, runID string) error {
+	if host.usesRealSSH() {
+		if lockDir, ok := fakeSSHHostSideLockDir(host); ok {
+			return verifyHostSideLockForRunAtDir(lockDir, "host", runID)
+		}
+		return verifyRemoteHostLockForRun(host, runID)
+	}
+	if lockDir, ok := fakeHostSideLockDir(host); ok {
+		return verifyHostSideLockForRunAtDir(lockDir, host.ID, runID)
+	}
+	return nil
+}
+
+func verifyHostSideLockForRunAtDir(lockDir string, hostID string, runID string) error {
+	return withLocalHostSideMutex(lockDir, hostID, func() error {
+		content, err := os.ReadFile(filepath.Join(lockDir, hostID+".lock"))
+		if err != nil {
+			return err
+		}
+		owner := parseHostLockOwner(string(content))
+		if owner.ActiveRun != runID && owner.KeptRun != runID {
+			return fmt.Errorf("%w for %s", errHostLockOwnershipChanged, hostID)
+		}
+		return nil
+	})
+}
+
+func removeHostSideLockForRunAtDir(lockDir string, hostID string, runID string) error {
+	return withLocalHostSideMutex(lockDir, hostID, func() error {
+		lockPath := filepath.Join(lockDir, hostID+".lock")
+		content, err := os.ReadFile(lockPath)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		owner := parseHostLockOwner(string(content))
+		if owner.KeptRun != runID && owner.ActiveRun != runID {
+			return fmt.Errorf("%w for %s", errHostLockOwnershipChanged, hostID)
+		}
+		return os.Remove(lockPath)
+	})
+}
+
+func acquireHostSideLock(host mayaHostConfig) (*hostSideLock, bool, error) {
+	content, err := hostSideLockContent(host.ID, host.Broker.StateDir, host.Broker.Python, host.Broker.Repo, "")
+	if err != nil {
+		return nil, false, err
+	}
+	if host.usesRealSSH() {
+		if err := validateHostSideLockSSHConfig(host); err != nil {
+			return nil, false, err
+		}
+		if lockDir, ok := fakeSSHHostSideLockDir(host); ok {
+			return acquireLocalHostSideLock(lockDir, "host", content)
+		}
+		return acquireRemoteHostLock(host, content)
+	}
+	if lockDir, ok := fakeHostSideLockDir(host); ok {
+		return acquireLocalHostSideLock(lockDir, host.ID, content)
+	}
+	return &hostSideLock{
+		replaceOwner: func(string, string) error { return nil },
+		remove:       func(string) error { return nil },
+	}, false, nil
+}
+
+func acquireLocalHostSideLock(lockDir string, hostID string, content string) (*hostSideLock, bool, error) {
+	var locked bool
+	err := withLocalHostSideMutex(lockDir, hostID, func() error {
+		_, acquiredLocked, acquireErr := acquireHostLockAtDirWithContent(lockDir, hostID, content, isStaleHostSideLock)
+		locked = acquiredLocked
+		return acquireErr
+	})
+	if err != nil || locked {
+		return nil, locked, err
+	}
+	lockPath := filepath.Join(lockDir, hostID+".lock")
+	return &hostSideLock{
+		expected: content,
+		replaceOwner: func(expected string, replacement string) error {
+			return withLocalHostSideMutex(lockDir, hostID, func() error {
+				current, err := os.ReadFile(lockPath)
+				if err != nil {
+					return err
+				}
+				if string(current) != expected {
+					return fmt.Errorf("%w for %s", errHostLockOwnershipChanged, hostID)
+				}
+				return replaceHostLockOwnerAtDir(lockDir, hostID, replacement)
+			})
+		},
+		remove: func(expected string) error {
+			return withLocalHostSideMutex(lockDir, hostID, func() error {
+				current, err := os.ReadFile(lockPath)
+				if errors.Is(err, os.ErrNotExist) {
+					return nil
+				}
+				if err != nil {
+					return err
+				}
+				if string(current) != expected {
+					return fmt.Errorf("%w for %s", errHostLockOwnershipChanged, hostID)
+				}
+				return os.Remove(lockPath)
+			})
+		},
+	}, false, nil
+}
+
+func withLocalHostSideMutex(lockDir string, hostID string, action func() error) error {
+	deadline := time.Now().Add(5 * time.Second)
+	mutexDir := filepath.Join(lockDir, ".mutexes")
+	for {
+		release, locked, err := acquireHostLockAtDir(mutexDir, hostID)
+		if err != nil {
+			return err
+		}
+		if !locked {
+			return errors.Join(action(), release())
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("time out waiting for local Host Lock mutex for %s", hostID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func acquireHostLockAtDir(lockDir string, hostID string) (func() error, bool, error) {
+	content := fmt.Sprintf("host: %s\npid: %d\n", hostID, os.Getpid())
+	return acquireHostLockAtDirWithContent(lockDir, hostID, content, isStaleHostLock)
+}
+
+func acquireHostLockAtDirWithContent(lockDir string, hostID string, content string, isStale func(string) (bool, error)) (func() error, bool, error) {
 	if err := os.MkdirAll(lockDir, 0o755); err != nil {
 		return nil, false, err
 	}
@@ -449,7 +772,7 @@ func acquireHostLock(repoDir string, hostID string) (func() error, bool, error) 
 	}
 	tempPath := tempFile.Name()
 	defer os.Remove(tempPath)
-	if _, err := fmt.Fprintf(tempFile, "host: %s\npid: %d\n", hostID, os.Getpid()); err != nil {
+	if _, err := tempFile.WriteString(content); err != nil {
 		tempFile.Close()
 		return nil, false, err
 	}
@@ -459,7 +782,7 @@ func acquireHostLock(repoDir string, hostID string) (func() error, bool, error) 
 	for {
 		err := os.Link(tempPath, lockPath)
 		if errors.Is(err, os.ErrExist) {
-			stale, err := isStaleHostLock(lockPath)
+			stale, err := isStale(lockPath)
 			if err != nil {
 				return nil, false, err
 			}
@@ -481,20 +804,28 @@ func acquireHostLock(repoDir string, hostID string) (func() error, bool, error) 
 }
 
 func markHostLockKept(repoDir string, hostID string, runID string) error {
+	return markHostLockKeptWithAuthority(repoDir, hostID, runID, false)
+}
+
+func markHostLockKeptWithAuthority(repoDir string, hostID string, runID string, authoritative bool) error {
 	if err := validateHostID(hostID); err != nil {
 		return err
 	}
-	return replaceHostLockOwner(repoDir, hostID, fmt.Sprintf("host: %s\nkeptRun: %s\n", hostID, runID))
+	return replaceHostLockOwner(repoDir, hostID, fmt.Sprintf("host: %s\nkeptRun: %s\nauthoritativeHostLock: %t\n", hostID, runID, authoritative))
 }
 
 func markHostLockActive(repoDir string, hostID string, runID string) error {
+	return markHostLockActiveWithAuthority(repoDir, hostID, runID, false)
+}
+
+func markHostLockActiveWithAuthority(repoDir string, hostID string, runID string, authoritative bool) error {
 	if err := validateHostID(hostID); err != nil {
 		return err
 	}
 	if err := validateRunID(runID); err != nil {
 		return err
 	}
-	return replaceHostLockOwner(repoDir, hostID, fmt.Sprintf("host: %s\npid: %d\nactiveRun: %s\n", hostID, os.Getpid(), runID))
+	return replaceHostLockOwner(repoDir, hostID, fmt.Sprintf("host: %s\npid: %d\nactiveRun: %s\nauthoritativeHostLock: %t\n", hostID, os.Getpid(), runID, authoritative))
 }
 
 func replaceHostLockOwner(repoDir string, hostID string, content string) error {
@@ -502,6 +833,10 @@ func replaceHostLockOwner(repoDir string, hostID string, content string) error {
 	if err := ensureOutputPathHasNoSymlinkParent(repoDir, filepath.Join(".maya-stall", "state", "locks", "hosts")); err != nil {
 		return err
 	}
+	return replaceHostLockOwnerAtDir(lockDir, hostID, content)
+}
+
+func replaceHostLockOwnerAtDir(lockDir string, hostID string, content string) error {
 	lockPath := filepath.Join(lockDir, hostID+".lock")
 	if info, err := os.Lstat(lockPath); err != nil {
 		return err
@@ -547,4 +882,117 @@ func isStaleHostLock(lockPath string) (bool, error) {
 		return !processExists(pid), nil
 	}
 	return true, nil
+}
+
+var hostSideLockLeaseDuration = time.Hour
+var hostSideLockHeartbeatInterval = time.Minute
+
+func hostSideLockContent(hostID string, brokerStateDir string, brokerPython string, brokerRepo string, extra string) (string, error) {
+	tokenBytes := make([]byte, 16)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return "", fmt.Errorf("create Host Lock token: %w", err)
+	}
+	now := time.Now().UTC()
+	machine, _ := os.Hostname()
+	return fmt.Sprintf(
+		"host: %s\nclientMachine: %s\nclientPid: %d\nlockToken: %s\nbrokerStateDir: %s\nbrokerPython: %s\nbrokerRepo: %s\n%screatedAt: %s\nleaseExpiresAt: %s\nleaseDurationSeconds: %d\n",
+		hostID,
+		strings.TrimSpace(machine),
+		os.Getpid(),
+		hex.EncodeToString(tokenBytes),
+		strings.TrimSpace(brokerStateDir),
+		strings.TrimSpace(brokerPython),
+		strings.TrimSpace(brokerRepo),
+		extra,
+		now.Format(time.RFC3339Nano),
+		now.Add(hostSideLockLeaseDuration).Format(time.RFC3339Nano),
+		int(hostSideLockLeaseDuration/time.Second),
+	), nil
+}
+
+func hostSideLockOwnerContent(hostID string, owner hostLockOwner, activeRun string, keptRun string, leased bool) string {
+	now := time.Now().UTC()
+	createdAt := owner.CreatedAt
+	if createdAt == "" {
+		createdAt = now.Format(time.RFC3339Nano)
+	}
+	content := fmt.Sprintf(
+		"host: %s\nclientMachine: %s\nclientPid: %s\nlockToken: %s\nbrokerStateDir: %s\nbrokerPython: %s\nbrokerRepo: %s\ncreatedAt: %s\n",
+		hostID,
+		owner.ClientMachine,
+		owner.ClientPid,
+		owner.LockToken,
+		owner.BrokerStateDir,
+		owner.BrokerPython,
+		owner.BrokerRepo,
+		createdAt,
+	)
+	if activeRun != "" {
+		content += "activeRun: " + activeRun + "\n"
+	}
+	if keptRun != "" {
+		content += "keptRun: " + keptRun + "\n"
+	}
+	if leased {
+		content += fmt.Sprintf("leaseExpiresAt: %s\nleaseDurationSeconds: %d\n", now.Add(hostSideLockLeaseDuration).Format(time.RFC3339Nano), int(hostSideLockLeaseDuration/time.Second))
+	}
+	return content
+}
+
+func parseHostLockOwner(content string) hostLockOwner {
+	var owner hostLockOwner
+	for _, line := range strings.Split(content, "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		switch strings.TrimSpace(key) {
+		case "clientMachine":
+			owner.ClientMachine = value
+		case "clientPid":
+			owner.ClientPid = value
+		case "lockToken":
+			owner.LockToken = value
+		case "activeRun":
+			owner.ActiveRun = value
+		case "keptRun":
+			owner.KeptRun = value
+		case "createdAt":
+			owner.CreatedAt = value
+		case "leaseExpiresAt":
+			owner.LeaseExpiresAt = value
+		case "brokerStateDir":
+			owner.BrokerStateDir = value
+		case "brokerPython":
+			owner.BrokerPython = value
+		case "brokerRepo":
+			owner.BrokerRepo = value
+		case "authoritativeHostLock":
+			owner.Authoritative = strings.EqualFold(value, "true")
+		}
+	}
+	return owner
+}
+
+func isStaleHostSideOwner(owner hostLockOwner) bool {
+	if owner.KeptRun != "" || owner.LockToken == "" {
+		return false
+	}
+	if owner.HostClockLease {
+		return owner.LeaseExpired
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, owner.LeaseExpiresAt)
+	return err == nil && !time.Now().UTC().Before(expiresAt)
+}
+
+func isStaleHostSideLock(lockPath string) (bool, error) {
+	content, err := os.ReadFile(lockPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return isStaleHostSideOwner(parseHostLockOwner(string(content))), nil
 }

@@ -35,10 +35,10 @@ task before proof starts and retained-stop smokes restore it again before the
 next proof step:
 
 ```sh
-go test -json ./internal/cli -run '^(TestOptInRealVisualEvidenceSmoke|TestOptInRealDesktopControlModalSmoke|TestOptInRealSSHDoctorSmoke|TestOptInRealSSHConsumingRepoSmoke|TestOptInRealSSHRunSmoke|TestOptInRealRunScopedDesktopOpsSmoke)$' -count=1 -parallel=1 -timeout=20m
+go test -json ./internal/cli -run '^(TestOptInRealVisualEvidenceSmoke|TestOptInRealDesktopControlModalSmoke|TestOptInRealSSHDoctorSmoke|TestOptInRealSSHConsumingRepoSmoke|TestOptInRealSSHRunSmoke|TestOptInRealHostLockContentionAndRecoverySmoke|TestOptInRealRunScopedDesktopOpsSmoke)$' -count=1 -parallel=1 -timeout=20m
 ```
 
-The single Go process compiles and initializes the package once. All six named
+The single Go process compiles and initializes the package once. All seven named
 tests must report individual passes; skips fail the live gate. `-parallel=1`
 keeps the one interactive Windows desktop serialized, while `-timeout=20m`
 leaves five minutes of the job budget for setup and proof publication.
@@ -58,6 +58,10 @@ proof. The run-scoped desktop ops smoke keeps a failed run locked, proves
 standalone screenshot fails closed while the Host Lock is held, captures a
 run-scoped desktop screenshot, and clears a controlled modal with
 `attach <run-id> control click`.
+The Host Lock smoke runs separate controller processes against the same SSH
+Maya Host, proves contention crosses checkout boundaries, leaves one lease
+behind as if its controller crashed, proves the Session Broker is inactive,
+and then recovers the expired lease through the real SSH/Session Broker path.
 
 Non-live-only changes may merge with local gates plus a manifest saying
 `live_maya_required=false`.

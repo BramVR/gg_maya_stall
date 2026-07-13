@@ -2156,6 +2156,43 @@ func TestTrustedPluginAllowlistRequiredPathsRejectInvalidWin32ArtifactLeaves(t *
 	}
 }
 
+func TestTrustedPluginAllowlistRequiredPathsRejectUnsafeRawArtifactLeaves(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		entry     string
+		emptyDir  bool
+		wantError string
+	}{
+		{name: "file terminal space", entry: "build/demo.mll ", wantError: "ending in a space or period"},
+		{name: "file control character", entry: "build/demo.mll\n", wantError: "control characters"},
+		{name: "support terminal space", entry: "package/notes.txt ", wantError: "ending in a space or period"},
+		{name: "empty directory terminal period", entry: "package/cache.", emptyDir: true, wantError: "ending in a space or period"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			entryPath := filepath.Join(dir, filepath.FromSlash(test.entry))
+			if test.emptyDir {
+				if err := os.MkdirAll(entryPath, 0o755); err != nil {
+					t.Fatalf("create artifact directory: %v", err)
+				}
+			} else {
+				mustWriteFile(t, entryPath, "artifact\n")
+			}
+			payloadSource := test.entry
+			if strings.HasPrefix(test.entry, "package/") {
+				payloadSource = "package"
+			}
+			host := mayaHostConfig{TrustedPluginArtifactsRoot: "C:/maya-stall/trusted-plugin-artifacts"}
+			payload := []manifestPayload{{Kind: "pluginArtifacts", Source: payloadSource}}
+
+			_, err := trustedPluginAllowlistRequiredPaths(dir, host, payload)
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("required allowlist paths error = %v, want %q", err, test.wantError)
+			}
+		})
+	}
+}
+
 func TestRunTrustedPluginAllowlistChecksAllHostMayaVersionsWhenScenarioUnpinned(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "build", "demo.mll"), "fake plugin artifact\n")

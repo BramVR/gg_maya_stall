@@ -329,15 +329,15 @@ func trustedPluginAllowlistRequiredPaths(repoDir string, host mayaHostConfig, pa
 			return nil, fmt.Errorf("inspect Plugin Artifact %s: %w", item.Source, err)
 		}
 	}
-	for _, destination := range compactTrustedPluginAllowlistPaths(validationPaths) {
+	for _, destination := range validationPaths {
+		if err := rejectSFTPBatchUnsafePath(destination); err != nil {
+			return nil, fmt.Errorf("inspect trusted Plugin Artifact destination %q: %w", destination, err)
+		}
 		if hasWin32TrimmedPathComponent(destination) {
 			return nil, fmt.Errorf("inspect trusted Plugin Artifact destination %q: Windows path components ending in a space or period are not allowed", destination)
 		}
 		if hasInvalidWin32PathComponent(destination) {
 			return nil, fmt.Errorf("inspect trusted Plugin Artifact destination %q: invalid Windows path component", destination)
-		}
-		if err := rejectSFTPBatchUnsafePath(destination); err != nil {
-			return nil, fmt.Errorf("inspect trusted Plugin Artifact destination %q: %w", destination, err)
 		}
 	}
 	return compactTrustedPluginAllowlistPaths(required), nil

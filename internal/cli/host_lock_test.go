@@ -76,6 +76,41 @@ func TestHostLockContentionSmokeHeartbeatPrecedesLeaseExpiry(t *testing.T) {
 	}
 }
 
+func TestRetryRemoteHostLockTimeout(t *testing.T) {
+	oldDelay := remoteHostLockRetryDelay
+	remoteHostLockRetryDelay = 0
+	t.Cleanup(func() { remoteHostLockRetryDelay = oldDelay })
+	calls := 0
+	result, err := retryRemoteHostLockTimeout(func() (remoteHostLockResult, error) {
+		calls++
+		if calls == 1 {
+			return remoteHostLockResult{}, errors.New("ssh command timed out after 30s")
+		}
+		return remoteHostLockResult{State: "unlocked"}, nil
+	})
+	if err != nil || result.State != "unlocked" || calls != 2 {
+		t.Fatalf("retry result = %+v, calls=%d, err=%v", result, calls, err)
+	}
+
+	calls = 0
+	_, err = retryRemoteHostLockTimeout(func() (remoteHostLockResult, error) {
+		calls++
+		return remoteHostLockResult{}, errors.New("permission denied")
+	})
+	if err == nil || calls != 1 {
+		t.Fatalf("non-timeout retry calls=%d err=%v", calls, err)
+	}
+}
+
+func TestRemoteHostLockReplaceRetryAcceptsAlreadyUpdatedContent(t *testing.T) {
+	script := remoteHostLockReplaceScript("C:/maya-stall/state/locks/host.lock", "old-owner", "new-owner")
+	alreadyUpdated := strings.Index(script, "$current -ceq $content")
+	ownershipChanged := strings.LastIndex(script, "$current -cne $expected")
+	if alreadyUpdated < 0 || ownershipChanged < 0 || alreadyUpdated > ownershipChanged {
+		t.Fatalf("replace script does not accept intended content before ownership mismatch:\n%s", script)
+	}
+}
+
 func TestSessiondStatusMustExplicitlyProveEveryProcessInactive(t *testing.T) {
 	stopped := sessiondStatusResult{HasState: true, DerivedStatus: "stopped", ProcessAlive: map[string]bool{"daemon": false, "maya": false, "mcp": false}}
 	stopped.State.Status = "stopped"

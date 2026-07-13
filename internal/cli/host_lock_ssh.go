@@ -72,6 +72,9 @@ func (result remoteHostLockResult) owner() hostLockOwner {
 }
 
 const maxRemoteHostLockReclaimAttempts = 2
+const maxRemoteHostLockTimeoutAttempts = 2
+
+var remoteHostLockRetryDelay = 250 * time.Millisecond
 
 func acquireRemoteHostLock(host mayaHostConfig, content string) (*hostSideLock, bool, error) {
 	lockPath, err := remoteHostLockPath(host)
@@ -192,21 +195,27 @@ func replaceRemoteHostLockOwner(host mayaHostConfig, expected string, content st
 	if err != nil {
 		return err
 	}
-	result, err := runRemoteHostLockScript(host, remoteHostLockReplaceScript(lockPath, expected, content))
-	if err != nil {
-		state, stateErr := readRemoteHostLockState(host, lockPath)
-		if stateErr == nil && state.Raw == content {
-			return nil
+	for attempt := 0; ; attempt++ {
+		result, err := runRemoteHostLockScript(host, remoteHostLockReplaceScript(lockPath, expected, content))
+		if err != nil {
+			state, stateErr := readRemoteHostLockState(host, lockPath)
+			if stateErr == nil && state.Raw == content {
+				return nil
+			}
+			if stateErr == nil && (state.State == "unlocked" || (state.ContentRead && state.Raw != expected)) {
+				return fmt.Errorf("%w on Maya Host", errHostLockOwnershipChanged)
+			}
+			if attempt+1 < maxRemoteHostLockTimeoutAttempts && isRemoteHostLockTimeout(err) {
+				time.Sleep(remoteHostLockRetryDelay)
+				continue
+			}
+			return errors.Join(err, stateErr)
 		}
-		if stateErr == nil && (state.State == "unlocked" || (state.ContentRead && state.Raw != expected)) {
-			return fmt.Errorf("%w on Maya Host", errHostLockOwnershipChanged)
+		if result.Error != "" {
+			return remoteHostLockError(result.Error)
 		}
-		return errors.Join(err, stateErr)
+		return nil
 	}
-	if result.Error != "" {
-		return remoteHostLockError(result.Error)
-	}
-	return nil
 }
 
 func removeRemoteHostLock(host mayaHostConfig, expected string) error {
@@ -267,7 +276,19 @@ func removeRemoteHostLockForRun(host mayaHostConfig, runID string) error {
 }
 
 func readRemoteHostLockState(host mayaHostConfig, lockPath string) (remoteHostLockResult, error) {
-	return runRemoteHostLockScript(host, remoteHostLockStateScript(lockPath))
+	return retryRemoteHostLockTimeout(func() (remoteHostLockResult, error) {
+		return runRemoteHostLockScript(host, remoteHostLockStateScript(lockPath))
+	})
+}
+
+func retryRemoteHostLockTimeout(action func() (remoteHostLockResult, error)) (remoteHostLockResult, error) {
+	for attempt := 0; ; attempt++ {
+		result, err := action()
+		if err == nil || !isRemoteHostLockTimeout(err) || attempt+1 >= maxRemoteHostLockTimeoutAttempts {
+			return result, err
+		}
+		time.Sleep(remoteHostLockRetryDelay)
+	}
 }
 
 func verifyRemoteHostLockForRun(host mayaHostConfig, runID string) error {
@@ -275,7 +296,7 @@ func verifyRemoteHostLockForRun(host mayaHostConfig, runID string) error {
 	if err != nil {
 		return err
 	}
-	result, err := runRemoteHostLockScript(host, remoteHostLockStateScript(lockPath))
+	result, err := readRemoteHostLockState(host, lockPath)
 	if err != nil {
 		return err
 	}
@@ -293,7 +314,7 @@ func verifyKeptRemoteHostLockForRun(host mayaHostConfig, runID string) error {
 	if err != nil {
 		return err
 	}
-	result, err := runRemoteHostLockScript(host, remoteHostLockStateScript(lockPath))
+	result, err := readRemoteHostLockState(host, lockPath)
 	if err != nil {
 		return err
 	}
@@ -528,7 +549,9 @@ $content = %s
 %s
 $result = Invoke-WithLockMutex $lockPath {
   if (!(Test-Path -LiteralPath $lockPath)) { return @{error='Host Lock missing on Maya Host'} }
-  if ([string](Get-Content -LiteralPath $lockPath -Raw -ErrorAction Stop) -cne $expected) { return @{error='Host Lock ownership changed on Maya Host'} }
+  $current = [string](Get-Content -LiteralPath $lockPath -Raw -ErrorAction Stop)
+  if ($current -ceq $content) { return @{state='updated'} }
+  if ($current -cne $expected) { return @{error='Host Lock ownership changed on Maya Host'} }
   Replace-LockFile $lockPath $content
   return @{state='updated'}
 }

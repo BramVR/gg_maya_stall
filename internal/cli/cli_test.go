@@ -1758,6 +1758,31 @@ func TestDoctorRepairTrustedPluginAllowlistRequiresMayaStopped(t *testing.T) {
 	}
 }
 
+func TestDoctorRepairTrustedPluginAllowlistStopsAfterScenarioValidationFailure(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	configPath := filepath.Join(dir, ".maya-stall.yaml")
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config fixture: %v", err)
+	}
+	mustWriteFile(t, configPath, strings.Replace(string(configBytes), "build/demo.mll", "build/missing-demo.mll", 1))
+	sshLog := filepath.Join(dir, "ssh.log")
+	sshPath := writeSequencedFakeSSHCommand(t, dir, sshLog, nil)
+	hostConfigPath := writeTrustedPluginHostConfig(t, dir, sshPath, "")
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"doctor", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "alpha", "--scenario", "smoke", "--repair-trusted-plugin-allowlist"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("doctor exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "scenario-inputs: fail") {
+		t.Fatalf("doctor output missing scenario validation failure:\n%s", stdout.String())
+	}
+	if _, err := os.Stat(sshLog); !os.IsNotExist(err) {
+		t.Fatalf("TrustCenter repair touched the host after Scenario validation failed, stat err = %v", err)
+	}
+}
+
 func TestDoctorRepairTrustedPluginAllowlistSkipsLiveBrokerProbes(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	useFakeFFmpegLookPath(t, dir)
@@ -3904,6 +3929,27 @@ func TestTrustedPluginArtifactsRootRejectsRelativeWindowsPaths(t *testing.T) {
 
 			err := validateTrustedPluginArtifactsRoot(host)
 			if err == nil || !strings.Contains(err.Error(), "must be an absolute Windows path") {
+				t.Fatalf("validate trusted Plugin Artifact root %q error = %v", root, err)
+			}
+		})
+	}
+}
+
+func TestTrustedPluginArtifactsRootRejectsTraversalAboveWindowsVolume(t *testing.T) {
+	for _, root := range []string{
+		"C:/plugins/../../..",
+		"C:/../../maya-stall/runs/trusted",
+		"//server/share/../../plugins",
+		"//server/share/plugins/../../../other",
+	} {
+		t.Run(root, func(t *testing.T) {
+			host := mayaHostConfig{
+				WorkRoot:                   "C:/maya-stall",
+				TrustedPluginArtifactsRoot: root,
+			}
+
+			err := validateTrustedPluginArtifactsRoot(host)
+			if err == nil || !strings.Contains(err.Error(), "must not traverse above its Windows volume root") {
 				t.Fatalf("validate trusted Plugin Artifact root %q error = %v", root, err)
 			}
 		})

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -328,18 +327,28 @@ func validateTrustedPluginArtifactsRoot(host mayaHostConfig) error {
 	if err := rejectSFTPBatchUnsafePath(root); err != nil {
 		return fmt.Errorf("trustedPluginArtifactsRoot %w", err)
 	}
-	workRoot := cleanRemotePathForComparison(host.WorkRoot)
-	trustedRoot := cleanRemotePathForComparison(root)
-	if trustedRoot == "" || trustedRoot == "/" || isWindowsDriveRoot(trustedRoot) || isUNCShareRoot(root) {
+	normalizedRoot := strings.TrimSpace(strings.ReplaceAll(root, `\`, "/"))
+	if normalizedRoot == "." || strings.Trim(normalizedRoot, "/") == "" {
 		return fmt.Errorf("trustedPluginArtifactsRoot must resolve to a non-root directory")
 	}
-	if !isAbsoluteWindowsPath(root) {
+	trustedRoot, trustedVolume, absolute, traversesRoot := canonicalWindowsPathForComparison(root)
+	if traversesRoot {
+		return fmt.Errorf("trustedPluginArtifactsRoot must not traverse above its Windows volume root")
+	}
+	if !absolute {
 		return fmt.Errorf("trustedPluginArtifactsRoot must be an absolute Windows path")
 	}
-	if workRoot == "" {
+	if trustedRoot == trustedVolume {
+		return fmt.Errorf("trustedPluginArtifactsRoot must resolve to a non-root directory")
+	}
+	if strings.TrimSpace(host.WorkRoot) == "" {
 		return nil
 	}
-	runsRoot := cleanRemotePathForComparison(remoteJoin(workRoot, "runs"))
+	workRoot, _, workRootAbsolute, workRootTraversesRoot := canonicalWindowsPathForComparison(host.WorkRoot)
+	if workRootTraversesRoot || !workRootAbsolute {
+		return fmt.Errorf("workRoot must be an absolute Windows path without above-root traversal when trustedPluginArtifactsRoot is configured")
+	}
+	runsRoot := remoteJoin(workRoot, "runs")
 	if trustedRoot == workRoot || trustedRoot == runsRoot || strings.HasPrefix(trustedRoot, runsRoot+"/") {
 		return fmt.Errorf("trustedPluginArtifactsRoot must be outside workRoot/runs and separate from workRoot")
 	}
@@ -349,39 +358,46 @@ func validateTrustedPluginArtifactsRoot(host mayaHostConfig) error {
 	return nil
 }
 
-func isWindowsDriveRoot(path string) bool {
-	return len(path) == 2 && path[1] == ':' && path[0] >= 'a' && path[0] <= 'z'
-}
-
-func isAbsoluteWindowsPath(value string) bool {
+func canonicalWindowsPathForComparison(value string) (string, string, bool, bool) {
 	value = windowsPathWithoutDevicePrefix(value)
+	var volume string
+	var parts []string
 	if strings.HasPrefix(value, "//") {
-		parts := strings.FieldsFunc(strings.Trim(value, "/"), func(r rune) bool { return r == '/' })
-		return len(parts) >= 2
+		uncParts := strings.Split(strings.TrimLeft(value, "/"), "/")
+		if len(uncParts) < 2 || uncParts[0] == "" || uncParts[1] == "" {
+			return "", "", false, false
+		}
+		if uncParts[0] == "." || uncParts[0] == ".." || uncParts[1] == "." || uncParts[1] == ".." {
+			return "", "", true, true
+		}
+		volume = "//" + strings.ToLower(uncParts[0]) + "/" + strings.ToLower(uncParts[1])
+		parts = uncParts[2:]
+	} else {
+		if len(value) < 3 || value[1] != ':' || value[2] != '/' || !isASCIIAlpha(value[0]) {
+			return "", "", false, false
+		}
+		volume = strings.ToLower(value[:2])
+		parts = strings.Split(value[3:], "/")
 	}
-	if len(value) < 3 || value[1] != ':' || value[2] != '/' {
-		return false
+	cleanParts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(cleanParts) == 0 {
+				return "", volume, true, true
+			}
+			cleanParts = cleanParts[:len(cleanParts)-1]
+		default:
+			cleanParts = append(cleanParts, strings.ToLower(part))
+		}
 	}
-	drive := value[0]
-	return drive >= 'a' && drive <= 'z' || drive >= 'A' && drive <= 'Z'
-}
-
-func isUNCShareRoot(value string) bool {
-	value = windowsPathWithoutDevicePrefix(value)
-	if !strings.HasPrefix(value, "//") {
-		return false
+	clean := volume
+	if len(cleanParts) > 0 {
+		clean += "/" + strings.Join(cleanParts, "/")
 	}
-	value = path.Clean("/" + strings.TrimLeft(value, "/"))
-	parts := strings.FieldsFunc(strings.Trim(value, "/"), func(r rune) bool { return r == '/' })
-	return len(parts) <= 2
-}
-
-func cleanRemotePathForComparison(value string) string {
-	clean := path.Clean(windowsPathWithoutDevicePrefix(value))
-	if clean == "." {
-		return ""
-	}
-	return strings.TrimRight(strings.ToLower(clean), "/")
+	return clean, volume, true, false
 }
 
 func windowsPathWithoutDevicePrefix(value string) string {

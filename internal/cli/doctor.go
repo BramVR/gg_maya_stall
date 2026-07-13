@@ -56,9 +56,11 @@ func runDoctor(repoDir string, options doctorOptions) hostHealthReport {
 	add(okCheck("local-config", repoRelativePath(repoDir, configPath)))
 
 	var scenario scenarioContract
+	scenarioInputsValid := true
 	if options.ScenarioName != "" {
 		selected, err := resolveScenarioContract(config, options.ScenarioName)
 		if err != nil {
+			scenarioInputsValid = false
 			var userErr *usageError
 			if errors.As(err, &userErr) {
 				add(failedCheck("scenario-inputs", err.Error(), "Choose a configured Scenario or add it to the repo config. See docs/setup/windows-maya-host.md#scenario-inputs."))
@@ -66,11 +68,15 @@ func runDoctor(repoDir string, options doctorOptions) hostHealthReport {
 				add(failedCheck("scenario-inputs", err.Error(), "Fix the Scenario payload paths, expectedOutputs, and Validators in repo config. See docs/setup/windows-maya-host.md#scenario-inputs."))
 			}
 		} else if err := validateScenarioInputs(repoDir, selected); err != nil {
+			scenarioInputsValid = false
 			add(failedCheck("scenario-inputs", err.Error(), "Fix the Scenario payload paths, expectedOutputs, and Validators in repo config. See docs/setup/windows-maya-host.md#scenario-inputs."))
 		} else {
 			scenario = selected
 			add(okCheck("scenario-inputs", options.ScenarioName))
 		}
+	}
+	if options.RepairTrustedPluginAllowlist && !scenarioInputsValid {
+		return report
 	}
 
 	hostConfig, err := loadUserHostConfig(options.HostConfig)

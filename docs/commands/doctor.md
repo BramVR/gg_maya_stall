@@ -83,7 +83,9 @@ Maya before repair, make sure the target Maya version has been launched at
 least once so its preferences file exists, then restart it after repair so the
 durable preference is read by a clean interactive session. Keep `--scenario`
 when repairing a nested-path failure; a root-only doctor invocation cannot
-discover the Scenario's declared Plugin Artifact destinations.
+discover the Scenario's declared Plugin Artifact destinations. If that
+Scenario fails local validation, repair stops before contacting or mutating the
+Maya Host.
 
 ## When To Run
 

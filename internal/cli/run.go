@@ -282,6 +282,23 @@ func createCleanRunDirs(context runContext) error {
 	return nil
 }
 
+func snapshotRunPayload(context runContext, payload []manifestPayload) error {
+	for _, item := range payload {
+		if err := rejectSFTPRepoPath(item.Source); err != nil {
+			return fmt.Errorf("snapshot %s payload: %w", item.Kind, err)
+		}
+		if err := validatePayloadPathForTransport(context.RepoDir, item.Source); err != nil {
+			return fmt.Errorf("snapshot %s payload %s: %w", item.Kind, item.Source, err)
+		}
+		source := filepath.Join(context.RepoDir, item.Source)
+		destination := context.RunWorkspace.LocalPayloadPath(item)
+		if err := copyPath(source, destination); err != nil {
+			return fmt.Errorf("snapshot %s payload %s: %w", item.Kind, item.Source, err)
+		}
+	}
+	return nil
+}
+
 func ensureOutputPathHasNoSymlinkParent(repoDir string, relativePath string) error {
 	current := repoDir
 	for _, part := range strings.Split(filepath.ToSlash(relativePath), "/") {
@@ -1028,17 +1045,7 @@ func decodeJSONUseNumber(content []byte, value any) error {
 type fakeHost struct{}
 
 func (fakeHost) StagePayload(context runContext, payload []manifestPayload) error {
-	for _, item := range payload {
-		if err := ensurePayloadPathHasNoSymlinkAncestor(context.RepoDir, item.Source); err != nil {
-			return fmt.Errorf("stage %s payload %s: %w", item.Kind, item.Source, err)
-		}
-		source := filepath.Join(context.RepoDir, item.Source)
-		destination := context.RunWorkspace.LocalPayloadPath(item)
-		if err := copyPath(source, destination); err != nil {
-			return fmt.Errorf("stage %s payload %s: %w", item.Kind, item.Source, err)
-		}
-	}
-	return nil
+	return validatePayloadSnapshotForStage(context, payload)
 }
 
 func ensurePayloadPathHasNoSymlinkAncestor(repoDir string, relativePath string) error {

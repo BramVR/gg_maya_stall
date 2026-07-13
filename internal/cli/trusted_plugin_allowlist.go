@@ -95,11 +95,11 @@ func trustedPluginAllowlistDoctorLayer(repoDir string, host mayaHostConfig, scen
 	return withSource(okCheck(trustedPluginAllowlistLayerID, detail), "maya-prefs")
 }
 
-func ensureTrustedPluginArtifactsAllowlistedForRun(repoDir string, host mayaHostConfig, scenario scenarioContract) error {
+func ensureTrustedPluginArtifactSnapshotAllowlistedForRun(context runContext, host mayaHostConfig, scenario scenarioContract) error {
 	if trustedPluginArtifactsRoot(host) == "" || !host.usesRealSSH() || !manifestHasPluginArtifacts(scenario.Payload) {
 		return nil
 	}
-	requiredPaths, err := trustedPluginAllowlistRequiredPaths(repoDir, host, scenario.Payload)
+	requiredPaths, err := trustedPluginAllowlistRequiredPathsFromSnapshot(context, host, scenario.Payload)
 	if err != nil {
 		return fmt.Errorf("trusted Plugin Artifact allowlist preflight failed: %w", err)
 	}
@@ -360,6 +360,22 @@ func trustedPluginAllowlistRequiredPaths(repoDir string, host mayaHostConfig, pa
 		}
 	}
 	return compactTrustedPluginAllowlistPaths(required), nil
+}
+
+func trustedPluginAllowlistRequiredPathsFromSnapshot(context runContext, host mayaHostConfig, payload []manifestPayload) ([]string, error) {
+	var requiredPaths []string
+	for _, item := range payload {
+		if item.Kind != "pluginArtifacts" {
+			continue
+		}
+		snapshotRoot := filepath.Join(context.RunWorkspace.LocalPayloadRoot(), item.Kind)
+		itemPaths, err := trustedPluginAllowlistRequiredPaths(snapshotRoot, host, []manifestPayload{item})
+		if err != nil {
+			return nil, err
+		}
+		requiredPaths = append(requiredPaths, itemPaths...)
+	}
+	return compactTrustedPluginAllowlistPaths(requiredPaths), nil
 }
 
 func trustedPluginValidationDisplayPath(root string, destination string) string {

@@ -132,10 +132,6 @@ func (run *freshRunLifecycle) setup() error {
 	if err := rejectUnsupportedEvidenceConfig(run.runtime.Broker, scenario.Config); err != nil {
 		return err
 	}
-	if err := ensureTrustedPluginArtifactsAllowlistedForRun(run.repoDir, host.Config, scenario); err != nil {
-		return err
-	}
-
 	runID := run.runtime.Now().UTC().Format("20060102T150405.000000000Z")
 	workspace, err := newRunWorkspace(run.repoDir, runID, host.Config.WorkRoot, scenario.ScenarioResultPath)
 	if err != nil {
@@ -158,6 +154,14 @@ func (run *freshRunLifecycle) setup() error {
 		run.context.Environment[trustedPluginArtifactsRootEnvVar] = root
 	}
 	if err := createCleanRunDirs(run.context); err != nil {
+		return err
+	}
+	// Freeze the payload before TrustCenter preflight so the checked paths are
+	// the exact bytes later staged to the Maya Host.
+	if err := snapshotRunPayload(run.context, scenario.Payload); err != nil {
+		return err
+	}
+	if err := ensureTrustedPluginArtifactSnapshotAllowlistedForRun(run.context, host.Config, scenario); err != nil {
 		return err
 	}
 

@@ -228,7 +228,7 @@ func (host realSSHHost) StagePayload(context runContext, payload []manifestPaylo
 	if err := validateRealSSHConfig(host.host); err != nil {
 		return err
 	}
-	if err := validatePayloadForStage(context, payload); err != nil {
+	if err := validatePayloadSnapshotForStage(context, payload); err != nil {
 		return err
 	}
 	if err := host.prepareTrustedPluginArtifactDestinations(payload); err != nil {
@@ -238,7 +238,7 @@ func (host realSSHHost) StagePayload(context runContext, payload []manifestPaylo
 	batch.mkdirAll(context.RunWorkspace.RemoteRunRoot())
 	batch.mkdirAll(context.RunWorkspace.RemoteWorkspace())
 	for _, item := range payload {
-		source := filepath.Join(context.RepoDir, item.Source)
+		source := context.RunWorkspace.LocalPayloadPath(item)
 		destination := context.RunWorkspace.RemotePayloadPath(item)
 		batch.mkdirAll(remoteDir(destination))
 		batch.put(source, destination)
@@ -253,12 +253,13 @@ func (host realSSHHost) StagePayload(context runContext, payload []manifestPaylo
 	return nil
 }
 
-func validatePayloadForStage(context runContext, payload []manifestPayload) error {
+func validatePayloadSnapshotForStage(context runContext, payload []manifestPayload) error {
 	for _, item := range payload {
 		if err := rejectSFTPRepoPath(item.Source); err != nil {
 			return fmt.Errorf("stage %s payload: %w", item.Kind, err)
 		}
-		if err := validatePayloadPathForTransport(context.RepoDir, item.Source); err != nil {
+		snapshotRoot := filepath.Join(context.RunWorkspace.LocalPayloadRoot(), item.Kind)
+		if err := validatePayloadPathForTransport(snapshotRoot, item.Source); err != nil {
 			return fmt.Errorf("stage %s payload %s: %w", item.Kind, item.Source, err)
 		}
 	}

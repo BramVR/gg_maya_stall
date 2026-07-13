@@ -2075,6 +2075,48 @@ func TestTrustedPluginAllowlistRequiredPathsIncludeNestedPluginParents(t *testin
 	}
 }
 
+func TestTrustedPluginAllowlistUsesFrozenRunPayloadSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "package", "plugin.py"), "# original plug-in\n")
+	payload := []manifestPayload{{Kind: "pluginArtifacts", Source: "package", Staged: filepath.Join("payload", "pluginArtifacts", "package")}}
+	workspace, err := newRunWorkspace(dir, "run-1", "C:/maya-stall", "scenario-result.json")
+	if err != nil {
+		t.Fatalf("create run workspace: %v", err)
+	}
+	context := runContext{
+		RepoDir:      dir,
+		RunWorkspace: workspace,
+		StateDir:     workspace.StateDir(),
+		EvidenceDir:  workspace.EvidenceDir(),
+		Workspace:    workspace.LocalWorkspace(),
+		EventsPath:   workspace.EventsPath(),
+		LogPath:      workspace.LogPath(),
+	}
+	if err := createCleanRunDirs(context); err != nil {
+		t.Fatalf("create run dirs: %v", err)
+	}
+	if err := snapshotRunPayload(context, payload); err != nil {
+		t.Fatalf("snapshot run payload: %v", err)
+	}
+	mustWriteFile(t, filepath.Join(dir, "package", "late", "plugin.py"), "# late plug-in\n")
+
+	host := mayaHostConfig{TrustedPluginArtifactsRoot: "C:/maya-stall/trusted-plugin-artifacts"}
+	paths, err := trustedPluginAllowlistRequiredPathsFromSnapshot(context, host, payload)
+	if err != nil {
+		t.Fatalf("inspect snapshot allowlist paths: %v", err)
+	}
+	want := []string{
+		"C:/maya-stall/trusted-plugin-artifacts",
+		"C:/maya-stall/trusted-plugin-artifacts/package",
+	}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("snapshot allowlist paths = %#v, want %#v", paths, want)
+	}
+	if _, err := os.Stat(filepath.Join(workspace.LocalPayloadPath(payload[0]), "late", "plugin.py")); !os.IsNotExist(err) {
+		t.Fatalf("payload snapshot changed after repo mutation: %v", err)
+	}
+}
+
 func TestTrustedPluginAllowlistRequiredPathsRejectTransportControlCharacters(t *testing.T) {
 	for index, nestedDir := range []string{"scripts\nbad", "bad\n", "\nbad"} {
 		t.Run(fmt.Sprintf("case-%d", index), func(t *testing.T) {
@@ -2242,9 +2284,29 @@ optionVar -cat "Security"
 		TrustedPluginArtifactsRoot: "C:/maya-stall/trusted-plugin-artifacts",
 		MayaVersions:               []string{"2024", "2025"},
 	}
-	scenario := scenarioContract{Config: scenarioConfig{}, Payload: []manifestPayload{{Kind: "pluginArtifacts", Source: "build/demo.mll"}}}
+	payload := []manifestPayload{{Kind: "pluginArtifacts", Source: "build/demo.mll", Staged: filepath.Join("payload", "pluginArtifacts", "build", "demo.mll")}}
+	scenario := scenarioContract{Config: scenarioConfig{}, Payload: payload}
+	workspace, err := newRunWorkspace(dir, "run-1", "C:/maya-stall", "scenario-result.json")
+	if err != nil {
+		t.Fatalf("create run workspace: %v", err)
+	}
+	context := runContext{
+		RepoDir:      dir,
+		RunWorkspace: workspace,
+		StateDir:     workspace.StateDir(),
+		EvidenceDir:  workspace.EvidenceDir(),
+		Workspace:    workspace.LocalWorkspace(),
+		EventsPath:   workspace.EventsPath(),
+		LogPath:      workspace.LogPath(),
+	}
+	if err := createCleanRunDirs(context); err != nil {
+		t.Fatalf("create run dirs: %v", err)
+	}
+	if err := snapshotRunPayload(context, payload); err != nil {
+		t.Fatalf("snapshot run payload: %v", err)
+	}
 
-	if err := ensureTrustedPluginArtifactsAllowlistedForRun(dir, host, scenario); err != nil {
+	if err := ensureTrustedPluginArtifactSnapshotAllowlistedForRun(context, host, scenario); err != nil {
 		t.Fatalf("run allowlist preflight error: %v", err)
 	}
 	countBytes, err := os.ReadFile(filepath.Join(dir, "fake-ssh-sequenced.count"))

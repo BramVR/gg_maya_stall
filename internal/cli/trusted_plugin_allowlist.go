@@ -335,17 +335,31 @@ func trustedPluginAllowlistRequiredPaths(repoDir string, host mayaHostConfig, pa
 		}
 	}
 	for _, destination := range validationPaths {
+		displayPath := trustedPluginValidationDisplayPath(root, destination)
 		if err := rejectSFTPBatchUnsafePath(destination); err != nil {
-			return nil, fmt.Errorf("inspect trusted Plugin Artifact destination %q: %w", destination, err)
+			return nil, fmt.Errorf("inspect trusted Plugin Artifact path %q: %w", displayPath, err)
 		}
 		if hasWin32TrimmedPathComponent(destination) {
-			return nil, fmt.Errorf("inspect trusted Plugin Artifact destination %q: Windows path components ending in a space or period are not allowed", destination)
+			return nil, fmt.Errorf("inspect trusted Plugin Artifact path %q: Windows path components ending in a space or period are not allowed", displayPath)
 		}
 		if hasInvalidWin32PathComponent(destination) {
-			return nil, fmt.Errorf("inspect trusted Plugin Artifact destination %q: invalid Windows path component", destination)
+			return nil, fmt.Errorf("inspect trusted Plugin Artifact path %q: invalid Windows path component", displayPath)
 		}
 	}
 	return compactTrustedPluginAllowlistPaths(required), nil
+}
+
+func trustedPluginValidationDisplayPath(root string, destination string) string {
+	normalizedRoot := strings.TrimRight(strings.ReplaceAll(root, `\`, "/"), "/")
+	normalizedDestination := strings.ReplaceAll(destination, `\`, "/")
+	if strings.EqualFold(normalizedDestination, normalizedRoot) {
+		return "configured root"
+	}
+	prefix := normalizedRoot + "/"
+	if len(normalizedDestination) >= len(prefix) && strings.EqualFold(normalizedDestination[:len(prefix)], prefix) {
+		return normalizedDestination[len(prefix):]
+	}
+	return "configured destination"
 }
 
 func isMayaPluginFile(localPath string) (bool, error) {

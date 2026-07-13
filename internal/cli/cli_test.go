@@ -2117,7 +2117,7 @@ func TestTrustedPluginAllowlistRequiredPathsRejectWin32Aliases(t *testing.T) {
 }
 
 func TestTrustedPluginAllowlistRequiredPathsRejectInvalidWin32Components(t *testing.T) {
-	for _, nestedDir := range []string{"scripts?", "bad:name", "CON", "aux.txt"} {
+	for _, nestedDir := range []string{"scripts?", "bad:name", "CON", "aux.txt", "COM¹", "lpt³.txt"} {
 		t.Run(nestedDir, func(t *testing.T) {
 			dir := t.TempDir()
 			mustWriteFile(t, filepath.Join(dir, "package", nestedDir, "plugin.py"), "# Python payload\n")
@@ -2129,6 +2129,25 @@ func TestTrustedPluginAllowlistRequiredPathsRejectInvalidWin32Components(t *test
 				t.Fatalf("required allowlist paths error = %v, want invalid Win32 component rejection", err)
 			}
 		})
+	}
+}
+
+func TestTrustedPluginAllowlistValidationErrorsRedactConfiguredRoot(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "package", "COM¹", "plugin.py"), "# Python payload\n")
+	root := "D:/private-live-host/trusted-plugin-artifacts"
+	host := mayaHostConfig{TrustedPluginArtifactsRoot: root}
+	payload := []manifestPayload{{Kind: "pluginArtifacts", Source: "package"}}
+
+	_, err := trustedPluginAllowlistRequiredPaths(dir, host, payload)
+	if err == nil {
+		t.Fatal("required allowlist paths accepted invalid Win32 component")
+	}
+	if strings.Contains(err.Error(), root) {
+		t.Fatalf("validation error disclosed configured trusted root: %v", err)
+	}
+	if !strings.Contains(err.Error(), "package/COM¹") {
+		t.Fatalf("validation error missing repo-relative artifact path: %v", err)
 	}
 }
 
@@ -4320,8 +4339,10 @@ func TestTrustedPluginArtifactsRootRejectsInvalidWin32Components(t *testing.T) {
 	for _, root := range []string{
 		"C:/trusted/CON",
 		"C:/trusted/bad?name",
+		"C:/trusted/COM¹",
 		"//server/share/trusted/aux.txt",
 		"//server/share/trusted/bad:name",
+		"//server/share/trusted/lpt².log",
 	} {
 		t.Run(root, func(t *testing.T) {
 			host := mayaHostConfig{

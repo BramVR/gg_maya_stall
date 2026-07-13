@@ -447,11 +447,20 @@ func hasInvalidWin32PathComponent(value string) bool {
 		case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$":
 			return true
 		}
-		if len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '1' && base[3] <= '9' {
+		if hasReservedWin32PortDeviceName(base) {
 			return true
 		}
 	}
 	return false
+}
+
+func hasReservedWin32PortDeviceName(base string) bool {
+	if !strings.HasPrefix(base, "COM") && !strings.HasPrefix(base, "LPT") {
+		return false
+	}
+	suffix := base[3:]
+	return (len(suffix) == 1 && suffix[0] >= '1' && suffix[0] <= '9') ||
+		suffix == "¹" || suffix == "²" || suffix == "³"
 }
 
 func windowsPathWithoutDevicePrefix(value string) string {

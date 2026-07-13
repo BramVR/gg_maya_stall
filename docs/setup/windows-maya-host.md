@@ -207,7 +207,9 @@ Host-admin steps:
 - Avoid Win32-invalid or aliased components, including reserved device names,
   forbidden filename characters, and names ending in a period or space. Maya
   Stall rejects them in `workRoot`, `trustedPluginArtifactsRoot`, and derived
-  Plugin Artifact destinations before repair or host access.
+  Plugin Artifact destinations before any TrustCenter repair host access and
+  before Run Payload staging. Ordinary non-repair doctor checks may perform
+  SSH and work-root health probes before reporting the local path error.
 - Declare the Maya version in host config `mayaVersions` or Scenario
   `mayaVersion`; Maya Stall uses that version to locate the durable TrustCenter
   preferences directory.

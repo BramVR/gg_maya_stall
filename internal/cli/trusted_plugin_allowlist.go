@@ -176,15 +176,20 @@ func validateMayaPrefsVersion(version string) error {
 func trustedPluginPrefs(host mayaHostConfig, version string, requiredPaths []string, repair bool) (trustedPluginPrefsProbe, error) {
 	script := trustedPluginPrefsReadScript(version)
 	input := ""
+	remoteCommand := encodedPowerShellCommand(script)
 	if repair {
 		script = trustedPluginPrefsRepairScript(version)
-		var err error
-		input, err = trustedPluginPrefsRepairInput(requiredPaths)
+		repairInput, err := trustedPluginPrefsRepairInput(requiredPaths)
 		if err != nil {
 			return trustedPluginPrefsProbe{}, err
 		}
+		input, err = trustedPluginPrefsRepairEnvelope(script, repairInput)
+		if err != nil {
+			return trustedPluginPrefsProbe{}, err
+		}
+		remoteCommand = encodedPowerShellCommand(trustedPluginPrefsRepairBootstrapScript())
 	}
-	raw, err := runSSHCommandOutputWithInput(host, encodedPowerShellCommand(script), input, sshCommandTimeout)
+	raw, err := runSSHCommandOutputWithInput(host, remoteCommand, input, sshCommandTimeout)
 	if err != nil {
 		return trustedPluginPrefsProbe{}, err
 	}
@@ -436,8 +441,8 @@ func trustedPluginPrefsRepairScript(version string) string {
 	return fmt.Sprintf(`$ErrorActionPreference = 'Stop'
 %s
 $prefs = MayaStall-PrefsPath %s
-$requiredPathsJSON = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd()))
-$requiredPaths = @($requiredPathsJSON | ConvertFrom-Json)
+$requiredPathsJSON = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($MayaStallRequiredPathsInput))
+$requiredPaths = @($requiredPathsJSON | ConvertFrom-Json | ForEach-Object { $_ })
 function Normalize-MayaStallPath([string]$value) {
   try {
     return ([System.IO.Path]::GetFullPath(($value -replace '/','\')) -replace '\\','/').TrimEnd('/').ToLowerInvariant()
@@ -513,6 +518,29 @@ func trustedPluginPrefsRepairInput(requiredPaths []string) (string, error) {
 		return "", fmt.Errorf("encode trusted Plugin Artifact repair paths: %w", err)
 	}
 	return base64.StdEncoding.EncodeToString(data), nil
+}
+
+func trustedPluginPrefsRepairEnvelope(script string, requiredPathsInput string) (string, error) {
+	data, err := json.Marshal(struct {
+		Program       string `json:"program"`
+		RequiredPaths string `json:"requiredPaths"`
+	}{
+		Program:       base64.StdEncoding.EncodeToString([]byte(script)),
+		RequiredPaths: requiredPathsInput,
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode trusted Plugin Artifact repair program: %w", err)
+	}
+	return string(data), nil
+}
+
+func trustedPluginPrefsRepairBootstrapScript() string {
+	return `$ErrorActionPreference = 'Stop'
+$payload = [Console]::In.ReadToEnd() | ConvertFrom-Json
+$MayaStallRequiredPathsInput = [string]$payload.requiredPaths
+$program = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$payload.program))
+& ([ScriptBlock]::Create($program))
+`
 }
 
 func trustedPluginPrefsScriptPreamble() string {

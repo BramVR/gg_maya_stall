@@ -1894,11 +1894,17 @@ esac
 	if code != 0 {
 		t.Fatalf("doctor exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
-	encodedInput, err := os.ReadFile(inputPath)
+	streamedInput, err := os.ReadFile(inputPath)
 	if err != nil {
 		t.Fatalf("read repair input: %v", err)
 	}
-	inputJSON, err := base64.StdEncoding.DecodeString(string(encodedInput))
+	var envelope struct {
+		RequiredPaths string `json:"requiredPaths"`
+	}
+	if err := json.Unmarshal(streamedInput, &envelope); err != nil {
+		t.Fatalf("parse repair input envelope: %v", err)
+	}
+	inputJSON, err := base64.StdEncoding.DecodeString(envelope.RequiredPaths)
 	if err != nil {
 		t.Fatalf("decode repair input: %v", err)
 	}
@@ -2234,8 +2240,9 @@ func TestTrustedPluginPrefsRepairScriptDocumentsMutationSafety(t *testing.T) {
 	script := trustedPluginPrefsRepairScript("2025")
 	for _, want := range []string{
 		"$env:MAYA_APP_DIR",
-		"[Console]::In.ReadToEnd()",
+		"$MayaStallRequiredPathsInput",
 		"ConvertFrom-Json",
+		"ConvertFrom-Json | ForEach-Object { $_ }",
 		"[Environment]::GetFolderPath('MyDocuments')",
 		"[System.IO.Path]::GetFullPath",
 		"Copy-Item -LiteralPath $prefs",
@@ -2295,6 +2302,57 @@ func TestTrustedPluginPrefsRepairInputKeepsLargePathSetsOutOfCommandLine(t *test
 	}
 	if strings.Contains(trustedPluginPrefsRepairScript("2025"), paths[len(paths)-1]) {
 		t.Fatalf("repair command embeds a required path")
+	}
+}
+
+func TestTrustedPluginPrefsRepairStreamsPowerShellProgram(t *testing.T) {
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args.txt")
+	stdinPath := filepath.Join(dir, "stdin.txt")
+	sshPath := filepath.Join(dir, "fake-ssh-repair-stream")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s' \"$*\" > %s\ncat > %s\nprintf '%%s\\n' '%s{\"exists\":true,\"content\":\"\",\"changed\":true}'\n", shellQuote(argsPath), shellQuote(stdinPath), trustedPluginPrefsJSONPrefix)
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake SSH: %v", err)
+	}
+	host := mayaHostConfig{SSH: sshConfig{Host: "maya-win-01", Binary: sshPath}}
+	paths := []string{
+		"C:/maya-stall/trusted-plugin-artifacts",
+		"C:/maya-stall/trusted-plugin-artifacts/build/maya2025/Release/klv_push/scripts/klv_push",
+	}
+
+	if _, err := trustedPluginPrefs(host, "2025", paths, true); err != nil {
+		t.Fatalf("repair trusted plug-in prefs: %v", err)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read SSH args: %v", err)
+	}
+	if !strings.Contains(string(args), "-EncodedCommand") || strings.Contains(string(args), "Copy-Item") {
+		t.Fatalf("repair SSH args must use a short encoded bootstrap, got %q", string(args))
+	}
+	if len(args) > 2_048 {
+		t.Fatalf("repair SSH args length = %d, want <= 2048", len(args))
+	}
+	stdin, err := os.ReadFile(stdinPath)
+	if err != nil {
+		t.Fatalf("read SSH stdin: %v", err)
+	}
+	var envelope struct {
+		Program       string `json:"program"`
+		RequiredPaths string `json:"requiredPaths"`
+	}
+	if err := json.Unmarshal(stdin, &envelope); err != nil {
+		t.Fatalf("parse repair stdin envelope: %v", err)
+	}
+	program, err := base64.StdEncoding.DecodeString(envelope.Program)
+	if err != nil {
+		t.Fatalf("decode repair PowerShell program: %v", err)
+	}
+	if !strings.Contains(string(program), "Copy-Item -LiteralPath $prefs") {
+		t.Fatalf("repair PowerShell program was not streamed over stdin")
+	}
+	if strings.Contains(string(args), paths[len(paths)-1]) || strings.Contains(string(stdin), paths[len(paths)-1]) {
+		t.Fatalf("repair transport exposed a raw required path")
 	}
 }
 

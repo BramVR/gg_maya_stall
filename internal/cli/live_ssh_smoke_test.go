@@ -211,6 +211,7 @@ func TestHostLockControllerHelper(t *testing.T) {
 		t.Fatalf("parse helper lease: %v", err)
 	}
 	hostSideLockLeaseDuration = lease
+	hostSideLockHeartbeatInterval = hostLockContentionHeartbeatInterval(lease)
 	config, err := loadUserHostConfig(os.Getenv("MAYA_STALL_HOST_LOCK_HELPER_CONFIG"))
 	if err != nil {
 		t.Fatalf("load helper Host Config: %v", err)
@@ -242,11 +243,19 @@ func TestHostLockControllerHelper(t *testing.T) {
 	if action != "hold-crash" {
 		t.Fatalf("unknown helper action %q", action)
 	}
+	stopHeartbeat, _ := startHostLockHeartbeat(lock.renew)
 	if err := os.WriteFile(os.Getenv("MAYA_STALL_HOST_LOCK_HELPER_READY"), []byte("ready\n"), 0o600); err != nil {
 		t.Fatalf("write helper readiness: %v", err)
 	}
 	waitForFile(t, os.Getenv("MAYA_STALL_HOST_LOCK_HELPER_CRASH"), 2*time.Minute)
+	if err := stopHeartbeat(); err != nil {
+		t.Fatalf("renew holder Host Lock: %v", err)
+	}
 	os.Exit(0)
+}
+
+func hostLockContentionHeartbeatInterval(lease time.Duration) time.Duration {
+	return lease / 4
 }
 
 func startHostLockController(t *testing.T, options realSSHSmokeOptions, repoDir string, action string, runID string, readyPath string, crashPath string) *exec.Cmd {

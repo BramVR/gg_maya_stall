@@ -119,14 +119,13 @@ func remoteHostLockSessionInactive(host mayaHostConfig, owner remoteHostLockResu
 	if strings.TrimSpace(owner.BrokerStateDir) == "" || strings.TrimSpace(owner.BrokerPython) == "" || strings.TrimSpace(owner.BrokerRepo) == "" {
 		return false, fmt.Errorf("host lock does not identify its complete owning Session Broker configuration")
 	}
+	if !remoteHostLockBrokerConfigMatches(host, owner) {
+		return false, fmt.Errorf("host lock Session Broker configuration does not match trusted Maya Host configuration")
+	}
 	if err := validateSessionBrokerStateDir(owner.BrokerStateDir); err != nil {
 		return false, fmt.Errorf("host lock Session Broker state directory: %w", err)
 	}
-	ownerHost := host
-	ownerHost.Broker.StateDir = owner.BrokerStateDir
-	ownerHost.Broker.Python = owner.BrokerPython
-	ownerHost.Broker.Repo = owner.BrokerRepo
-	broker := ggMayaSessiondBroker{host: ownerHost}
+	broker := ggMayaSessiondBroker{host: host}
 	if err := broker.validate(); err != nil {
 		return false, err
 	}
@@ -135,6 +134,28 @@ func remoteHostLockSessionInactive(host mayaHostConfig, owner remoteHostLockResu
 		return false, err
 	}
 	return sessiondStatusProvesInactive(status), nil
+}
+
+func remoteHostLockBrokerConfigMatches(host mayaHostConfig, owner remoteHostLockResult) bool {
+	trustedRepo, trustedRepoOK := canonicalHostLockBrokerPath(host.Broker.Repo, "", false)
+	ownerRepo, ownerRepoOK := canonicalHostLockBrokerPath(owner.BrokerRepo, "", false)
+	trustedPython, trustedPythonOK := canonicalHostLockBrokerPath(host.Broker.Python, host.Broker.Repo, true)
+	ownerPython, ownerPythonOK := canonicalHostLockBrokerPath(owner.BrokerPython, owner.BrokerRepo, true)
+	trustedState, trustedStateOK := canonicalHostLockBrokerPath(host.Broker.StateDir, host.Broker.Repo, true)
+	ownerState, ownerStateOK := canonicalHostLockBrokerPath(owner.BrokerStateDir, owner.BrokerRepo, true)
+	return trustedRepoOK && ownerRepoOK && trustedPythonOK && ownerPythonOK && trustedStateOK && ownerStateOK &&
+		trustedRepo == ownerRepo && trustedPython == ownerPython && trustedState == ownerState
+}
+
+func canonicalHostLockBrokerPath(value string, repo string, allowRelative bool) (string, bool) {
+	clean, _, absolute, traversesRoot := canonicalWindowsPathForComparison(strings.TrimSpace(value))
+	if traversesRoot {
+		return "", false
+	}
+	if !absolute && allowRelative {
+		clean, _, absolute, traversesRoot = canonicalWindowsPathForComparison(remoteJoin(repo, strings.TrimSpace(value)))
+	}
+	return clean, absolute && !traversesRoot
 }
 
 func sessiondStatusProvesInactive(status sessiondStatusResult) bool {

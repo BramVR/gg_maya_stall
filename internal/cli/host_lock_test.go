@@ -27,6 +27,55 @@ func TestRemoteHostLockReclaimRequiresExpiredLeaseAndInactiveBroker(t *testing.T
 	}
 }
 
+func TestRemoteHostLockRecoveryRequiresTrustedBrokerConfiguration(t *testing.T) {
+	host := mayaHostConfig{Broker: brokerConfig{
+		StateDir: "C:/maya-stall/sessiond-ui",
+		Python:   "C:/maya-stall/python.exe",
+		Repo:     "C:/maya-stall/broker",
+	}}
+	owner := remoteHostLockResult{
+		BrokerStateDir: host.Broker.StateDir,
+		BrokerPython:   host.Broker.Python,
+		BrokerRepo:     host.Broker.Repo,
+	}
+	if !remoteHostLockBrokerConfigMatches(host, owner) {
+		t.Fatal("matching trusted broker configuration was rejected")
+	}
+	variant := owner
+	variant.BrokerStateDir = `c:\MAYA-STALL\SESSIOND-UI`
+	variant.BrokerPython = `c:\MAYA-STALL\PYTHON.EXE`
+	variant.BrokerRepo = `c:\MAYA-STALL\BROKER`
+	if !remoteHostLockBrokerConfigMatches(host, variant) {
+		t.Fatal("equivalent Windows broker paths were rejected")
+	}
+	relativeStateHost := host
+	relativeStateHost.Broker.StateDir = "sessiond-ui"
+	relativeStateOwner := owner
+	relativeStateOwner.BrokerStateDir = `c:\maya-stall\broker\sessiond-ui`
+	if !remoteHostLockBrokerConfigMatches(relativeStateHost, relativeStateOwner) {
+		t.Fatal("relative trusted broker state directory did not match its absolute owner path")
+	}
+	commandPythonHost := host
+	commandPythonHost.Broker.Python = "python"
+	commandPythonOwner := owner
+	commandPythonOwner.BrokerPython = "PYTHON"
+	if !remoteHostLockBrokerConfigMatches(commandPythonHost, commandPythonOwner) {
+		t.Fatal("trusted non-absolute broker Python command was rejected")
+	}
+	owner.BrokerPython = "C:/maya-stall/untrusted/python.exe"
+	if remoteHostLockBrokerConfigMatches(host, owner) {
+		t.Fatal("host-writable lock selected an untrusted broker executable")
+	}
+}
+
+func TestHostLockContentionSmokeHeartbeatPrecedesLeaseExpiry(t *testing.T) {
+	lease := 2 * time.Second
+	interval := hostLockContentionHeartbeatInterval(lease)
+	if interval <= 0 || interval >= lease {
+		t.Fatalf("contention heartbeat interval = %s, want within lease %s", interval, lease)
+	}
+}
+
 func TestSessiondStatusMustExplicitlyProveEveryProcessInactive(t *testing.T) {
 	stopped := sessiondStatusResult{HasState: true, DerivedStatus: "stopped", ProcessAlive: map[string]bool{"daemon": false, "maya": false, "mcp": false}}
 	stopped.State.Status = "stopped"

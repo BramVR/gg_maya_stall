@@ -174,11 +174,17 @@ func validateMayaPrefsVersion(version string) error {
 }
 
 func trustedPluginPrefs(host mayaHostConfig, version string, requiredPaths []string, repair bool) (trustedPluginPrefsProbe, error) {
-	script := trustedPluginPrefsReadScript(host, version)
+	script, err := trustedPluginPrefsReadScript(host, version)
+	if err != nil {
+		return trustedPluginPrefsProbe{}, err
+	}
 	input := ""
 	remoteCommand := encodedPowerShellCommand(script)
 	if repair {
-		script = trustedPluginPrefsRepairScript(host, version)
+		script, err = trustedPluginPrefsRepairScript(host, version)
+		if err != nil {
+			return trustedPluginPrefsProbe{}, err
+		}
 		repairInput, err := trustedPluginPrefsRepairInput(requiredPaths)
 		if err != nil {
 			return trustedPluginPrefsProbe{}, err
@@ -437,7 +443,11 @@ func compactMayaVersions(versions []string) []string {
 	return compact
 }
 
-func trustedPluginPrefsReadScript(host mayaHostConfig, version string) string {
+func trustedPluginPrefsReadScript(host mayaHostConfig, version string) (string, error) {
+	preamble, err := trustedPluginPrefsScriptPreamble(host)
+	if err != nil {
+		return "", err
+	}
 	return fmt.Sprintf(`$ErrorActionPreference = 'Stop'
 %s
 $prefs = MayaStall-PrefsPath %s
@@ -448,10 +458,14 @@ if ($exists) {
 }
 $json = [pscustomobject]@{ exists = $exists; content = $content } | ConvertTo-Json -Compress
 Write-Output (%s + $json)
-`, trustedPluginPrefsScriptPreamble(host), powerShellSingleQuoted(version), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix))
+`, preamble, powerShellSingleQuoted(version), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix)), nil
 }
 
-func trustedPluginPrefsRepairScript(host mayaHostConfig, version string) string {
+func trustedPluginPrefsRepairScript(host mayaHostConfig, version string) (string, error) {
+	preamble, err := trustedPluginPrefsScriptPreamble(host)
+	if err != nil {
+		return "", err
+	}
 	return fmt.Sprintf(`$ErrorActionPreference = 'Stop'
 %s
 $prefs = MayaStall-PrefsPath %s
@@ -523,7 +537,7 @@ if ($changed) {
 $content = [string](Get-Content -LiteralPath $prefs -Raw)
 $json = [pscustomobject]@{ exists = $true; content = $content; changed = $changed } | ConvertTo-Json -Compress
 Write-Output (%s + $json)
-`, trustedPluginPrefsScriptPreamble(host), powerShellSingleQuoted(version), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix))
+`, preamble, powerShellSingleQuoted(version), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix), powerShellSingleQuoted(trustedPluginPrefsJSONPrefix)), nil
 }
 
 func trustedPluginPrefsRepairInput(requiredPaths []string) (string, error) {
@@ -557,29 +571,63 @@ $program = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$
 `
 }
 
-func trustedPluginMayaAppDir(host mayaHostConfig) string {
+func trustedPluginMayaAppDir(host mayaHostConfig) (string, error) {
 	if host.Broker.isGGMayaSessiond() && strings.TrimSpace(host.Broker.StateDir) != "" {
 		stateDir := strings.TrimSpace(host.Broker.StateDir)
-		_, _, absolute, traversesRoot := canonicalWindowsPathForComparison(stateDir)
-		if absolute && !traversesRoot {
-			return remoteJoin(stateDir, "maya_app")
+		if err := validateSessionBrokerStateDir(stateDir); err != nil {
+			return "", err
+		}
+		_, _, absolute, _ := canonicalWindowsPathForComparison(stateDir)
+		if absolute {
+			return remoteJoin(stateDir, "maya_app"), nil
 		}
 		if repo := strings.TrimSpace(host.Broker.Repo); repo != "" {
-			return remoteJoin(repo, stateDir, "maya_app")
+			return remoteJoin(repo, stateDir, "maya_app"), nil
 		}
-		return remoteJoin(stateDir, "maya_app")
+		return "", fmt.Errorf("broker.repo is required when broker.stateDir is relative")
 	}
-	return ""
+	return "", nil
 }
 
-func trustedPluginPrefsScriptPreamble(host mayaHostConfig) string {
-	mayaAppDir := trustedPluginMayaAppDir(host)
+func validateSessionBrokerStateDir(stateDir string) error {
+	stateDir = strings.TrimSpace(stateDir)
+	if stateDir == "" {
+		return fmt.Errorf("gg_mayasessiond broker requires broker.stateDir")
+	}
+	if hasWindowsDevicePrefix(stateDir) {
+		return fmt.Errorf("broker.stateDir must not use a Windows device namespace")
+	}
+	_, _, absolute, traversesRoot := canonicalWindowsPathForComparison(stateDir)
+	if traversesRoot {
+		return fmt.Errorf("broker.stateDir must not traverse above its Windows volume root")
+	}
+	if !absolute {
+		normalized := strings.ReplaceAll(remotePath(stateDir), `\`, "/")
+		if strings.HasPrefix(normalized, "/") || (len(normalized) >= 2 && isASCIIAlpha(normalized[0]) && normalized[1] == ':') {
+			return fmt.Errorf("broker.stateDir must be an absolute Windows path or a path relative to broker.repo")
+		}
+		clean := path.Clean(normalized)
+		if clean == ".." || strings.HasPrefix(clean, "../") {
+			return fmt.Errorf("broker.stateDir relative path must not escape broker.repo")
+		}
+	}
+	if hasWin32TrimmedPathComponent(stateDir) || hasInvalidWin32PathComponent(stateDir) {
+		return fmt.Errorf("broker.stateDir contains an invalid Windows path component")
+	}
+	return nil
+}
+
+func trustedPluginPrefsScriptPreamble(host mayaHostConfig) (string, error) {
+	mayaAppDir, err := trustedPluginMayaAppDir(host)
+	if err != nil {
+		return "", err
+	}
 	if mayaAppDir != "" {
 		return fmt.Sprintf(`function MayaStall-PrefsPath([string]$version) {
   $mayaAppDir = %s
   return Join-Path (Join-Path $mayaAppDir $version) 'prefs\userPrefs.mel'
 }
-`, powerShellSingleQuoted(mayaAppDir))
+`, powerShellSingleQuoted(mayaAppDir)), nil
 	}
 	return `function MayaStall-PrefsPath([string]$version) {
   $mayaAppDir = $env:MAYA_APP_DIR
@@ -588,5 +636,5 @@ func trustedPluginPrefsScriptPreamble(host mayaHostConfig) string {
   }
   return Join-Path (Join-Path $mayaAppDir $version) 'prefs\userPrefs.mel'
 }
-`
+`, nil
 }

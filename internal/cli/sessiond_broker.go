@@ -470,6 +470,9 @@ func (broker ggMayaSessiondBroker) validate() error {
 	if strings.TrimSpace(broker.host.Broker.StateDir) == "" {
 		return fmt.Errorf("gg_mayasessiond broker requires broker.stateDir")
 	}
+	if err := validateSessionBrokerStateDir(broker.host.Broker.StateDir); err != nil {
+		return err
+	}
 	if strings.TrimSpace(broker.host.Broker.Python) == "" {
 		return fmt.Errorf("gg_mayasessiond broker requires broker.python")
 	}

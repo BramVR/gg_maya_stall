@@ -2256,7 +2256,10 @@ optionVar -cat "Security"
 }
 
 func TestTrustedPluginPrefsRepairScriptDocumentsMutationSafety(t *testing.T) {
-	script := trustedPluginPrefsRepairScript(mayaHostConfig{}, "2025")
+	script, err := trustedPluginPrefsRepairScript(mayaHostConfig{}, "2025")
+	if err != nil {
+		t.Fatalf("build trusted plug-in prefs repair script: %v", err)
+	}
 	for _, want := range []string{
 		"$env:MAYA_APP_DIR",
 		"$MayaStallRequiredPathsInput",
@@ -2304,17 +2307,52 @@ func TestTrustedPluginPrefsUseSessionBrokerMayaAppDir(t *testing.T) {
 		Type:       "gg-mayasessiond",
 		StateDir:   "C:/maya-stall/sessiond-ui",
 	}}
-	if got := trustedPluginMayaAppDir(host); got != "C:/maya-stall/sessiond-ui/maya_app" {
-		t.Fatalf("trusted plug-in Maya app dir = %q, want Session Broker Maya app dir", got)
+	mayaAppDir, err := trustedPluginMayaAppDir(host)
+	if err != nil {
+		t.Fatalf("resolve trusted plug-in Maya app dir: %v", err)
 	}
-	preamble := trustedPluginPrefsScriptPreamble(host)
+	if mayaAppDir != "C:/maya-stall/sessiond-ui/maya_app" {
+		t.Fatalf("trusted plug-in Maya app dir = %q, want Session Broker Maya app dir", mayaAppDir)
+	}
+	preamble, err := trustedPluginPrefsScriptPreamble(host)
+	if err != nil {
+		t.Fatalf("build trusted plug-in prefs preamble: %v", err)
+	}
 	if !strings.Contains(preamble, "$mayaAppDir = 'C:/maya-stall/sessiond-ui/maya_app'") {
 		t.Fatalf("trusted plug-in prefs script does not target Session Broker Maya app dir:\n%s", preamble)
 	}
 	host.Broker.StateDir = "sessiond-ui"
 	host.Broker.Repo = "C:/maya-stall/tools/GG_MayaSessiond"
-	if got := trustedPluginMayaAppDir(host); got != "C:/maya-stall/tools/GG_MayaSessiond/sessiond-ui/maya_app" {
-		t.Fatalf("relative broker state Maya app dir = %q, want path resolved from broker repo", got)
+	mayaAppDir, err = trustedPluginMayaAppDir(host)
+	if err != nil {
+		t.Fatalf("resolve relative trusted plug-in Maya app dir: %v", err)
+	}
+	if mayaAppDir != "C:/maya-stall/tools/GG_MayaSessiond/sessiond-ui/maya_app" {
+		t.Fatalf("relative broker state Maya app dir = %q, want path resolved from broker repo", mayaAppDir)
+	}
+}
+
+func TestTrustedPluginPrefsRejectAmbiguousSessionBrokerStateDir(t *testing.T) {
+	for _, stateDir := range []string{`\sessiond-ui`, `/sessiond-ui`, `C:sessiond-ui`} {
+		t.Run(stateDir, func(t *testing.T) {
+			host := mayaHostConfig{
+				Transport: "ssh",
+				SSH:       sshConfig{Host: "maya-win-01"},
+				WorkRoot:  "C:/maya-stall",
+				Broker: brokerConfig{
+					Structured: true,
+					Type:       "gg-mayasessiond",
+					StateDir:   stateDir,
+					Python:     "C:/Python/python.exe",
+					Repo:       "C:/maya-stall/tools/GG_MayaSessiond",
+				}}
+			if _, err := trustedPluginPrefsReadScript(host, "2025"); err == nil {
+				t.Fatalf("trusted plug-in prefs accepted ambiguous broker stateDir %q", stateDir)
+			}
+			if err := (ggMayaSessiondBroker{host: host}).validate(); err == nil {
+				t.Fatalf("Session Broker accepted ambiguous stateDir %q", stateDir)
+			}
+		})
 	}
 }
 
@@ -2339,7 +2377,11 @@ func TestTrustedPluginPrefsRepairInputKeepsLargePathSetsOutOfCommandLine(t *test
 	if !reflect.DeepEqual(got, compactTrustedPluginAllowlistPaths(paths)) {
 		t.Fatalf("repair input paths differ: got %d paths, want %d", len(got), len(paths))
 	}
-	if strings.Contains(trustedPluginPrefsRepairScript(mayaHostConfig{}, "2025"), paths[len(paths)-1]) {
+	script, err := trustedPluginPrefsRepairScript(mayaHostConfig{}, "2025")
+	if err != nil {
+		t.Fatalf("build trusted plug-in prefs repair script: %v", err)
+	}
+	if strings.Contains(script, paths[len(paths)-1]) {
 		t.Fatalf("repair command embeds a required path")
 	}
 }

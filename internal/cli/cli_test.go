@@ -1557,8 +1557,8 @@ scenarios:
   smoke:
     payload:
       pluginArtifacts:
-        - "package"
         - "package/plugin.py"
+        - "package"
     expectedOutputs:
       scenarioResult: "outputs/smoke-result.json"
 `)
@@ -1575,6 +1575,26 @@ scenarios:
 	}
 	if string(content) != "# plug-in\n" {
 		t.Fatalf("overlapping payload snapshot = %q", content)
+	}
+}
+
+func TestCopyFileRejectsExistingDestination(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.txt")
+	destination := filepath.Join(dir, "destination.txt")
+	mustWriteFile(t, source, "new artifact\n")
+	mustWriteFile(t, destination, "existing artifact\n")
+
+	err := copyFile(source, destination)
+	if err == nil || !errors.Is(err, os.ErrExist) {
+		t.Fatalf("copy existing destination error = %v, want os.ErrExist", err)
+	}
+	content, readErr := os.ReadFile(destination)
+	if readErr != nil {
+		t.Fatalf("read existing destination: %v", readErr)
+	}
+	if string(content) != "existing artifact\n" {
+		t.Fatalf("existing destination changed to %q", content)
 	}
 }
 

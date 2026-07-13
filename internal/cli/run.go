@@ -308,11 +308,32 @@ func snapshotRunPayload(context runContext, payload []manifestPayload) error {
 		if err := validatePayloadPathForTransport(context.RepoDir, item.Source); err != nil {
 			return fmt.Errorf("snapshot %s payload %s: %w", item.Kind, item.Source, err)
 		}
+	}
+
+	// Copy shallower declarations first. Their frozen tree already contains any
+	// explicitly declared descendants, so later overlaps need no second write.
+	snapshotPayload := append([]manifestPayload(nil), payload...)
+	sort.SliceStable(snapshotPayload, func(left int, right int) bool {
+		return strings.Count(snapshotPayload[left].Source, "/") < strings.Count(snapshotPayload[right].Source, "/")
+	})
+	copiedRoots := make(map[string][]string)
+	for _, item := range snapshotPayload {
+		covered := false
+		for _, root := range copiedRoots[item.Kind] {
+			if item.Source == root || strings.HasPrefix(item.Source, root+"/") {
+				covered = true
+				break
+			}
+		}
+		if covered {
+			continue
+		}
 		source := filepath.Join(context.RepoDir, item.Source)
 		destination := context.RunWorkspace.LocalPayloadPath(item)
 		if err := copyPath(source, destination); err != nil {
 			return fmt.Errorf("snapshot %s payload %s: %w", item.Kind, item.Source, err)
 		}
+		copiedRoots[item.Kind] = append(copiedRoots[item.Kind], item.Source)
 	}
 	return nil
 }
@@ -1282,11 +1303,6 @@ func copyFile(source string, destination string) error {
 	}
 	defer input.Close()
 	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	// Overlapping payload declarations merge into one immutable snapshot. The
-	// first copy wins so a later source mutation cannot change checked bytes.
-	if errors.Is(err, os.ErrExist) {
-		return nil
-	}
 	if err != nil {
 		return err
 	}

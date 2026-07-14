@@ -9,6 +9,7 @@ Bundle.
 
 ```sh
 maya-stall evidence collect smoke
+maya-stall evidence collect --json smoke
 maya-stall evidence collect --host-config ci-hosts.yaml --target-profile ci smoke
 maya-stall evidence collect --host-config ci-hosts.yaml --target-profile ci --host maya-win-01 smoke
 ```
@@ -23,6 +24,10 @@ The bundle includes:
 - declared output files
 
 Validator failures are recorded in `evidence.json` and mark the run failed.
+Like `maya-stall run`, collection accepts an identified Scenario before config,
+host, or remote validation and preserves early failures as minimal Evidence
+Bundles. `--json` emits the same `run-accepted`, terminal `run`, and
+pre-acceptance `usage-error` record shapes.
 
 Every Visual Evidence artifact carries Visual Evidence Provenance in
 `evidence.json`: an `origin` value plus a `sha256` content hash computed at

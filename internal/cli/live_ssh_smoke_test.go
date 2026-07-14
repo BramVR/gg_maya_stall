@@ -66,19 +66,22 @@ func TestOptInRealPreRunReadinessSmoke(t *testing.T) {
 			t.Fatalf("real pre-run readiness stderr missing %q:\n%s", want, stderr.String())
 		}
 	}
-	for _, path := range []string{
-		filepath.Join(dir, ".maya-stall", "state", "runs"),
-		filepath.Join(dir, "artifacts", "maya-stall"),
-	} {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("real pre-run readiness left local run residue at %s: %v", path, err)
-		}
+	runID := outputValue(t, stdout.String(), "run")
+	if _, err := os.Stat(filepath.Join(dir, ".maya-stall", "state", "runs", runID)); err != nil {
+		t.Fatalf("real pre-run readiness Run State missing: %v", err)
+	}
+	bundle := readEvidenceBundle(t, filepath.Join(dir, "artifacts", "maya-stall", runID))
+	if bundle.Version != evidenceSchemaVersion || bundle.Failure == nil || bundle.Failure.FailedLayer != "remote-check" || bundle.Failure.CaptureState != "not-started" || bundle.Failure.CleanupState != "completed" {
+		t.Fatalf("real pre-run readiness minimal Evidence Bundle = %+v", bundle)
+	}
+	if bundle.ScenarioResult != "" || len(bundle.VisualEvidence) != 0 {
+		t.Fatalf("real pre-run readiness unexpectedly reached Scenario evidence: %+v", bundle)
 	}
 	lockLayer := remoteHostLockLayer(selected)
 	if lockLayer.Status != "ok" || lockLayer.State != "unlocked" {
 		t.Fatalf("real pre-run readiness did not release Host Lock: %+v", lockLayer)
 	}
-	t.Log("real SSH reachability passed; real Session Broker status failed closed before staging; Host Lock released")
+	t.Log("real SSH reachability passed; real Session Broker status failed closed before staging; minimal evidence retained; Host Lock released")
 }
 
 func TestOptInRealSSHConsumingRepoSmoke(t *testing.T) {

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -63,14 +64,31 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 		return 1
 	case "run":
 		options, err := parseRunArgs(args[1:])
+		jsonOutput := requestedRunJSON(args[1:])
 		if err != nil {
+			if options.ScenarioName != "" {
+				runtime = withRunAcceptanceOutput(runtime, stdout, jsonOutput)
+				outcome, acceptedErr := failAcceptedSubmission(workDir, options, runtime, err)
+				if outcome.RunID != "" {
+					printRunCommandOutcome(stdout, outcome, jsonOutput)
+				}
+				_, _ = fmt.Fprintf(stderr, "maya-stall run: %v\n", acceptedErr)
+				return 1
+			}
+			if jsonOutput {
+				printRunCommandJSON(stdout, runCommandJSON{Version: 1, Kind: "usage-error", Accepted: false, Error: err.Error()})
+				return 2
+			}
 			fmt.Fprintf(stderr, "maya-stall run: %v\n", err)
 			return 2
 		}
+		runtime = withRunAcceptanceOutput(runtime, stdout, jsonOutput)
 		outcome, err := runScenario(workDir, options, runtime)
 		if err != nil {
 			if outcome.RunID != "" {
-				printRunOutcome(stdout, outcome)
+				printRunCommandOutcome(stdout, outcome, jsonOutput)
+				_, _ = fmt.Fprintf(stderr, "maya-stall run: %v\n", err)
+				return 1
 			}
 			var userErr *usageError
 			if errors.As(err, &userErr) {
@@ -80,7 +98,7 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 			fmt.Fprintf(stderr, "maya-stall run: %v\n", err)
 			return 1
 		}
-		printRunOutcome(stdout, outcome)
+		printRunCommandOutcome(stdout, outcome, jsonOutput)
 		if outcome.Result.Status == resultStatusPassed {
 			return 0
 		}
@@ -147,14 +165,31 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 		switch args[1] {
 		case "collect":
 			options, err := parseRunArgs(args[2:])
+			jsonOutput := requestedRunJSON(args[2:])
 			if err != nil {
+				if options.ScenarioName != "" {
+					runtime = withRunAcceptanceOutput(runtime, stdout, jsonOutput)
+					outcome, acceptedErr := failAcceptedSubmission(workDir, options, runtime, err)
+					if outcome.RunID != "" {
+						printRunCommandOutcome(stdout, outcome, jsonOutput)
+					}
+					_, _ = fmt.Fprintf(stderr, "maya-stall evidence collect: %v\n", acceptedErr)
+					return 1
+				}
+				if jsonOutput {
+					printRunCommandJSON(stdout, runCommandJSON{Version: 1, Kind: "usage-error", Accepted: false, Error: err.Error()})
+					return 2
+				}
 				fmt.Fprintf(stderr, "maya-stall evidence collect: %v\n", err)
 				return 2
 			}
+			runtime = withRunAcceptanceOutput(runtime, stdout, jsonOutput)
 			outcome, err := runScenario(workDir, options, runtime)
 			if err != nil {
 				if outcome.RunID != "" {
-					printRunOutcome(stdout, outcome)
+					printRunCommandOutcome(stdout, outcome, jsonOutput)
+					_, _ = fmt.Fprintf(stderr, "maya-stall evidence collect: %v\n", err)
+					return 1
 				}
 				var userErr *usageError
 				if errors.As(err, &userErr) {
@@ -164,7 +199,7 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 				fmt.Fprintf(stderr, "maya-stall evidence collect: %v\n", err)
 				return 1
 			}
-			printRunOutcome(stdout, outcome)
+			printRunCommandOutcome(stdout, outcome, jsonOutput)
 			if outcome.Result.Status == resultStatusPassed {
 				return 0
 			}
@@ -282,6 +317,9 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 
 func printRunOutcome(stdout io.Writer, outcome runOutcome) {
 	fmt.Fprintf(stdout, "run: %s\n", outcome.RunID)
+	if outcome.Accepted || outcome.Failure != nil {
+		_, _ = fmt.Fprintf(stdout, "accepted: %t\n", outcome.Accepted)
+	}
 	fmt.Fprintf(stdout, "scenario: %s\n", outcome.Scenario)
 	fmt.Fprintf(stdout, "targetProfile: %s\n", outcome.TargetProfile)
 	fmt.Fprintf(stdout, "host: %s\n", outcome.Host)
@@ -289,6 +327,11 @@ func printRunOutcome(stdout io.Writer, outcome runOutcome) {
 	fmt.Fprintf(stdout, "stopPolicy: %s\n", outcome.StopPolicy)
 	fmt.Fprintf(stdout, "state: %s\n", outcome.StateDir)
 	fmt.Fprintf(stdout, "evidence: %s\n", outcome.EvidenceDir)
+	if outcome.Failure != nil {
+		_, _ = fmt.Fprintf(stdout, "failedLayer: %s\n", outcome.Failure.FailedLayer)
+		_, _ = fmt.Fprintf(stdout, "diagnostic: %s\n", outcome.Failure.Diagnostic)
+		_, _ = fmt.Fprintf(stdout, "remediation: %s\n", outcome.Failure.RemediationHint)
+	}
 	for _, validator := range outcome.Validators {
 		if validator.Status != resultStatusPassed {
 			fmt.Fprintf(stdout, "validator: %s %s - %s\n", validator.Type, validator.Status, validator.Message)
@@ -297,6 +340,93 @@ func printRunOutcome(stdout io.Writer, outcome runOutcome) {
 	for _, command := range outcome.FollowUpCommands {
 		fmt.Fprintf(stdout, "next: %s\n", command)
 	}
+}
+
+func withRunAcceptanceOutput(runtime runRuntime, stdout io.Writer, asJSON bool) runRuntime {
+	existing := runtime.Accepted
+	runtime.Accepted = func(outcome runOutcome) {
+		if existing != nil {
+			existing(outcome)
+		}
+		if asJSON {
+			printRunCommandJSON(stdout, runCommandJSON{
+				Version:     1,
+				Kind:        "run-accepted",
+				Accepted:    true,
+				RunID:       outcome.RunID,
+				Scenario:    outcome.Scenario,
+				Status:      "submitted",
+				StateDir:    outcome.StateDir,
+				EvidenceDir: outcome.EvidenceDir,
+			})
+			return
+		}
+		_, _ = fmt.Fprintf(stdout, "run: %s\n", outcome.RunID)
+		_, _ = fmt.Fprintln(stdout, "accepted: true")
+		_, _ = fmt.Fprintf(stdout, "scenario: %s\n", outcome.Scenario)
+		_, _ = fmt.Fprintf(stdout, "state: %s\n", outcome.StateDir)
+		_, _ = fmt.Fprintf(stdout, "evidence: %s\n", outcome.EvidenceDir)
+	}
+	return runtime
+}
+
+type runCommandJSON struct {
+	Version          int      `json:"version"`
+	Kind             string   `json:"kind"`
+	Accepted         bool     `json:"accepted"`
+	RunID            string   `json:"runId,omitempty"`
+	Scenario         string   `json:"scenario,omitempty"`
+	TargetProfile    string   `json:"targetProfile,omitempty"`
+	Host             string   `json:"host,omitempty"`
+	Status           string   `json:"status,omitempty"`
+	StateDir         string   `json:"stateDir,omitempty"`
+	EvidenceDir      string   `json:"evidenceDir,omitempty"`
+	FailedLayer      string   `json:"failedLayer,omitempty"`
+	Diagnostic       string   `json:"diagnostic,omitempty"`
+	RemediationHint  string   `json:"remediationHint,omitempty"`
+	StopPolicy       string   `json:"stopPolicy,omitempty"`
+	FollowUpCommands []string `json:"followUpCommands,omitempty"`
+	Error            string   `json:"error,omitempty"`
+}
+
+func printRunCommandOutcome(stdout io.Writer, outcome runOutcome, asJSON bool) {
+	if !asJSON {
+		printRunOutcome(stdout, outcome)
+		return
+	}
+	result := runCommandJSON{
+		Version:          1,
+		Kind:             "run",
+		Accepted:         outcome.Accepted,
+		RunID:            outcome.RunID,
+		Scenario:         outcome.Scenario,
+		TargetProfile:    outcome.TargetProfile,
+		Host:             outcome.Host,
+		Status:           outcome.Result.Status,
+		StateDir:         outcome.StateDir,
+		EvidenceDir:      outcome.EvidenceDir,
+		StopPolicy:       outcome.StopPolicy,
+		FollowUpCommands: outcome.FollowUpCommands,
+	}
+	if outcome.Failure != nil {
+		result.FailedLayer = outcome.Failure.FailedLayer
+		result.Diagnostic = outcome.Failure.Diagnostic
+		result.RemediationHint = outcome.Failure.RemediationHint
+	}
+	printRunCommandJSON(stdout, result)
+}
+
+func printRunCommandJSON(stdout io.Writer, result runCommandJSON) {
+	_ = json.NewEncoder(stdout).Encode(result)
+}
+
+func requestedRunJSON(args []string) bool {
+	for _, arg := range args {
+		if arg == "--json" {
+			return true
+		}
+	}
+	return false
 }
 
 func printVisualEvidenceOutcome(stdout io.Writer, outcome runOutcome, artifact visualEvidenceArtifact) {
@@ -312,11 +442,11 @@ Usage:
   maya-stall version
   maya-stall init
   maya-stall doctor [--host-config <path>] [--target-profile <name>] [--host <id>] [--scenario <name>] [--repair-trusted-plugin-allowlist]
-  maya-stall run [--host-config <path>] [--target-profile <name>] [--host <id>] [--host-lock-wait <duration>|--host-lock-fail-fast] [--keep-on-failure|--stop-after <success|failure|always|never>] <scenario>
+  maya-stall run [--json] [--host-config <path>] [--target-profile <name>] [--host <id>] [--host-lock-wait <duration>|--host-lock-fail-fast] [--keep-on-failure|--stop-after <success|failure|always|never>] <scenario>
   maya-stall screenshot [--host-config <path>] [--target-profile <name>] [--host <id>]
   maya-stall record [--host-config <path>] [--target-profile <name>] [--host <id>]
   maya-stall control click --x <pixels> --y <pixels> [--host-config <path>] [--target-profile <name>] [--host <id>] [--dry-run]
-  maya-stall evidence collect [--host-config <path>] [--target-profile <name>] [--host <id>] <scenario>
+  maya-stall evidence collect [--json] [--host-config <path>] [--target-profile <name>] [--host <id>] <scenario>
   maya-stall evidence publish --destination <path> --base-url <url> <evidence-bundle-dir>
   maya-stall review-comment github --repo <owner/name> --pr <number> [--token-env <name>] [--api-url <url>] [--dry-run] <published-evidence-dir>
   maya-stall review-comment gitlab --project <path-or-id> --merge-request <iid> [--token-env <name>] [--base-url <url>] [--dry-run] <published-evidence-dir>
@@ -358,67 +488,68 @@ func parseRunArgs(args []string) (runOptions, error) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch arg {
+		case "--json":
 		case "--host-config":
 			i++
-			if i >= len(args) || args[i] == "" {
-				return runOptions{}, newUsageError("--host-config needs a path")
+			if i >= len(args) || args[i] == "" || strings.HasPrefix(args[i], "--") {
+				return options, newUsageError("--host-config needs a path")
 			}
 			options.HostConfig = args[i]
 		case "--target-profile":
 			i++
-			if i >= len(args) || args[i] == "" {
-				return runOptions{}, newUsageError("--target-profile needs a name")
+			if i >= len(args) || args[i] == "" || strings.HasPrefix(args[i], "--") {
+				return options, newUsageError("--target-profile needs a name")
 			}
 			options.TargetProfile = args[i]
 		case "--host":
 			i++
-			if i >= len(args) || args[i] == "" {
-				return runOptions{}, newUsageError("--host needs a Maya Host id")
+			if i >= len(args) || args[i] == "" || strings.HasPrefix(args[i], "--") {
+				return options, newUsageError("--host needs a Maya Host id")
 			}
 			options.HostPin = args[i]
 		case "--host-lock-wait":
 			i++
 			if i >= len(args) || args[i] == "" {
-				return runOptions{}, newUsageError("--host-lock-wait needs a duration")
+				return options, newUsageError("--host-lock-wait needs a duration")
 			}
 			duration, err := time.ParseDuration(args[i])
 			if err != nil {
-				return runOptions{}, newUsageError("invalid --host-lock-wait duration %q", args[i])
+				return options, newUsageError("invalid --host-lock-wait duration %q", args[i])
 			}
 			options.HostLockWait = duration
 		case "--host-lock-fail-fast":
 			options.HostLockWait = 0
 		case "--keep-on-failure":
 			if stopPolicySet {
-				return runOptions{}, newUsageError("Stop Policy already set")
+				return options, newUsageError("Stop Policy already set")
 			}
 			options.StopAfter = stopAfterSuccess
 			stopPolicySet = true
 		case "--stop-after":
 			if stopPolicySet {
-				return runOptions{}, newUsageError("Stop Policy already set")
+				return options, newUsageError("Stop Policy already set")
 			}
 			i++
 			if i >= len(args) || args[i] == "" {
-				return runOptions{}, newUsageError("--stop-after needs success, failure, always, or never")
+				return options, newUsageError("--stop-after needs success, failure, always, or never")
 			}
 			if !isValidStopAfter(args[i]) {
-				return runOptions{}, newUsageError("invalid --stop-after %q", args[i])
+				return options, newUsageError("invalid --stop-after %q", args[i])
 			}
 			options.StopAfter = args[i]
 			stopPolicySet = true
 		default:
 			if strings.HasPrefix(arg, "-") {
-				return runOptions{}, newUsageError("unknown run option %q", arg)
+				return options, newUsageError("unknown run option %q", arg)
 			}
 			if options.ScenarioName != "" {
-				return runOptions{}, newUsageError("expected one Scenario name")
+				return options, newUsageError("expected one Scenario name")
 			}
 			options.ScenarioName = arg
 		}
 	}
 	if options.ScenarioName == "" {
-		return runOptions{}, newUsageError("expected Scenario name")
+		return options, newUsageError("expected Scenario name")
 	}
 	return options, nil
 }

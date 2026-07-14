@@ -275,6 +275,9 @@ func TestScreenshotCapturesVisualEvidenceArtifact(t *testing.T) {
 	if !strings.Contains(stdout.String(), "artifact: screenshots/screenshot.png") {
 		t.Fatalf("screenshot output missing artifact path:\n%s", stdout.String())
 	}
+	if strings.Contains(stdout.String(), "accepted:") {
+		t.Fatalf("standalone screenshot output contains Scenario acceptance state:\n%s", stdout.String())
+	}
 
 	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
 	if _, err := os.Stat(filepath.Join(evidence, "screenshots", "screenshot.png")); err != nil {
@@ -423,6 +426,7 @@ func TestAttachRunScreenshotCapturesThroughOwnedHostLock(t *testing.T) {
 	if err := requireBrokerCaptureProvenanceEvents(evidenceDir, bundle); err != nil {
 		t.Fatalf("run-scoped screenshot bundle provenance events: %v", err)
 	}
+	requireSequencedRunEvents(t, filepath.Join(evidenceDir, evidenceEventsFileName))
 }
 
 func TestAttachRunScreenshotUsesAuthoritativeHostLockWithoutLocalMirror(t *testing.T) {
@@ -5820,19 +5824,13 @@ optionVar -cat "Security"
 	if _, err := os.Stat(sftpLog); !os.IsNotExist(err) {
 		t.Fatalf("trusted allowlist preflight should happen before SFTP staging, stat err = %v", err)
 	}
-	runs, err := os.ReadDir(filepath.Join(dir, ".maya-stall", "state", "runs"))
-	if err != nil && !os.IsNotExist(err) {
-		t.Fatalf("read run state after failed allowlist preflight: %v", err)
+	runID := outputValue(t, stdout.String(), "run")
+	if _, err := os.Stat(filepath.Join(dir, ".maya-stall", "state", "runs", runID)); err != nil {
+		t.Fatalf("failed allowlist preflight Run State missing: %v", err)
 	}
-	if len(runs) != 0 {
-		t.Fatalf("failed allowlist preflight left %d run snapshot(s)", len(runs))
-	}
-	evidenceRuns, err := os.ReadDir(filepath.Join(dir, "artifacts", "maya-stall"))
-	if err != nil && !os.IsNotExist(err) {
-		t.Fatalf("read Evidence directory after failed allowlist preflight: %v", err)
-	}
-	if len(evidenceRuns) != 0 {
-		t.Fatalf("failed allowlist preflight left %d empty Evidence directorie(s)", len(evidenceRuns))
+	bundle := readEvidenceBundle(t, filepath.Join(dir, "artifacts", "maya-stall", runID))
+	if bundle.Failure == nil || bundle.Failure.FailedLayer != "remote-check" || bundle.Failure.CleanupState != "completed" {
+		t.Fatalf("failed allowlist preflight minimal evidence = %+v", bundle.Failure)
 	}
 }
 
@@ -7056,8 +7054,8 @@ hostPools:
 	stdout.Reset()
 	stderr.Reset()
 	code = Run([]string{"run", "--host-config", hostConfigPath, "--target-profile", "ci", "--host", "gamma", "smoke"}, &stdout, &stderr, dir, "test-version")
-	if code != 2 {
-		t.Fatalf("missing pinned host exit code = %d, want 2; stderr: %s", code, stderr.String())
+	if code != 1 {
+		t.Fatalf("missing pinned host exit code = %d, want 1; stderr: %s", code, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), `pinned Maya Host "gamma" is not in Target Profile "ci"`) {
 		t.Fatalf("missing pinned host error = %q", stderr.String())
@@ -7971,6 +7969,16 @@ func TestRunScenarioReportsHostLockReleaseFailure(t *testing.T) {
 	if !strings.Contains(stderr.String(), "release Host Lock for alpha") {
 		t.Fatalf("release failure error = %q", stderr.String())
 	}
+	evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	bundle := readEvidenceBundle(t, evidence)
+	if bundle.Status != resultStatusFailed || bundle.Failure == nil || bundle.Failure.CleanupState != "failed" {
+		t.Fatalf("Host Lock release failure evidence = %+v", bundle)
+	}
+	events, err := os.ReadFile(filepath.Join(evidence, evidenceEventsFileName))
+	if err != nil || !strings.Contains(string(events), `"event":"run.failed"`) {
+		t.Fatalf("Host Lock release terminal event = %q err %v", string(events), err)
+	}
+	requireSequencedRunEvents(t, filepath.Join(evidence, evidenceEventsFileName))
 }
 
 func TestRunScenarioResultFailureDrivesExitCode(t *testing.T) {
@@ -8273,8 +8281,10 @@ scenarios:
 	if !strings.Contains(stderr.String(), `repo path "../secret.json" must be repo-relative`) {
 		t.Fatalf("run error did not report invalid Validator path: %s", stderr.String())
 	}
-	if _, err := os.Stat(filepath.Join(dir, "artifacts", "maya-stall")); !os.IsNotExist(err) {
-		t.Fatalf("invalid Validator config should fail before Evidence Bundle, stat err = %v", err)
+	runID := outputValue(t, stdout.String(), "run")
+	bundle := readEvidenceBundle(t, filepath.Join(dir, "artifacts", "maya-stall", runID))
+	if bundle.Failure == nil || bundle.Failure.FailedLayer != "scenario" {
+		t.Fatalf("invalid Validator config minimal evidence = %+v", bundle.Failure)
 	}
 }
 
@@ -8283,8 +8293,8 @@ func TestRunScenarioRequiresKnownScenario(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
 	code := Run([]string{"run", "missing"}, &stdout, &stderr, dir, "test-version")
-	if code != 2 {
-		t.Fatalf("run exit code = %d, want 2", code)
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "unknown Scenario") {
 		t.Fatalf("missing scenario error = %q", stderr.String())
@@ -8310,8 +8320,13 @@ scenarios:
 	if !strings.Contains(stderr.String(), "repo-relative") {
 		t.Fatalf("scenario result validation error = %q", stderr.String())
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".maya-stall")); !os.IsNotExist(err) {
-		t.Fatalf("run state directory exists after invalid scenario result: %v", err)
+	runID := outputValue(t, stdout.String(), "run")
+	if _, err := os.Stat(filepath.Join(dir, ".maya-stall", "state", "runs", runID)); err != nil {
+		t.Fatalf("run state missing after invalid scenario result: %v", err)
+	}
+	bundle := readEvidenceBundle(t, filepath.Join(dir, "artifacts", "maya-stall", runID))
+	if bundle.Failure == nil || bundle.Failure.FailedLayer != "scenario" {
+		t.Fatalf("invalid Scenario Result path minimal evidence = %+v", bundle.Failure)
 	}
 }
 

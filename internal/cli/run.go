@@ -25,6 +25,7 @@ const stopAfterSuccess = "success"
 const stopAfterFailure = "failure"
 const stopAfterAlways = "always"
 const stopAfterNever = "never"
+const evidenceSchemaVersion = 1
 
 type runRuntime struct {
 	Host            runHost
@@ -32,6 +33,7 @@ type runRuntime struct {
 	ReadinessHost   runHost
 	ReadinessBroker sessionBroker
 	Now             func() time.Time
+	Accepted        func(runOutcome)
 }
 
 type runHost interface {
@@ -132,9 +134,12 @@ type runOutcome struct {
 	Validators       []validatorResult
 	StopPolicy       string
 	FollowUpCommands []string
+	Accepted         bool
+	Failure          *runFailureEvidence
 }
 
 type runManifest struct {
+	Version       int                    `json:"version"`
 	RunID         string                 `json:"runId"`
 	Scenario      string                 `json:"scenario"`
 	TargetProfile string                 `json:"targetProfile"`
@@ -162,6 +167,7 @@ type scenarioResultDocument struct {
 }
 
 type evidenceBundle struct {
+	Version        int                      `json:"version"`
 	RunID          string                   `json:"runId"`
 	Scenario       string                   `json:"scenario"`
 	Status         string                   `json:"status"`
@@ -172,12 +178,21 @@ type evidenceBundle struct {
 	Manifest       string                   `json:"manifest"`
 	Events         string                   `json:"events"`
 	Log            string                   `json:"log"`
-	ScenarioResult string                   `json:"scenarioResult"`
+	ScenarioResult string                   `json:"scenarioResult,omitempty"`
 	Payload        []manifestPayload        `json:"payload"`
 	VisualEvidence []visualEvidenceArtifact `json:"visualEvidence,omitempty"`
 	Outputs        []outputArtifact         `json:"outputs,omitempty"`
 	Artifacts      []evidenceArtifact       `json:"artifacts,omitempty"`
 	Validators     []validatorResult        `json:"validators,omitempty"`
+	Failure        *runFailureEvidence      `json:"failure,omitempty"`
+}
+
+type runFailureEvidence struct {
+	FailedLayer     string `json:"failedLayer"`
+	Diagnostic      string `json:"diagnostic"`
+	RemediationHint string `json:"remediationHint"`
+	CaptureState    string `json:"captureState"`
+	CleanupState    string `json:"cleanupState"`
 }
 
 type visualEvidenceArtifact struct {
@@ -823,7 +838,7 @@ func writeEvidenceBundle(context runContext, manifest runManifest, scenario scen
 	if err := copyFile(filepath.Join(context.StateDir, "manifest.json"), filepath.Join(context.EvidenceDir, "manifest.json")); err != nil {
 		return err
 	}
-	if err := copyFile(context.EventsPath, filepath.Join(context.EvidenceDir, "events.jsonl")); err != nil {
+	if err := copySequencedEvents(context.EventsPath, filepath.Join(context.EvidenceDir, evidenceEventsFileName)); err != nil {
 		return err
 	}
 	if err := copyFile(context.LogPath, filepath.Join(context.EvidenceDir, "logs", "session.log")); err != nil {
@@ -838,6 +853,7 @@ func writeEvidenceBundle(context runContext, manifest runManifest, scenario scen
 		return err
 	}
 	bundle := evidenceBundle{
+		Version:        evidenceSchemaVersion,
 		RunID:          manifest.RunID,
 		Scenario:       manifest.Scenario,
 		Status:         result.Status,
@@ -1088,6 +1104,39 @@ func appendEventRecord(path string, record map[string]string) error {
 	defer file.Close()
 	_, err = file.Write(append(content, '\n'))
 	return err
+}
+
+func copySequencedEvents(source string, destination string) error {
+	content, err := os.ReadFile(source)
+	if err != nil {
+		return err
+	}
+	var sequenced bytes.Buffer
+	sequence := 0
+	for index, line := range bytes.Split(bytes.TrimSpace(content), []byte{'\n'}) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var event map[string]any
+		if err := json.Unmarshal(line, &event); err != nil {
+			return fmt.Errorf("parse run event %d: %w", index+1, err)
+		}
+		sequence++
+		event["sequence"] = sequence
+		encoded, err := json.Marshal(event)
+		if err != nil {
+			return err
+		}
+		sequenced.Write(encoded)
+		sequenced.WriteByte('\n')
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return err
+	}
+	if err := rejectExistingFileLeaf(destination); err != nil {
+		return err
+	}
+	return os.WriteFile(destination, sequenced.Bytes(), 0o644)
 }
 
 func writeJSONFile(path string, value any) error {

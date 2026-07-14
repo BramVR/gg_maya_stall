@@ -39,10 +39,7 @@ hostPools:
 			t.Fatalf("run error missing %q:\n%s", want, stderr.String())
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, "artifacts", "maya-stall")); !os.IsNotExist(err) {
-		t.Fatalf("readiness failure created run artifacts: %v", err)
-	}
-	requirePreRunReadinessCleanup(t, dir, "alpha")
+	requirePreRunReadinessFailureEvidence(t, dir, stdout.String(), "alpha")
 }
 
 func TestRunScenarioFailsClosedWhenSessionBrokerIsNotReady(t *testing.T) {
@@ -101,7 +98,7 @@ hostPools:
 	if got := strings.Count(string(sshBytes), "CALL "); got != 2 {
 		t.Fatalf("readiness check made %d SSH calls, want transport plus broker status:\n%s", got, sshBytes)
 	}
-	requirePreRunReadinessCleanup(t, dir, "alpha")
+	requirePreRunReadinessFailureEvidence(t, dir, stdout.String(), "alpha")
 }
 
 func TestSessionBrokerReadinessAcceptsStoppedStateForFreshRestart(t *testing.T) {
@@ -184,14 +181,19 @@ func testSessiondReadinessBroker(sshPath string) ggMayaSessiondBroker {
 	}}
 }
 
-func requirePreRunReadinessCleanup(t *testing.T, dir string, hostID string) {
+func requirePreRunReadinessFailureEvidence(t *testing.T, dir string, output string, hostID string) {
 	t.Helper()
-	for _, path := range []string{
-		filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", hostID+".lock"),
-		filepath.Join(dir, ".maya-stall", "state", "runs"),
-	} {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("pre-run readiness failure left %s: %v", path, err)
-		}
+	lockPath := filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", hostID+".lock")
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("pre-run readiness failure left Host Lock %s: %v", lockPath, err)
+	}
+	runID := outputValue(t, output, "run")
+	stateDir := filepath.Join(dir, ".maya-stall", "state", "runs", runID)
+	if _, err := os.Stat(stateDir); err != nil {
+		t.Fatalf("pre-run readiness failure Run State missing: %v", err)
+	}
+	bundle := readEvidenceBundle(t, filepath.Join(dir, "artifacts", "maya-stall", runID))
+	if bundle.Failure == nil || bundle.Failure.FailedLayer != "remote-check" || bundle.Failure.CleanupState != "completed" {
+		t.Fatalf("pre-run readiness failure Evidence Bundle = %+v", bundle.Failure)
 	}
 }

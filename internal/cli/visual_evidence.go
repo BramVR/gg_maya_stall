@@ -121,6 +121,7 @@ func captureStandaloneVisualEvidence(repoDir string, options visualEvidenceOptio
 	}()
 
 	manifest := runManifest{
+		Version:       evidenceSchemaVersion,
 		RunID:         runID,
 		Scenario:      evidenceStandaloneScenarioPrefix + kind,
 		TargetProfile: host.TargetProfile,
@@ -215,27 +216,27 @@ func capturePlannedVisualEvidence(broker sessionBroker, context runContext, plan
 		case "screenshot":
 			capturer, ok := broker.(screenshotCapturer)
 			if !ok {
-				return nil, fmt.Errorf("Session Broker does not support screenshot capture")
+				return artifacts, fmt.Errorf("session broker does not support screenshot capture")
 			}
 			artifact, err := capturer.CaptureScreenshot(context, screenshotRequest{Name: capture.Name})
 			if err != nil {
-				return nil, err
+				return artifacts, err
 			}
 			artifacts = append(artifacts, artifact)
 		case "recording":
 			capturer, ok := broker.(recordingCapturer)
 			if !ok {
-				return nil, fmt.Errorf("Session Broker does not support recording capture")
+				return artifacts, fmt.Errorf("session broker does not support recording capture")
 			}
 			artifact, err := capturer.CaptureRecording(context, recordingRequest{Name: capture.Name, Duration: capture.Duration, FPS: capture.FPS})
 			if err != nil {
-				return nil, err
+				return artifacts, err
 			}
 			artifact.DurationSeconds = capture.Duration.Seconds()
 			artifact.FPS = capture.FPS
 			artifacts = append(artifacts, artifact)
 		default:
-			return nil, fmt.Errorf("unknown Visual Evidence kind %q", capture.Kind)
+			return artifacts, fmt.Errorf("unknown Visual Evidence kind %q", capture.Kind)
 		}
 	}
 	return artifacts, nil

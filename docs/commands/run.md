@@ -4,6 +4,7 @@
 
 ```sh
 maya-stall run smoke
+maya-stall run --json smoke
 maya-stall run --host-config ci-hosts.yaml --target-profile ci smoke
 maya-stall run --host-config ci-hosts.yaml --target-profile ci --host maya-win-01 smoke
 maya-stall run --host-lock-wait 30s smoke
@@ -17,24 +18,38 @@ maya-stall run --stop-after never smoke
 
 ## Behavior
 
-The command calls the Fresh Run lifecycle, which owns this setup, execute, and
-settle flow:
+Syntax errors that do not identify a Scenario are usage errors: they exit `2`
+and create no run. Once a Scenario is identified, Maya Stall accepts the
+submission, emits its Run ID, and records its first event before Repo Run Config
+validation, host selection, or remote checks. A later failure exits `1` and
+still writes a minimal Evidence Bundle with a versioned manifest, ordered
+events, failed layer, diagnostic, remediation hint, capture state, and cleanup
+state.
 
-1. Load Repo Run Config.
-2. Select and normalize the named Scenario.
-3. Resolve Target Profile, Host Pool, and Maya Host from host config if
+Use `--json` for stable newline-delimited JSON. Accepted submissions emit an
+immediate `run-accepted` record and a terminal `run` record. A usage error emits
+one `usage-error` record. Runs that proceed use the same Run ID in Run State,
+Evidence Bundles, output, and follow-up commands.
+
+The command calls the Fresh Run lifecycle, which owns this accept, setup,
+execute, and settle flow:
+
+1. Accept the identified Scenario submission and create its Run ID and Run State.
+2. Load Repo Run Config.
+3. Select and normalize the named Scenario.
+4. Resolve Target Profile, Host Pool, and Maya Host from host config if
    provided.
-4. Resolve the Host/Broker runtime contract.
-5. Acquire a Host Lock.
-6. Run bounded live SSH and Session Broker status probes; release the Host Lock and fail at the named layer if either is unavailable.
-7. Ask the Session Broker to stop any inherited Maya UI Session and start a new identified Maya UI Session.
-8. Stage only declared Run Payload paths.
-9. Provide `MAYA_STALL_SCENARIO_RESULT` to the Scenario.
-10. Run through the resolved fake-local or ssh-sessiond runtime.
-11. Collect outputs, logs, runtime metadata, broker session identity, Scenario Result, and Visual Evidence into an
+5. Resolve the Host/Broker runtime contract.
+6. Acquire a Host Lock.
+7. Run bounded live SSH and Session Broker status probes; release the Host Lock and fail at the named layer if either is unavailable.
+8. Ask the Session Broker to stop any inherited Maya UI Session and start a new identified Maya UI Session.
+9. Stage only declared Run Payload paths.
+10. Provide `MAYA_STALL_SCENARIO_RESULT` to the Scenario.
+11. Run through the resolved fake-local or ssh-sessiond runtime.
+12. Collect outputs, logs, runtime metadata, broker session identity, Scenario Result, and Visual Evidence into an
    Evidence Bundle.
-12. Run Validators.
-13. Apply the Stop Policy to that Maya UI Session and release or retain the Host Lock.
+13. Run Validators.
+14. Apply the Stop Policy to that Maya UI Session and release or retain the Host Lock.
 
 Supported runtime profiles:
 
@@ -45,12 +60,13 @@ An SSH Maya Host without structured `gg_mayasessiond` broker config fails before
 payload staging. SSH Host plus fake broker, fake Host plus real broker, and
 malformed broker config are not silently downgraded.
 
-After Host Lock acquisition and before Run ID creation or Run Payload staging,
+After Run ID creation and Host Lock acquisition, but before Run Payload staging,
 `run` performs one bounded SSH reachability check and one bounded Session Broker
 status check. Each layer has a 10-second ceiling. Failure releases the Host Lock,
-leaves no run/staging residue, and reports the failing layer plus its setup-guide
-repair link. A canonical stopped broker is accepted because the Fresh Run
-lifecycle restarts it with a new owned Maya UI Session.
+leaves no remote staging residue, preserves minimal local evidence, and reports
+the failing layer plus its setup-guide repair link. A canonical stopped broker
+is accepted because the Fresh Run lifecycle restarts it with a new owned Maya UI
+Session.
 
 With `broker.type: gg-mayasessiond`, `run` stages declared payloads under
 `workRoot/runs/<run-id>/`, writes a small Scenario wrapper into the remote

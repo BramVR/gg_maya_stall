@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,32 +16,38 @@ type freshRun interface {
 }
 
 type freshRunLifecycle struct {
-	repoDir                      string
-	options                      runOptions
-	runtime                      runRuntime
-	configPath                   string
-	scenario                     scenarioContract
-	host                         hostRuntime
-	resolvedRuntime              resolvedRuntime
-	context                      runContext
-	manifest                     runManifest
-	localRunStateOwned           bool
-	localEvidenceDirOwned        bool
-	sessionStartAttempted        bool
-	session                      brokerSessionIdentity
-	sessionStarted               bool
-	sessionSettled               bool
-	brokerResult                 ScenarioResult
-	result                       ScenarioResult
-	visualEvidence               []visualEvidenceArtifact
-	validatorResult              []validatorResult
-	stopPolicy                   string
-	followUp                     []string
-	releaseHostLock              bool
-	stopHostLockHeartbeat        func() error
-	checkHostLockHeartbeat       func() error
-	skipSettleArtifactCollection bool
-	skipSettleVisualEvidence     bool
+	repoDir                       string
+	options                       runOptions
+	runtime                       runRuntime
+	configPath                    string
+	scenario                      scenarioContract
+	host                          hostRuntime
+	resolvedRuntime               resolvedRuntime
+	context                       runContext
+	manifest                      runManifest
+	localRunStateOwned            bool
+	localEvidenceDirOwned         bool
+	sessionStartAttempted         bool
+	session                       brokerSessionIdentity
+	sessionStarted                bool
+	sessionSettled                bool
+	sessionRetained               bool
+	brokerResult                  ScenarioResult
+	result                        ScenarioResult
+	visualEvidence                []visualEvidenceArtifact
+	visualEvidenceCaptureComplete bool
+	validatorResult               []validatorResult
+	stopPolicy                    string
+	followUp                      []string
+	releaseHostLock               bool
+	stopHostLockHeartbeat         func() error
+	checkHostLockHeartbeat        func() error
+	skipSettleArtifactCollection  bool
+	skipSettleVisualEvidence      bool
+	accepted                      bool
+	failedLayer                   runFailureLayer
+	failure                       *runFailureEvidence
+	selectionCleanupState         string
 }
 
 func newFreshRun(repoDir string, options runOptions, runtime runRuntime) freshRun {
@@ -54,12 +62,36 @@ func newFreshRun(repoDir string, options runOptions, runtime runRuntime) freshRu
 	}
 }
 
+func failAcceptedSubmission(repoDir string, options runOptions, runtime runRuntime, submissionErr error) (runOutcome, error) {
+	if runtime.Now == nil {
+		runtime.Now = time.Now
+	}
+	run := &freshRunLifecycle{
+		repoDir:    repoDir,
+		options:    options,
+		runtime:    runtime,
+		stopPolicy: "stopped",
+	}
+	if err := run.accept(); err != nil {
+		return runOutcome{}, errors.Join(submissionErr, err, run.cleanupUnacceptedOwnership())
+	}
+	run.failedLayer = failureLayerSubmission
+	return run.finishEarlyFailure(submissionErr)
+}
+
 func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 	defer func() {
+		if run.accepted && err != nil && run.failedLayer == "" {
+			if evidenceErr := run.ensureAcceptedFailureEvidence(err); evidenceErr != nil {
+				err = errors.Join(err, evidenceErr)
+			}
+		}
+		cleanupIncomplete := run.failure != nil && run.failure.CleanupState == "pending" && !run.releaseHostLock
 		if run.sessionStarted && !run.sessionSettled {
 			if stopErr := run.runtime.Broker.StopSession(run.context, run.session); stopErr != nil {
 				err = errors.Join(err, fmt.Errorf("stop Maya UI Session for %s after run failure: %w", run.manifest.RunID, stopErr))
 				run.releaseHostLock = false
+				cleanupIncomplete = true
 			} else {
 				run.sessionSettled = true
 				if syncErr := run.syncEvidenceEvents(); syncErr != nil {
@@ -68,18 +100,13 @@ func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 				if cleanupErr := run.cleanupStoppedRun(); cleanupErr != nil {
 					err = errors.Join(err, cleanupErr)
 					run.releaseHostLock = false
+					cleanupIncomplete = true
 				}
 			}
 		}
-		if !run.sessionStartAttempted && run.localRunStateOwned {
-			runID := run.context.RunWorkspace.RunID()
-			if cleanupErr := cleanupRunState(run.repoDir, runID); cleanupErr != nil {
-				err = errors.Join(err, fmt.Errorf("clean up pre-session Fresh Run state for %s: %w", runID, cleanupErr))
-			}
-			if run.localEvidenceDirOwned {
-				if cleanupErr := os.Remove(run.context.EvidenceDir); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
-					err = errors.Join(err, fmt.Errorf("clean up empty pre-session Evidence directory for %s: %w", runID, cleanupErr))
-				}
+		if !run.sessionStartAttempted && !run.accepted {
+			if cleanupErr := run.cleanupUnacceptedOwnership(); cleanupErr != nil {
+				err = errors.Join(err, cleanupErr)
 			}
 		}
 		if run.stopHostLockHeartbeat != nil {
@@ -91,11 +118,44 @@ func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 		if run.releaseHostLock {
 			if releaseErr := run.host.release(); releaseErr != nil {
 				err = errors.Join(err, fmt.Errorf("release Host Lock for %s: %w", run.host.HostID, releaseErr))
+				cleanupIncomplete = true
 			}
+		}
+		if run.accepted && err != nil {
+			if run.failure == nil {
+				if evidenceErr := run.ensureAcceptedFailureEvidence(err); evidenceErr != nil {
+					err = errors.Join(err, evidenceErr)
+				}
+			}
+			if run.failure != nil && run.failure.CleanupState == "pending" {
+				switch {
+				case run.stopPolicy == "kept" && run.sessionRetained:
+					run.failure.CleanupState = "retained"
+				case cleanupIncomplete:
+					run.stopPolicy = "unresolved"
+					run.followUp = nil
+					run.failure.CleanupState = "failed"
+				default:
+					run.stopPolicy = "stopped"
+					run.followUp = nil
+					run.failure.CleanupState = "completed"
+				}
+			}
+			run.result = ScenarioResult{Status: resultStatusFailed, Summary: err.Error()}
+			if run.failure != nil {
+				run.failure.Diagnostic = err.Error()
+				if evidenceErr := run.updateTerminalFailureEvidence(); evidenceErr != nil {
+					err = errors.Join(err, evidenceErr)
+				}
+			}
+			outcome = run.currentOutcome()
 		}
 	}()
 
 	if err := run.setup(); err != nil {
+		if run.accepted && run.failedLayer != "" {
+			return run.finishEarlyFailure(err)
+		}
 		return run.finishFailedRun(err)
 	}
 	if err := run.hostLockHeartbeatError(); err != nil {
@@ -111,12 +171,34 @@ func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 	return outcome, err
 }
 
+func (run *freshRunLifecycle) cleanupUnacceptedOwnership() error {
+	if run.accepted || !run.localRunStateOwned {
+		return nil
+	}
+	runID := run.context.RunWorkspace.RunID()
+	var cleanupErr error
+	if err := cleanupRunState(run.repoDir, runID); err != nil {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("clean up pre-session Fresh Run state for %s: %w", runID, err))
+	}
+	if run.localEvidenceDirOwned {
+		if err := os.Remove(run.context.EvidenceDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("clean up empty pre-session Evidence directory for %s: %w", runID, err))
+		}
+	}
+	return cleanupErr
+}
+
 func (run *freshRunLifecycle) setup() error {
+	if err := run.accept(); err != nil {
+		return err
+	}
+	run.failedLayer = failureLayerRepoConfig
 	config, configPath, err := loadRepoRunConfig(run.repoDir)
 	if err != nil {
 		return err
 	}
 	run.configPath = configPath
+	run.failedLayer = failureLayerScenario
 	scenario, err := resolveScenarioContract(config, run.options.ScenarioName)
 	if err != nil {
 		return err
@@ -128,19 +210,37 @@ func (run *freshRunLifecycle) setup() error {
 	if err := validateScenarioRemotePaths(scenario.Config); err != nil {
 		return err
 	}
+	if err := run.configureScenarioWorkspace(scenario, configPath); err != nil {
+		return err
+	}
 	var resolved resolvedRuntime
+	run.failedLayer = failureLayerHostSelection
 	host, err := selectHostForRunValidated(run.repoDir, run.options, func(config mayaHostConfig) error {
-		if err := validateTrustedPluginArtifactsRoot(config); err != nil {
-			return err
+		run.failedLayer = failureLayerRemoteCheck
+		targetProfile := run.options.TargetProfile
+		if targetProfile == "" {
+			targetProfile = "default"
 		}
+		run.host = hostRuntime{TargetProfile: targetProfile, HostID: config.ID, Config: config}
+		run.manifest.TargetProfile = targetProfile
+		run.manifest.Host = config.ID
 		var err error
 		resolved, err = resolveRuntimeForHost(config)
 		if err != nil {
 			return err
 		}
+		run.resolvedRuntime = resolved
+		run.manifest.Runtime = resolved.Metadata
+		if err := validateTrustedPluginArtifactsRoot(config); err != nil {
+			return err
+		}
 		return rejectMismatchedRuntimeOverride(resolved, run.runtime)
 	})
 	if err != nil {
+		var validationErr *hostValidationError
+		if errors.As(err, &validationErr) {
+			run.selectionCleanupState = validationErr.cleanupState
+		}
 		return err
 	}
 	if host.release == nil {
@@ -150,12 +250,27 @@ func (run *freshRunLifecycle) setup() error {
 	run.releaseHostLock = true
 	run.stopHostLockHeartbeat, run.checkHostLockHeartbeat = startHostLockHeartbeat(run.host.renew)
 	run.resolvedRuntime = resolved
+	run.manifest.TargetProfile = host.TargetProfile
+	run.manifest.Host = host.HostID
+	run.manifest.Runtime = resolved.Metadata
+	run.failedLayer = failureLayerRunState
+	workspace, err := newRunWorkspace(run.repoDir, run.manifest.RunID, host.Config.WorkRoot, scenario.ScenarioResultPath)
+	if err != nil {
+		return err
+	}
+	run.context.RunWorkspace = workspace
+	run.context.ScenarioResultPath = workspace.LocalScenarioResultPath()
+	run.context.Environment[scenarioResultEnvVar] = workspace.LocalScenarioResultPath()
+	if err := run.writeManifest(); err != nil {
+		return err
+	}
 	if run.runtime.Host == nil {
 		run.runtime.Host = resolved.Host
 	}
 	if run.runtime.Broker == nil {
 		run.runtime.Broker = resolved.Broker
 	}
+	run.failedLayer = failureLayerRemoteCheck
 	if err := rejectInvalidSessionBroker(run.runtime.Broker); err != nil {
 		return err
 	}
@@ -173,54 +288,21 @@ func (run *freshRunLifecycle) setup() error {
 	if err := probeHostReadiness(readinessHost, readinessBroker, host.HostID, preRunProbeLayerTimeout); err != nil {
 		return err
 	}
-	runID := run.runtime.Now().UTC().Format("20060102T150405.000000000Z")
-	workspace, err := newRunWorkspace(run.repoDir, runID, host.Config.WorkRoot, scenario.ScenarioResultPath)
-	if err != nil {
-		return err
-	}
-	run.context = runContext{
-		RepoDir:            run.repoDir,
-		RunWorkspace:       workspace,
-		StateDir:           workspace.StateDir(),
-		EvidenceDir:        workspace.EvidenceDir(),
-		Workspace:          workspace.LocalWorkspace(),
-		EventsPath:         workspace.EventsPath(),
-		LogPath:            workspace.LogPath(),
-		ScenarioResultPath: workspace.LocalScenarioResultPath(),
-		Environment: map[string]string{
-			scenarioResultEnvVar: workspace.LocalScenarioResultPath(),
-		},
-	}
 	if root := trustedPluginArtifactsRoot(host.Config); root != "" {
 		run.context.Environment[trustedPluginArtifactsRootEnvVar] = root
 	}
-	ownership, err := createCleanRunDirsWithOwnership(run.context)
-	run.localRunStateOwned = ownership.StateDir
-	run.localEvidenceDirOwned = ownership.EvidenceDir
-	if err != nil {
-		return err
-	}
+	run.failedLayer = failureLayerScenario
 	// Freeze the payload before TrustCenter preflight so the checked paths are
 	// the exact bytes later staged to the Maya Host.
 	if err := snapshotRunPayload(run.context, scenario.Payload); err != nil {
 		return err
 	}
+	run.failedLayer = failureLayerRemoteCheck
 	if err := ensureTrustedPluginArtifactSnapshotAllowlistedForRun(run.context, host.Config, scenario); err != nil {
 		return err
 	}
 
-	run.manifest = runManifest{
-		RunID:         runID,
-		Scenario:      scenario.Name,
-		TargetProfile: host.TargetProfile,
-		Host:          host.HostID,
-		Runtime:       resolved.Metadata,
-		ConfigPath:    repoRelativePath(run.repoDir, configPath),
-		Payload:       scenario.Payload,
-	}
-	if err := writeJSONFile(filepath.Join(run.context.StateDir, "manifest.json"), run.manifest); err != nil {
-		return err
-	}
+	run.failedLayer = failureLayerRunState
 	if err := writeRunRetentionRecord(run.context, newRunRetentionRecord(run.context, run.manifest, host.Config, "running", "")); err != nil {
 		return err
 	}
@@ -230,6 +312,7 @@ func (run *freshRunLifecycle) setup() error {
 	if err := appendEvent(run.context.EventsPath, "run.started", scenario.Name); err != nil {
 		return err
 	}
+	run.failedLayer = ""
 	if err := run.startFreshSession(); err != nil {
 		return err
 	}
@@ -237,6 +320,323 @@ func (run *freshRunLifecycle) setup() error {
 		return err
 	}
 	return run.runtime.Host.StagePayload(run.context, scenario.Payload)
+}
+
+func (run *freshRunLifecycle) accept() error {
+	baseRunID := run.runtime.Now().UTC().Format("20060102T150405.000000000Z")
+	for attempt := 0; ; attempt++ {
+		runID := baseRunID
+		if attempt > 0 {
+			runID = fmt.Sprintf("%s-%d", baseRunID, attempt)
+		}
+		workspace, err := newRunWorkspace(run.repoDir, runID, "", evidenceStandaloneResultName)
+		if err != nil {
+			return err
+		}
+		context := runContext{
+			RepoDir:            run.repoDir,
+			RunWorkspace:       workspace,
+			StateDir:           workspace.StateDir(),
+			EvidenceDir:        workspace.EvidenceDir(),
+			Workspace:          workspace.LocalWorkspace(),
+			EventsPath:         workspace.EventsPath(),
+			LogPath:            workspace.LogPath(),
+			ScenarioResultPath: workspace.LocalScenarioResultPath(),
+			Environment: map[string]string{
+				scenarioResultEnvVar: workspace.LocalScenarioResultPath(),
+			},
+		}
+		if _, err := os.Lstat(context.EvidenceDir); err == nil {
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		ownership, err := createCleanRunDirsWithOwnership(context)
+		if err != nil {
+			if ownership.StateDir {
+				if cleanupErr := cleanupRunState(run.repoDir, runID); cleanupErr != nil {
+					return errors.Join(err, cleanupErr)
+				}
+			}
+			if errors.Is(err, os.ErrExist) {
+				continue
+			}
+			return err
+		}
+		run.context = context
+		run.localRunStateOwned = ownership.StateDir
+		run.localEvidenceDirOwned = ownership.EvidenceDir
+		break
+	}
+	run.manifest = runManifest{
+		Version:       evidenceSchemaVersion,
+		RunID:         run.context.RunWorkspace.RunID(),
+		Scenario:      run.options.ScenarioName,
+		TargetProfile: run.options.TargetProfile,
+	}
+	if err := run.writeManifest(); err != nil {
+		return err
+	}
+	if err := appendEvent(run.context.EventsPath, "run.accepted", run.options.ScenarioName); err != nil {
+		return err
+	}
+	run.accepted = true
+	if run.runtime.Accepted != nil {
+		run.runtime.Accepted(run.currentOutcome())
+	}
+	return nil
+}
+
+func (run *freshRunLifecycle) configureScenarioWorkspace(scenario scenarioContract, configPath string) error {
+	workspace, err := newRunWorkspace(run.repoDir, run.manifest.RunID, "", scenario.ScenarioResultPath)
+	if err != nil {
+		return err
+	}
+	run.context.RunWorkspace = workspace
+	run.context.ScenarioResultPath = workspace.LocalScenarioResultPath()
+	run.context.Environment[scenarioResultEnvVar] = workspace.LocalScenarioResultPath()
+	run.manifest.Scenario = scenario.Name
+	run.manifest.ConfigPath = repoRelativePath(run.repoDir, configPath)
+	run.manifest.Payload = scenario.Payload
+	return run.writeManifest()
+}
+
+func (run *freshRunLifecycle) writeManifest() error {
+	return writeJSONFile(filepath.Join(run.context.StateDir, evidenceManifestFileName), run.manifest)
+}
+
+func (run *freshRunLifecycle) finishEarlyFailure(runErr error) (runOutcome, error) {
+	cleanupState := run.selectionCleanupState
+	if cleanupState == "" {
+		cleanupState = "not-needed"
+	}
+	if run.stopHostLockHeartbeat != nil {
+		if heartbeatErr := run.stopHostLockHeartbeat(); heartbeatErr != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("renew Host Lock for %s: %w", run.host.HostID, heartbeatErr))
+		}
+		run.stopHostLockHeartbeat = nil
+		run.checkHostLockHeartbeat = nil
+	}
+	if run.releaseHostLock && !run.sessionStarted {
+		if err := run.host.release(); err != nil {
+			cleanupState = "failed"
+			runErr = errors.Join(runErr, fmt.Errorf("release Host Lock for %s: %w", run.host.HostID, err))
+		} else {
+			cleanupState = "completed"
+		}
+		run.releaseHostLock = false
+	}
+	run.result = ScenarioResult{Status: resultStatusFailed, Summary: runErr.Error()}
+	run.failure = &runFailureEvidence{
+		FailedLayer:     string(run.failedLayer),
+		Diagnostic:      runErr.Error(),
+		RemediationHint: earlyFailureRemediation(run.failedLayer),
+		CaptureState:    "not-started",
+		CleanupState:    cleanupState,
+	}
+	if cleanupState == "failed" {
+		run.stopPolicy = "unresolved"
+	}
+	if err := ensureFailureLog(run.context, runErr); err != nil {
+		return run.currentOutcome(), errors.Join(runErr, err)
+	}
+	if err := appendEvent(run.context.EventsPath, "run.failed", string(run.failedLayer)); err != nil {
+		return run.currentOutcome(), errors.Join(runErr, err)
+	}
+	if err := run.writeManifest(); err != nil {
+		return run.currentOutcome(), errors.Join(runErr, err)
+	}
+	if err := writeMinimalEvidenceBundle(run.context, run.manifest, run.result, run.failure); err != nil {
+		return run.currentOutcome(), errors.Join(runErr, err)
+	}
+	return run.currentOutcome(), runErr
+}
+
+type runFailureLayer string
+
+const (
+	failureLayerSubmission    runFailureLayer = "submission"
+	failureLayerRepoConfig    runFailureLayer = "repo-config"
+	failureLayerScenario      runFailureLayer = "scenario"
+	failureLayerHostSelection runFailureLayer = "host-selection"
+	failureLayerRemoteCheck   runFailureLayer = "remote-check"
+	failureLayerRunState      runFailureLayer = "run-state"
+	failureLayerExecution     runFailureLayer = "execution"
+)
+
+func earlyFailureRemediation(layer runFailureLayer) string {
+	switch layer {
+	case failureLayerSubmission:
+		return "Fix the command syntax while keeping the intended Scenario, then submit it again."
+	case failureLayerRepoConfig:
+		return "Fix or create the Repo Run Config, then submit the Scenario again."
+	case failureLayerScenario:
+		return "Fix the named Scenario and its declared inputs, then submit it again."
+	case failureLayerHostSelection:
+		return "Check Target Profile, Host Pool, Maya Host health, and Host Locks, then retry."
+	case failureLayerRemoteCheck:
+		return "Run maya-stall doctor for the same Scenario and repair the reported remote prerequisite."
+	case failureLayerRunState:
+		return "Check local Run State and Evidence paths, permissions, and disk capacity, then retry."
+	case failureLayerExecution:
+		return "Inspect the run diagnostic and evidence, resolve any retained Maya session or Host Lock, then retry the Scenario."
+	default:
+		return "Review the diagnostic, correct the submission prerequisite, and retry."
+	}
+}
+
+func (run *freshRunLifecycle) ensureAcceptedFailureEvidence(runErr error) error {
+	run.failedLayer = failureLayerExecution
+	run.result = ScenarioResult{Status: resultStatusFailed, Summary: runErr.Error()}
+	annotateVisualEvidenceTarget(run.visualEvidence, run.manifest.TargetProfile, run.manifest.Host)
+	captureState := "not-captured"
+	if len(run.visualEvidence) > 0 {
+		captureState = "partial"
+		if run.visualEvidenceCaptureComplete {
+			captureState = "completed"
+		}
+	}
+	run.failure = &runFailureEvidence{
+		FailedLayer:     string(run.failedLayer),
+		Diagnostic:      runErr.Error(),
+		RemediationHint: earlyFailureRemediation(run.failedLayer),
+		CaptureState:    captureState,
+		CleanupState:    "pending",
+	}
+	bundlePath := filepath.Join(run.context.EvidenceDir, evidenceBundleFileName)
+	_, bundleErr := os.Stat(bundlePath)
+	if bundleErr != nil && !errors.Is(bundleErr, os.ErrNotExist) {
+		return bundleErr
+	}
+	if err := run.recordTerminalFailureEvent(runErr); err != nil {
+		return err
+	}
+	if bundleErr == nil {
+		return run.updateTerminalFailureEvidence()
+	}
+	if err := ensureFailureLog(run.context, runErr); err != nil {
+		return err
+	}
+	if err := run.writeManifest(); err != nil {
+		return err
+	}
+	if err := writeMinimalEvidenceBundle(run.context, run.manifest, run.result, run.failure); err != nil {
+		return err
+	}
+	return run.updateTerminalFailureEvidence()
+}
+
+func (run *freshRunLifecycle) recordTerminalFailureEvent(runErr error) error {
+	if _, err := os.Stat(run.context.EventsPath); err == nil {
+		if err := appendEvent(run.context.EventsPath, "run.failed", runErr.Error()); err != nil {
+			return err
+		}
+		return copySequencedEvents(run.context.EventsPath, filepath.Join(run.context.EvidenceDir, evidenceEventsFileName))
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return appendSequencedEvidenceEvent(filepath.Join(run.context.EvidenceDir, evidenceEventsFileName), "run.failed", runErr.Error())
+}
+
+func appendSequencedEvidenceEvent(path string, eventName string, detail string) error {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	trimmed := bytes.TrimSpace(content)
+	sequence := 1
+	if len(trimmed) > 0 {
+		lines := bytes.Split(trimmed, []byte{'\n'})
+		for index, line := range lines {
+			var event map[string]any
+			if err := json.Unmarshal(line, &event); err != nil {
+				return fmt.Errorf("parse run event %d: %w", index+1, err)
+			}
+		}
+		sequence = len(lines) + 1
+	}
+	record, err := json.Marshal(map[string]any{"detail": detail, "event": eventName, "sequence": sequence})
+	if err != nil {
+		return err
+	}
+	var updated bytes.Buffer
+	if len(trimmed) > 0 {
+		updated.Write(trimmed)
+		updated.WriteByte('\n')
+	}
+	updated.Write(record)
+	updated.WriteByte('\n')
+	if err := rejectExistingFileLeaf(path); err != nil {
+		return err
+	}
+	return os.WriteFile(path, updated.Bytes(), 0o644)
+}
+
+func (run *freshRunLifecycle) updateTerminalFailureEvidence() error {
+	path := filepath.Join(run.context.EvidenceDir, evidenceBundleFileName)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var bundle evidenceBundle
+	if err := json.Unmarshal(content, &bundle); err != nil {
+		return err
+	}
+	if len(run.visualEvidence) > 0 {
+		bundle.VisualEvidence = mergeVisualEvidence(bundle.VisualEvidence, run.visualEvidence)
+	}
+	bundle.Status = resultStatusFailed
+	bundle.Failure = run.failure
+	bundle.Artifacts = buildEvidenceBundleCatalog(bundle)
+	return writeJSONFile(path, bundle)
+}
+
+func writeMinimalEvidenceBundle(context runContext, manifest runManifest, result ScenarioResult, failure *runFailureEvidence) error {
+	for _, file := range []struct {
+		source      string
+		destination string
+	}{
+		{filepath.Join(context.StateDir, evidenceManifestFileName), filepath.Join(context.EvidenceDir, evidenceManifestFileName)},
+		{context.LogPath, filepath.Join(context.EvidenceDir, evidenceLogPath)},
+	} {
+		if err := copyFallbackEvidenceFile(file.source, file.destination); err != nil {
+			return err
+		}
+	}
+	if err := copySequencedEvents(context.EventsPath, filepath.Join(context.EvidenceDir, evidenceEventsFileName)); err != nil {
+		return err
+	}
+	bundle := evidenceBundle{
+		Version:       evidenceSchemaVersion,
+		RunID:         manifest.RunID,
+		Scenario:      manifest.Scenario,
+		Status:        result.Status,
+		TargetProfile: manifest.TargetProfile,
+		Host:          manifest.Host,
+		Runtime:       manifest.Runtime,
+		BrokerSession: manifest.BrokerSession,
+		Manifest:      evidenceManifestFileName,
+		Events:        evidenceEventsFileName,
+		Log:           evidenceLogPath,
+		Payload:       manifest.Payload,
+		Failure:       failure,
+	}
+	bundle.Artifacts = buildEvidenceBundleCatalog(bundle)
+	return writeJSONFile(filepath.Join(context.EvidenceDir, evidenceBundleFileName), bundle)
+}
+
+func copyFallbackEvidenceFile(source string, destination string) error {
+	content, err := os.ReadFile(source)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return err
+	}
+	if err := rejectExistingFileLeaf(destination); err != nil {
+		return err
+	}
+	return os.WriteFile(destination, content, 0o644)
 }
 
 func startHostLockHeartbeat(renew func() error) (func() error, func() error) {
@@ -444,7 +844,12 @@ func (run *freshRunLifecycle) writeBrokerFailureEvidence(runErr error) error {
 	if err != nil {
 		return err
 	}
-	return writeEvidenceBundle(run.context, run.manifest, run.scenario, result, artifacts, nil)
+	run.visualEvidence = mergeVisualEvidence(run.visualEvidence, artifacts)
+	if len(artifacts) > 0 {
+		capturePlan, planErr := planScenarioVisualEvidence(run.scenario.Name, run.scenario.Config.Evidence)
+		run.visualEvidenceCaptureComplete = planErr == nil && len(artifacts) == len(capturePlan)
+	}
+	return writeEvidenceBundle(run.context, run.manifest, run.scenario, result, run.visualEvidence, nil)
 }
 
 func (run *freshRunLifecycle) captureFailureScreenshot() ([]visualEvidenceArtifact, error) {
@@ -546,6 +951,7 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 		if err != nil {
 			return runOutcome{}, err
 		}
+		run.visualEvidenceCaptureComplete = true
 	}
 	annotateVisualEvidenceTarget(run.visualEvidence, run.manifest.TargetProfile, run.manifest.Host)
 	runScopedVisualEvidence, err := readRunScopedVisualEvidence(run.context)
@@ -691,15 +1097,24 @@ func (run *freshRunLifecycle) retainSession(reason string) error {
 		return err
 	}
 	run.sessionSettled = true
+	run.sessionRetained = true
 	run.releaseHostLock = false
 	return run.syncEvidenceEvents()
 }
 
 func (run *freshRunLifecycle) currentOutcome() runOutcome {
+	scenario := run.scenario.Name
+	if scenario == "" {
+		scenario = run.options.ScenarioName
+	}
+	targetProfile := run.host.TargetProfile
+	if targetProfile == "" {
+		targetProfile = run.options.TargetProfile
+	}
 	return runOutcome{
 		RunID:            run.manifest.RunID,
-		Scenario:         run.scenario.Name,
-		TargetProfile:    run.host.TargetProfile,
+		Scenario:         scenario,
+		TargetProfile:    targetProfile,
 		Host:             run.host.HostID,
 		StateDir:         run.context.StateDir,
 		EvidenceDir:      run.context.EvidenceDir,
@@ -707,6 +1122,8 @@ func (run *freshRunLifecycle) currentOutcome() runOutcome {
 		Validators:       run.validatorResult,
 		StopPolicy:       run.stopPolicy,
 		FollowUpCommands: run.followUp,
+		Accepted:         run.accepted,
+		Failure:          run.failure,
 	}
 }
 
@@ -731,11 +1148,10 @@ func (run *freshRunLifecycle) syncEvidenceEvents() error {
 		}
 		return err
 	}
-	events, err := os.ReadFile(run.context.EventsPath)
-	if err != nil {
+	if _, err := os.ReadFile(run.context.EventsPath); err != nil {
 		return fmt.Errorf("read run events after stopping run: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(run.context.EvidenceDir, evidenceEventsFileName), events, 0o644); err != nil {
+	if err := copySequencedEvents(run.context.EventsPath, filepath.Join(run.context.EvidenceDir, evidenceEventsFileName)); err != nil {
 		return fmt.Errorf("update Evidence Bundle events after stopping run: %w", err)
 	}
 	return nil

@@ -93,8 +93,11 @@ test("public proof is exact-allowlisted before upload", () => {
   const confidentiality = required.indexOf("      - name: Public artifact confidentiality gate");
   const upload = required.indexOf("      - name: Upload live Visual Evidence proof");
   assert.ok(confidentiality > 0 && upload > confidentiality);
-  for (const file of ["evidence-metadata.json", "media-review.json", "proof-artifact-manifest.json", "recording.mp4", "desktop-screenshot.png"]) {
+  for (const file of ["evidence-metadata.json", "proof-artifact-manifest.json"]) {
     assert.match(required.slice(confidentiality, upload), new RegExp(file.replace(".", "\\.")));
+  }
+  for (const file of ["media-review.json", "recording.mp4", "desktop-screenshot.png"]) {
+    assert.doesNotMatch(required.slice(confidentiality, upload), new RegExp(file.replace(".", "\\.")));
   }
 });
 

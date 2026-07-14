@@ -355,7 +355,6 @@ func TestLiveVisualEvidenceProofWorkflowRequiresSmokePass(t *testing.T) {
 		"TestOptInRealRunScopedDesktopOpsSmoke",
 		"-count=1 -parallel=1 -timeout=20m",
 		"MAYA_STALL_LIVE_PROOF_ARTIFACT_ENABLED",
-		"MAYA_STALL_LIVE_PROOF_MEDIA_REVIEWED",
 		"live-visual-evidence-proof",
 		"assert-public-artifact-confidentiality.mjs",
 		"all eight individual live smoke tests must pass without skips",
@@ -367,6 +366,9 @@ func TestLiveVisualEvidenceProofWorkflowRequiresSmokePass(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("proof workflow missing %q", want)
 		}
+	}
+	if strings.Contains(text, "MAYA_STALL_LIVE_PROOF_MEDIA_REVIEWED") {
+		t.Fatal("proof workflow must not self-attest public media review")
 	}
 	if got := strings.Count(text, "go test -json ./internal/cli -run"); got != 1 {
 		t.Fatalf("live smoke Go test process count = %d, want 1", got)
@@ -1198,7 +1200,7 @@ func publishOptionalLiveVisualEvidenceProofArtifact(t *testing.T, evidenceDir st
 		t.Fatalf("parse live Visual Evidence proof artifact config: %v", err)
 	}
 	if !options.Enabled {
-		t.Logf("Live Visual Evidence proof artifact upload disabled; set %s=true to publish a sanitized CI artifact", liveProofArtifactEnabledEnv)
+		t.Logf("Live Visual Evidence proof artifact upload disabled; set %s=true to publish public-safe metadata", liveProofArtifactEnabledEnv)
 		return
 	}
 	published, err := publishLiveVisualEvidenceProofArtifact(evidenceDir, options)

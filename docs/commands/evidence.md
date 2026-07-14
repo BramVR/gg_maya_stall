@@ -86,21 +86,20 @@ downloadable artifact named `live-visual-evidence-proof`. It is disabled by
 default and enabled only in the live workflow through
 `MAYA_STALL_LIVE_PROOF_ARTIFACT_ENABLED=true`.
 
-The artifact contains only reviewer-facing proof:
+The public artifact contains only reviewer-facing metadata:
 
 - `proof-artifact-manifest.json`
 - `evidence-metadata.json`
-- `media-review.json`
-- `screenshots/desktop-screenshot.png`
-- `recordings/recording.mp4`
 
-The MP4 comes from the standalone `maya-stall record` Evidence Bundle. The live
-proof smoke also validates a recording-enabled Scenario through the paired live
-run gate before accepting the PR.
+The protected runner still captures and validates a real broker-backed PNG and
+the standalone `maya-stall record` MP4. It also validates a recording-enabled
+Scenario through the paired live run gate before accepting the PR. Those pixel
+files stay runner-local and are never uploaded.
 
-The live proof artifact only accepts bundles whose Visual Evidence carries
-`broker-capture` provenance with a `sha256` that matches the artifact bytes;
-`discovered` or `fake-broker-capture` origins fail the publish.
+`evidence-metadata.json` records `mediaPublished: false` and the verified source
+hashes. The publisher only accepts bundles whose Visual Evidence carries
+`broker-capture` provenance with a `sha256` that matches the runner-local
+artifact bytes; `discovered` or `fake-broker-capture` origins fail the publish.
 
 Retention is short and configurable with
 `MAYA_STALL_LIVE_PROOF_RETENTION_DAYS` or the matching workflow variable.

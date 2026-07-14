@@ -183,26 +183,26 @@ When the live gate passes, the workflow uploads a GitHub Actions artifact named
 
 - `proof-artifact-manifest.json`
 - `evidence-metadata.json`
-- `media-review.json`
-- `screenshots/desktop-screenshot.png`
-- `recordings/recording.mp4`
 
 The proof artifact is generated only after the local Evidence Bundle exists and
 only when the live workflow sets
-`MAYA_STALL_LIVE_PROOF_ARTIFACT_ENABLED=true`. The manifest lists relative
-paths, media types, byte sizes, SHA256 hashes, run id, Scenario, Target Profile,
-the public-safe selected host alias, and retention days. The public artifact
-confidentiality gate rejects proof text containing private host aliases, user
-paths, SSH material, token-like fields, license variables, or symlinks before
-upload. The gate also requires `media-review.json` to acknowledge that the
-desktop PNG/MP4 came from a controlled public-proof desktop before those binary
-files are uploaded.
+`MAYA_STALL_LIVE_PROOF_ARTIFACT_ENABLED=true`. The protected runner still
+captures and validates the real broker-backed PNG and MP4, including hashes and
+provenance events, but public artifacts contain metadata only. Desktop pixel
+media stays runner-local and is never uploaded. `evidence-metadata.json`
+records `mediaPublished: false` plus the verified source hashes; the manifest
+lists only the uploaded metadata file with its byte size and SHA256 alongside
+run id, Scenario, Target Profile, public-safe selected host alias, and retention
+days. The public artifact confidentiality gate rejects unexpected files and
+proof text containing private host aliases, user paths, SSH material,
+token-like fields, license variables, or symlinks before upload.
 
 S3/R2 publishing is deferred. A future backend should use a separate
 `evidence store` config block with bucket endpoint, short lifecycle retention,
 scoped write credentials from CI/user secrets only, and signed or otherwise
-review-scoped reads. It must remain opt-in and must reuse the same sanitized
-proof-artifact manifest and confidentiality gate before upload.
+review-scoped reads. Any future binary-media publication must add a deterministic
+pixel-redaction boundary and reuse the same proof-artifact manifest and
+confidentiality gate before upload.
 
 For live-required fork PRs, automation withholds live host credentials and fails
 closed. A maintainer must review and promote the change to a trusted

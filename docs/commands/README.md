@@ -10,6 +10,7 @@ same order as the CLI help.
 - [version](version.md)
 - [init](init.md)
 - [doctor](doctor.md)
+- [plan](plan.md)
 - [run](run.md)
 - [screenshot](screenshot.md)
 - [record](record.md)

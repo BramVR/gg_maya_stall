@@ -31,10 +31,11 @@ support dry-run paths where available.
 maya-stall version
 maya-stall init
 maya-stall doctor [--host-config <path>] [--target-profile <name>] [--host <id>] [--scenario <name>] [--repair-trusted-plugin-allowlist]
+maya-stall plan [--json] [--host-config <path>] <scenario>
 ```
 
-See [version](commands/version.md), [init](commands/init.md), and
-[doctor](commands/doctor.md).
+See [version](commands/version.md), [init](commands/init.md),
+[doctor](commands/doctor.md), and [plan](commands/plan.md).
 
 ### Run Lifecycle
 

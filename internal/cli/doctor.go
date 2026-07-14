@@ -161,6 +161,14 @@ func validateScenarioRemotePaths(scenario scenarioConfig) error {
 			return err
 		}
 	}
+	for _, validator := range scenario.Validators {
+		if validator.Path == "" {
+			continue
+		}
+		if err := rejectSFTPRepoPath(validator.Path); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

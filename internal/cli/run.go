@@ -156,6 +156,11 @@ type manifestPayload struct {
 	Staged string `json:"staged"`
 }
 
+type manifestPayloadDeclaration struct {
+	Kind   string
+	Source string
+}
+
 type ScenarioResult struct {
 	Status  string `json:"status"`
 	Summary string `json:"summary,omitempty"`
@@ -381,6 +386,18 @@ func ensureOutputPathHasNoSymlinkParent(repoDir string, relativePath string) err
 
 func buildManifestPayload(payload runPayload) ([]manifestPayload, error) {
 	var manifest []manifestPayload
+	for _, declaration := range manifestPayloadDeclarations(payload) {
+		item, err := buildManifestPayloadItem(declaration.Kind, declaration.Source)
+		if err != nil {
+			return nil, err
+		}
+		manifest = append(manifest, item)
+	}
+	return manifest, nil
+}
+
+func manifestPayloadDeclarations(payload runPayload) []manifestPayloadDeclaration {
+	var declarations []manifestPayloadDeclaration
 	for _, item := range []struct {
 		kind  string
 		paths []string
@@ -392,19 +409,23 @@ func buildManifestPayload(payload runPayload) ([]manifestPayload, error) {
 		{kind: "includePaths", paths: payload.IncludePaths},
 	} {
 		for _, source := range item.paths {
-			cleanSource, err := cleanRepoRelativePath(source)
-			if err != nil {
-				return nil, err
-			}
-			cleanSource = filepath.ToSlash(cleanSource)
-			manifest = append(manifest, manifestPayload{
-				Kind:   item.kind,
-				Source: cleanSource,
-				Staged: filepath.Join("payload", item.kind, cleanSource),
-			})
+			declarations = append(declarations, manifestPayloadDeclaration{Kind: item.kind, Source: source})
 		}
 	}
-	return manifest, nil
+	return declarations
+}
+
+func buildManifestPayloadItem(kind string, source string) (manifestPayload, error) {
+	cleanSource, err := cleanRepoRelativePath(source)
+	if err != nil {
+		return manifestPayload{}, err
+	}
+	cleanSource = filepath.ToSlash(cleanSource)
+	return manifestPayload{
+		Kind:   kind,
+		Source: cleanSource,
+		Staged: filepath.Join("payload", kind, cleanSource),
+	}, nil
 }
 
 func cleanRepoRelativePath(path string) (string, error) {
@@ -1193,11 +1214,15 @@ type fakeHost struct {
 func (fakeHost) ValidateTransportConfig() error { return nil }
 
 func (host fakeHost) ProbeTransport(time.Duration) error {
-	switch strings.ToLower(strings.TrimSpace(host.SSHStatus)) {
+	return validateFakeTransportStatus(host.SSHStatus)
+}
+
+func validateFakeTransportStatus(status string) error {
+	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "", "ok", "healthy", "reachable":
 		return nil
 	default:
-		return fmt.Errorf("fake SSH transport is %q", strings.TrimSpace(host.SSHStatus))
+		return fmt.Errorf("fake SSH transport is %q", strings.TrimSpace(status))
 	}
 }
 

@@ -39,7 +39,7 @@ See [version](commands/version.md), [init](commands/init.md), and
 ### Run Lifecycle
 
 ```text
-maya-stall run [host flags] [lock flags] [stop flags] <scenario>
+maya-stall run [--json] [host flags] [lock flags] [stop flags] <scenario>
 maya-stall status [--run <run-id>]
 maya-stall attach <run-id>
 maya-stall attach <run-id> screenshot
@@ -67,6 +67,11 @@ Lock and stop flags:
 See [run](commands/run.md), [status](commands/status.md),
 [attach](commands/attach.md), and [stop](commands/stop.md).
 
+An identified Scenario submission receives a Run ID before validation, host
+selection, or remote checks. `--json` emits newline-delimited acceptance and
+terminal records; syntax that never identifies a Scenario emits one usage-error
+record and creates no run.
+
 ### Visual Evidence
 
 ```text
@@ -88,7 +93,7 @@ verify the current Host Lock owner before touching the desktop.
 ### Evidence And Review Publishing
 
 ```text
-maya-stall evidence collect [host flags] <scenario>
+maya-stall evidence collect [--json] [host flags] <scenario>
 maya-stall evidence publish --destination <path> --base-url <url> <evidence-bundle-dir>
 maya-stall review-comment github --repo <owner/name> --pr <number> [--token-env <name>] [--api-url <url>] [--dry-run] <published-evidence-dir>
 maya-stall review-comment gitlab --project <path-or-id> --merge-request <iid> [--token-env <name>] [--base-url <url>] [--dry-run] <published-evidence-dir>

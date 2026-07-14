@@ -122,10 +122,6 @@ func captureRunScopedScreenshot(repoDir string, runID string) (runOutcome, visua
 	if err := rejectRunScopedStateWriteLeaves(context, true); err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}
-	eventsBeforeCapture, err := fileSize(context.EventsPath)
-	if err != nil {
-		return runOutcome{}, visualEvidenceArtifact{}, err
-	}
 	artifact, err := capturer.CaptureScreenshot(context, screenshotRequest{Name: runScopedScreenshotName})
 	if err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
@@ -135,7 +131,7 @@ func captureRunScopedScreenshot(repoDir string, runID string) (runOutcome, visua
 	if err := appendEvent(context.EventsPath, "attach.screenshot.captured", artifact.Path); err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}
-	if err := appendRunScopedVisualEvidence(repoDir, runID, artifact, context.EventsPath, eventsBeforeCapture); err != nil {
+	if err := appendRunScopedVisualEvidence(repoDir, runID, artifact, context.EventsPath); err != nil {
 		return runOutcome{}, visualEvidenceArtifact{}, err
 	}
 	return runScopedOutcome(run, context), artifact, nil
@@ -228,17 +224,6 @@ func rejectRunScopedStateWriteLeaves(context runContext, includeVisualEvidenceSt
 	return nil
 }
 
-func fileSize(path string) (int64, error) {
-	info, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	return info.Size(), nil
-}
-
 func readRunScopedState(repoDir string, runID string) (keptRun, error) {
 	manifest, stateDir, err := readKeptRunManifest(repoDir, runID)
 	if err != nil {
@@ -275,7 +260,7 @@ func runScopedOutcome(run keptRun, context runContext) runOutcome {
 	}
 }
 
-func appendRunScopedVisualEvidence(repoDir string, runID string, artifact visualEvidenceArtifact, stateEventsPath string, eventsOffset int64) error {
+func appendRunScopedVisualEvidence(repoDir string, runID string, artifact visualEvidenceArtifact, stateEventsPath string) error {
 	statePath := filepath.Join(repoDir, ".maya-stall", "state", "runs", runID, runScopedVisualEvidenceStateName)
 	if err := appendRunScopedVisualEvidenceState(statePath, artifact); err != nil {
 		return err
@@ -288,7 +273,7 @@ func appendRunScopedVisualEvidence(repoDir string, runID string, artifact visual
 	if err != nil {
 		return err
 	}
-	if err := appendRunScopedEvidenceEvents(stateEventsPath, filepath.Join(repoDir, "artifacts", "maya-stall", runID, evidenceEventsFileName), eventsOffset); err != nil {
+	if err := appendRunScopedEvidenceEvents(stateEventsPath, filepath.Join(repoDir, "artifacts", "maya-stall", runID, evidenceEventsFileName)); err != nil {
 		return err
 	}
 	var bundle evidenceBundle
@@ -307,29 +292,8 @@ func appendRunScopedVisualEvidence(repoDir string, runID string, artifact visual
 	return writeJSONFile(path, bundle)
 }
 
-func appendRunScopedEvidenceEvents(statePath string, evidencePath string, offset int64) error {
-	if err := rejectExistingFileLeaf(evidencePath); err != nil {
-		return err
-	}
-	source, err := os.Open(statePath)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = source.Close()
-	}()
-	if _, err := source.Seek(offset, io.SeekStart); err != nil {
-		return err
-	}
-	destination, err := os.OpenFile(evidencePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(destination, source); err != nil {
-		_ = destination.Close()
-		return err
-	}
-	return destination.Close()
+func appendRunScopedEvidenceEvents(statePath string, evidencePath string) error {
+	return copySequencedEvents(statePath, evidencePath)
 }
 
 func appendRunScopedVisualEvidenceState(path string, artifact visualEvidenceArtifact) error {

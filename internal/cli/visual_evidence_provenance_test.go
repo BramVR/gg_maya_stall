@@ -302,18 +302,18 @@ scenarios:
 	}
 }
 
-func readEventRecords(t *testing.T, path string) []map[string]string {
+func readEventRecords(t *testing.T, path string) []map[string]any {
 	t.Helper()
 	content, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read events %s: %v", path, err)
 	}
-	var records []map[string]string
+	var records []map[string]any
 	for _, line := range strings.Split(strings.TrimSpace(string(content)), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		var record map[string]string
+		var record map[string]any
 		if err := json.Unmarshal([]byte(line), &record); err != nil {
 			t.Fatalf("parse event line %q: %v", line, err)
 		}
@@ -322,7 +322,7 @@ func readEventRecords(t *testing.T, path string) []map[string]string {
 	return records
 }
 
-func eventRecordByName(t *testing.T, records []map[string]string, event string) map[string]string {
+func eventRecordByName(t *testing.T, records []map[string]any, event string) map[string]any {
 	t.Helper()
 	for _, record := range records {
 		if record["event"] == event {

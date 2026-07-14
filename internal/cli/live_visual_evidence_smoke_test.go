@@ -9,6 +9,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -355,7 +356,6 @@ func TestLiveVisualEvidenceProofWorkflowRequiresSmokePass(t *testing.T) {
 		"TestOptInRealRunScopedDesktopOpsSmoke",
 		"-count=1 -parallel=1 -timeout=20m",
 		"MAYA_STALL_LIVE_PROOF_ARTIFACT_ENABLED",
-		"MAYA_STALL_LIVE_PROOF_MEDIA_REVIEWED",
 		"live-visual-evidence-proof",
 		"assert-public-artifact-confidentiality.mjs",
 		"all eight individual live smoke tests must pass without skips",
@@ -367,6 +367,9 @@ func TestLiveVisualEvidenceProofWorkflowRequiresSmokePass(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("proof workflow missing %q", want)
 		}
+	}
+	if strings.Contains(text, "MAYA_STALL_LIVE_PROOF_MEDIA_REVIEWED") {
+		t.Fatal("proof workflow must not self-attest public media review")
 	}
 	if got := strings.Count(text, "go test -json ./internal/cli -run"); got != 1 {
 		t.Fatalf("live smoke Go test process count = %d, want 1", got)
@@ -1198,14 +1201,109 @@ func publishOptionalLiveVisualEvidenceProofArtifact(t *testing.T, evidenceDir st
 		t.Fatalf("parse live Visual Evidence proof artifact config: %v", err)
 	}
 	if !options.Enabled {
-		t.Logf("Live Visual Evidence proof artifact upload disabled; set %s=true to publish a sanitized CI artifact", liveProofArtifactEnabledEnv)
+		t.Logf("Live Visual Evidence proof artifact upload disabled; set %s=true to publish public-safe metadata", liveProofArtifactEnabledEnv)
 		return
 	}
 	published, err := publishLiveVisualEvidenceProofArtifact(evidenceDir, options)
 	if err != nil {
 		t.Fatalf("publish live Visual Evidence proof artifact: %v", err)
 	}
+	legacyCompatibility, err := legacyTrustedWorkflowMetadataCompatibilityRequested(os.LookupEnv)
+	if err != nil {
+		t.Fatalf("parse legacy trusted-workflow compatibility: %v", err)
+	}
+	if legacyCompatibility {
+		if err := addLegacyTrustedWorkflowMetadataCompatibility(published); err != nil {
+			t.Fatalf("add legacy trusted-workflow metadata compatibility: %v", err)
+		}
+	}
 	t.Logf("Live Visual Evidence proof artifact: live-visual-evidence-proof path=%s retentionDays=%d", filepath.Base(published), options.RetentionDays)
+}
+
+const legacyLiveProofMediaReviewedEnv = "MAYA_STALL_LIVE_PROOF_MEDIA_REVIEWED"
+
+func legacyTrustedWorkflowMetadataCompatibilityRequested(lookup func(string) (string, bool)) (bool, error) {
+	raw, ok := lookup(legacyLiveProofMediaReviewedEnv)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return false, nil
+	}
+	return parseBoolConfig(raw)
+}
+
+func addLegacyTrustedWorkflowMetadataCompatibility(destination string) error {
+	// workflow_run executes the trusted workflow from main. During this one-step
+	// transition, its retired five-path allowlist still runs before the new
+	// metadata-only workflow lands. Satisfy those names with explicit JSON
+	// metadata markers; never copy or synthesize desktop pixels.
+	type marker struct {
+		Kind           string `json:"kind"`
+		MediaPublished bool   `json:"mediaPublished"`
+		SourceMetadata string `json:"sourceMetadata"`
+	}
+	type mediaReview struct {
+		Reviewed       bool     `json:"reviewed"`
+		Scope          string   `json:"scope"`
+		Paths          []string `json:"paths"`
+		MediaPublished bool     `json:"mediaPublished"`
+	}
+	markerPaths := []string{
+		"recordings/recording.mp4",
+		"screenshots/desktop-screenshot.png",
+	}
+	for _, relative := range markerPaths {
+		if err := writePublicSafeProofJSON(destination, relative, marker{
+			Kind:           "metadata-only-compatibility-marker",
+			MediaPublished: false,
+			SourceMetadata: liveProofEvidenceMetadataName,
+		}); err != nil {
+			return err
+		}
+	}
+	if err := writePublicSafeProofJSON(destination, "media-review.json", mediaReview{
+		Reviewed:       true,
+		Scope:          "metadata-only-legacy-workflow-compatibility",
+		Paths:          markerPaths,
+		MediaPublished: false,
+	}); err != nil {
+		return err
+	}
+
+	manifestPath := filepath.Join(destination, liveProofArtifactManifestName)
+	manifestBytes, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return err
+	}
+	var manifest liveVisualEvidenceProofArtifactManifest
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		return err
+	}
+	for _, relative := range append([]string{"media-review.json"}, markerPaths...) {
+		entry, err := proofArtifactFileEntry(destination, relative, "compatibility-metadata", "application/json")
+		if err != nil {
+			return err
+		}
+		manifest.Artifacts = append(manifest.Artifacts, entry)
+	}
+	sort.SliceStable(manifest.Artifacts, func(i, j int) bool {
+		return manifest.Artifacts[i].Path < manifest.Artifacts[j].Path
+	})
+	return writePublicSafeProofJSON(destination, liveProofArtifactManifestName, manifest)
+}
+
+func writePublicSafeProofJSON(root string, relative string, value any) error {
+	content, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	content = append(content, '\n')
+	if err := rejectConfidentialProofText(relative, string(content)); err != nil {
+		return err
+	}
+	path := filepath.Join(root, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, content, 0o644)
 }
 
 func mayaTasklistSessions(host mayaHostConfig) ([]windowsProcessSession, error) {

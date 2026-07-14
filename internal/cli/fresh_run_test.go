@@ -42,7 +42,7 @@ func TestFreshRunLifecycleOrdersSetupExecuteAndSettle(t *testing.T) {
 	}
 }
 
-func TestFreshRunLifecycleDoesNotCleanRunStateItDidNotCreate(t *testing.T) {
+func TestFreshRunLifecycleSelectsUniqueRunIDWithoutChangingExistingState(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	now := time.Date(2026, 7, 6, 12, 30, 0, 0, time.UTC)
 	runID := now.Format("20060102T150405.000000000Z")
@@ -51,16 +51,19 @@ func TestFreshRunLifecycleDoesNotCleanRunStateItDidNotCreate(t *testing.T) {
 	runtime := defaultRunRuntime()
 	runtime.Now = func() time.Time { return now }
 
-	_, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
-	if err == nil || !strings.Contains(err.Error(), "create clean run state") {
-		t.Fatalf("Fresh Run error = %v, want existing run-state collision", err)
+	outcome, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
+	if err != nil {
+		t.Fatalf("Fresh Run error = %v", err)
+	}
+	if outcome.RunID == runID {
+		t.Fatalf("Fresh Run reused colliding Run ID %q", runID)
 	}
 	if content, err := os.ReadFile(sentinel); err != nil || string(content) != "keep\n" {
 		t.Fatalf("Fresh Run changed colliding run state: content=%q err=%v", content, err)
 	}
 }
 
-func TestFreshRunLifecycleCleansOwnedStateAfterPartialDirectorySetup(t *testing.T) {
+func TestFreshRunLifecycleSelectsUniqueRunIDWithoutChangingExistingEvidence(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	now := time.Date(2026, 7, 6, 12, 30, 0, 0, time.UTC)
 	runID := now.Format("20060102T150405.000000000Z")
@@ -69,9 +72,12 @@ func TestFreshRunLifecycleCleansOwnedStateAfterPartialDirectorySetup(t *testing.
 	runtime := defaultRunRuntime()
 	runtime.Now = func() time.Time { return now }
 
-	_, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
-	if err == nil {
-		t.Fatal("Fresh Run returned nil error for blocked Evidence directory")
+	outcome, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
+	if err != nil {
+		t.Fatalf("Fresh Run error = %v", err)
+	}
+	if outcome.RunID == runID {
+		t.Fatalf("Fresh Run reused colliding Run ID %q", runID)
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "runs", runID)); !os.IsNotExist(statErr) {
 		t.Fatalf("Fresh Run left owned state after partial setup: %v", statErr)
@@ -161,8 +167,8 @@ func TestFreshRunLifecycleSettlesStopPolicyAndFailures(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "retention failed") {
 			t.Fatalf("Fresh Run error = %v, want retention failure", err)
 		}
-		if outcome.RunID != "" || outcome.StopPolicy != "" {
-			t.Fatalf("retention-failure outcome = %+v, want no reported kept run", outcome)
+		if outcome.RunID == "" || outcome.StopPolicy != "stopped" || outcome.Result.Status != resultStatusFailed || len(outcome.FollowUpCommands) != 0 {
+			t.Fatalf("retention-failure outcome = %+v, want terminal stopped failure", outcome)
 		}
 		if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")); !os.IsNotExist(statErr) {
 			t.Fatalf("retention-failure Host Lock = %v, want released after session stop", statErr)
@@ -192,9 +198,16 @@ func TestFreshRunLifecycleSettlesStopPolicyAndFailures(t *testing.T) {
 		runtime := defaultRunRuntime()
 		runtime.Broker = emptyIdentitySessionBroker{fakeSessionLifecycle: fakeSessionLifecycle{}}
 
-		_, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
+		outcome, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
 		if err == nil || !strings.Contains(err.Error(), "without an owned session identity") {
 			t.Fatalf("Fresh Run error = %v, want missing owned session identity", err)
+		}
+		if outcome.StopPolicy != "unresolved" || len(outcome.FollowUpCommands) != 0 {
+			t.Fatalf("ambiguous broker session outcome = %+v, want unresolved without an unsafe stop follow-up", outcome)
+		}
+		bundle := readEvidenceBundle(t, filepath.Join(dir, "artifacts", "maya-stall", outcome.RunID))
+		if bundle.Failure == nil || bundle.Failure.CleanupState != "failed" {
+			t.Fatalf("ambiguous broker session evidence = %+v", bundle.Failure)
 		}
 		if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")); statErr != nil {
 			t.Fatalf("ambiguous broker session did not retain Host Lock: %v", statErr)
@@ -214,6 +227,9 @@ func TestFreshRunLifecycleSettlesStopPolicyAndFailures(t *testing.T) {
 		bundle := readEvidenceBundle(t, evidence)
 		if bundle.Status != resultStatusFailed {
 			t.Fatalf("failure Evidence Bundle status = %q, want failed", bundle.Status)
+		}
+		if bundle.Failure == nil || bundle.Failure.CaptureState != "completed" {
+			t.Fatalf("failure screenshot capture state = %+v", bundle.Failure)
 		}
 		if len(bundle.VisualEvidence) != 1 {
 			t.Fatalf("failure Visual Evidence = %+v, want one desktop screenshot", bundle.VisualEvidence)
@@ -566,7 +582,7 @@ func TestFreshRunSessionLifecycleRecordsIdentityAndStopPolicy(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read evidence events: %v", err)
 			}
-			if !strings.Contains(string(events), `{"detail":"`+wantSessionID+`","event":"broker.session.fresh"}`) {
+			if !strings.Contains(string(events), `{"detail":"`+wantSessionID+`","event":"broker.session.fresh"`) {
 				t.Fatalf("evidence events missing fresh session identity:\n%s", string(events))
 			}
 			hasStopped := strings.Contains(string(events), `"broker.session.stopped"`)
@@ -630,15 +646,23 @@ func TestFreshRunFailsWhenSessionLifecycleFails(t *testing.T) {
 			message:           "gg_mayasessiond stop failed",
 		}
 
-		_, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
+		outcome, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
 		if err == nil || !strings.Contains(err.Error(), "stop Maya UI Session") || !strings.Contains(err.Error(), "gg_mayasessiond stop failed") {
 			t.Fatalf("Fresh Run error = %v, want stop session failure", err)
 		}
 		evidence := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
 		bundle := readEvidenceBundle(t, evidence)
-		if bundle.Status != resultStatusPassed || bundle.BrokerSession == nil {
-			t.Fatalf("stop-failure Evidence Bundle = status %q session %+v, want completed run evidence", bundle.Status, bundle.BrokerSession)
+		if bundle.Status != resultStatusFailed || bundle.BrokerSession == nil || bundle.Failure == nil || bundle.Failure.CleanupState != "failed" {
+			t.Fatalf("stop-failure Evidence Bundle = %+v, want unresolved terminal failure", bundle)
 		}
+		if outcome.StopPolicy != "unresolved" || len(outcome.FollowUpCommands) != 0 {
+			t.Fatalf("stop-failure outcome = %+v, want unresolved without an unsafe stop follow-up", outcome)
+		}
+		events, readErr := os.ReadFile(filepath.Join(evidence, evidenceEventsFileName))
+		if readErr != nil || !strings.Contains(string(events), `"event":"run.failed"`) {
+			t.Fatalf("stop-failure terminal event = %q err %v", string(events), readErr)
+		}
+		requireSequencedRunEvents(t, filepath.Join(evidence, evidenceEventsFileName))
 	})
 }
 
@@ -676,8 +700,8 @@ func TestFreshRunRejectsRetainedSessionIdentityChange(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "retained a different Maya UI Session") {
 		t.Fatalf("Fresh Run error = %v, want retained session identity mismatch", err)
 	}
-	if outcome.RunID != "" || outcome.StopPolicy != "" {
-		t.Fatalf("identity-mismatch outcome = %+v, want no reported kept run", outcome)
+	if outcome.RunID == "" || outcome.StopPolicy != "stopped" || outcome.Result.Status != resultStatusFailed || len(outcome.FollowUpCommands) != 0 {
+		t.Fatalf("identity-mismatch outcome = %+v, want terminal stopped failure", outcome)
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")); !os.IsNotExist(statErr) {
 		t.Fatalf("identity-mismatch Host Lock = %v, want released", statErr)
@@ -716,11 +740,15 @@ func TestFreshRunDeferredStopRetainsStateWhenRemoteCleanupFails(t *testing.T) {
 	runtime := defaultRunRuntime()
 	runtime.Broker = broker
 
-	_, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
+	outcome, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime).Run()
 	if err == nil || !strings.Contains(err.Error(), "remote cleanup failed") {
 		t.Fatalf("Fresh Run error = %v, want remote cleanup failure", err)
 	}
 	evidenceDir := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
+	bundle := readEvidenceBundle(t, evidenceDir)
+	if outcome.StopPolicy != "unresolved" || bundle.Failure == nil || bundle.Failure.CleanupState != "failed" {
+		t.Fatalf("cleanup-failure terminal state = outcome %+v failure %+v", outcome, bundle.Failure)
+	}
 	runID := filepath.Base(evidenceDir)
 	if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "runs", runID, "run-record.json")); statErr != nil {
 		t.Fatalf("cleanup-failure Run Record missing: %v", statErr)

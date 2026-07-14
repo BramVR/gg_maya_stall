@@ -311,9 +311,6 @@ jobs:
           MAYA_STALL_LIVE_PROOF_ARTIFACT_DIR: ${{ env.LIVE_PROOF_ARTIFACT_DIR }}
           MAYA_STALL_LIVE_PROOF_RETENTION_DAYS: ${{ env.LIVE_PROOF_RETENTION_DAYS }}
           MAYA_STALL_LIVE_PROOF_PUBLIC_HOST_ALIAS: ${{ env.LIVE_PROOF_PUBLIC_HOST_ALIAS }}
-          # Approval of the protected environment attests this is the controlled public-proof desktop.
-          # A trusted post-capture allowlist and confidentiality gate still run before publication.
-          MAYA_STALL_LIVE_PROOF_MEDIA_REVIEWED: "true"
         run: |
           set -euo pipefail
           # Persistent self-hosted runners can retain a partially written macOS test binary after cancellation.
@@ -330,10 +327,7 @@ jobs:
           const root = "candidate/artifacts/live-visual-evidence-proof";
           const allowed = new Set([
             "evidence-metadata.json",
-            "media-review.json",
             "proof-artifact-manifest.json",
-            "recordings/recording.mp4",
-            "screenshots/desktop-screenshot.png",
           ]);
           const found = [];
           function walk(dir) {

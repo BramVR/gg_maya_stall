@@ -32,6 +32,14 @@ type hostRuntime struct {
 	markKept      func(string) error
 }
 
+type hostValidationError struct {
+	err          error
+	cleanupState string
+}
+
+func (err *hostValidationError) Error() string { return err.err.Error() }
+func (err *hostValidationError) Unwrap() error { return err.err }
+
 type runHostLock struct {
 	release    func() error
 	renew      func() error
@@ -394,7 +402,12 @@ func selectHostForRunValidated(repoDir string, options runOptions, validate func
 			}
 			if validate != nil {
 				if err := validate(candidate); err != nil {
-					return hostRuntime{}, errors.Join(err, lock.release())
+					cleanupState := "completed"
+					if releaseErr := lock.release(); releaseErr != nil {
+						cleanupState = "failed"
+						err = errors.Join(err, releaseErr)
+					}
+					return hostRuntime{}, &hostValidationError{err: err, cleanupState: cleanupState}
 				}
 			}
 			return hostRuntime{
@@ -567,8 +580,14 @@ func acquireRunHostLock(repoDir string, host mayaHostConfig) (runHostLock, bool,
 	}
 	localRelease, locked, err := acquireHostLock(repoDir, host.ID)
 	if err != nil || locked {
-		err = errors.Join(err, hostSideLock.release())
-		return runHostLock{}, locked, err
+		releaseErr := hostSideLock.release()
+		if releaseErr != nil {
+			return runHostLock{}, false, &hostValidationError{err: errors.Join(err, releaseErr), cleanupState: "failed"}
+		}
+		if err != nil {
+			return runHostLock{}, false, &hostValidationError{err: err, cleanupState: "completed"}
+		}
+		return runHostLock{}, locked, nil
 	}
 	return runHostLock{
 		release: func() error {

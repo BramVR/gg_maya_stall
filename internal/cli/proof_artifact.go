@@ -20,10 +20,8 @@ const (
 	liveProofArtifactDirEnv         = "MAYA_STALL_LIVE_PROOF_ARTIFACT_DIR"
 	liveProofRetentionDaysEnv       = "MAYA_STALL_LIVE_PROOF_RETENTION_DAYS"
 	liveProofPublicHostAliasEnv     = "MAYA_STALL_LIVE_PROOF_PUBLIC_HOST_ALIAS"
-	liveProofMediaReviewedEnv       = "MAYA_STALL_LIVE_PROOF_MEDIA_REVIEWED"
 	liveProofArtifactManifestName   = "proof-artifact-manifest.json"
 	liveProofEvidenceMetadataName   = "evidence-metadata.json"
-	liveProofMediaReviewName        = "media-review.json"
 	defaultLiveProofRetentionDays   = 3
 	maximumLiveProofRetentionDays   = 14
 	defaultLiveProofArtifactDirName = "artifacts/proof/live-visual-evidence"
@@ -34,7 +32,6 @@ type liveVisualEvidenceProofArtifactOptions struct {
 	Destination     string
 	RetentionDays   int
 	PublicHostAlias string
-	MediaReviewed   bool
 }
 
 type liveVisualEvidenceProofArtifactManifest struct {
@@ -63,12 +60,7 @@ type liveVisualEvidenceProofMetadata struct {
 	HostAlias      string                   `json:"hostAlias"`
 	Runtime        runtimeMetadata          `json:"runtime"`
 	VisualEvidence []visualEvidenceArtifact `json:"visualEvidence"`
-}
-
-type liveVisualEvidenceMediaReview struct {
-	Reviewed bool     `json:"reviewed"`
-	Scope    string   `json:"scope"`
-	Paths    []string `json:"paths"`
+	MediaPublished bool                     `json:"mediaPublished"`
 }
 
 func liveVisualEvidenceProofArtifactOptionsFromEnv(lookup func(string) (string, bool)) (liveVisualEvidenceProofArtifactOptions, error) {
@@ -101,13 +93,6 @@ func liveVisualEvidenceProofArtifactOptionsFromEnv(lookup func(string) (string, 
 	}
 	if alias, ok := lookup(liveProofPublicHostAliasEnv); ok {
 		options.PublicHostAlias = strings.TrimSpace(alias)
-	}
-	if reviewed, ok := lookup(liveProofMediaReviewedEnv); ok && strings.TrimSpace(reviewed) != "" {
-		parsed, err := parseBoolConfig(reviewed)
-		if err != nil {
-			return liveVisualEvidenceProofArtifactOptions{}, fmt.Errorf("%s: %w", liveProofMediaReviewedEnv, err)
-		}
-		options.MediaReviewed = parsed
 	}
 	return options, nil
 }
@@ -150,9 +135,6 @@ func publishLiveVisualEvidenceProofArtifact(evidenceDir string, options liveVisu
 	if err := requireBrokerCaptureProvenanceEvents(evidenceDir, bundle); err != nil {
 		return "", err
 	}
-	if !options.MediaReviewed {
-		return "", fmt.Errorf("live proof artifact requires reviewed desktop media; set %s=true only for a controlled public-proof desktop", liveProofMediaReviewedEnv)
-	}
 	hostAlias, err := publicProofHostAlias(options.PublicHostAlias)
 	if err != nil {
 		return "", err
@@ -180,14 +162,14 @@ func publishLiveVisualEvidenceProofArtifact(evidenceDir string, options liveVisu
 	if err := os.MkdirAll(destination, 0o755); err != nil {
 		return "", err
 	}
-
 	metadata := liveVisualEvidenceProofMetadata{
-		RunID:         bundle.RunID,
-		Scenario:      bundle.Scenario,
-		Status:        bundle.Status,
-		TargetProfile: bundle.TargetProfile,
-		HostAlias:     hostAlias,
-		Runtime:       bundle.Runtime,
+		RunID:          bundle.RunID,
+		Scenario:       bundle.Scenario,
+		Status:         bundle.Status,
+		TargetProfile:  bundle.TargetProfile,
+		HostAlias:      hostAlias,
+		Runtime:        bundle.Runtime,
+		MediaPublished: false,
 		VisualEvidence: []visualEvidenceArtifact{
 			publicVisualEvidenceArtifact(screenshot, hostAlias),
 			publicVisualEvidenceArtifact(recording, hostAlias),
@@ -204,23 +186,6 @@ func publishLiveVisualEvidenceProofArtifact(evidenceDir string, options liveVisu
 	if err := os.WriteFile(filepath.Join(destination, liveProofEvidenceMetadataName), metadataBytes, 0o644); err != nil {
 		return "", err
 	}
-	review := liveVisualEvidenceMediaReview{
-		Reviewed: true,
-		Scope:    "controlled-public-proof-desktop",
-		Paths:    []string{screenshot.Path, recording.Path},
-	}
-	reviewBytes, err := json.MarshalIndent(review, "", "  ")
-	if err != nil {
-		return "", err
-	}
-	reviewBytes = append(reviewBytes, '\n')
-	if err := rejectConfidentialProofText(liveProofMediaReviewName, string(reviewBytes)); err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(filepath.Join(destination, liveProofMediaReviewName), reviewBytes, 0o644); err != nil {
-		return "", err
-	}
-
 	files := []struct {
 		source    string
 		relative  string
@@ -228,9 +193,6 @@ func publishLiveVisualEvidenceProofArtifact(evidenceDir string, options liveVisu
 		mediaType string
 	}{
 		{source: filepath.Join(destination, liveProofEvidenceMetadataName), relative: liveProofEvidenceMetadataName, kind: "metadata", mediaType: "application/json"},
-		{source: filepath.Join(destination, liveProofMediaReviewName), relative: liveProofMediaReviewName, kind: "media-review", mediaType: "application/json"},
-		{source: filepath.Join(evidenceDir, filepath.FromSlash(screenshot.Path)), relative: screenshot.Path, kind: "screenshot", mediaType: screenshot.MediaType},
-		{source: filepath.Join(evidenceDir, filepath.FromSlash(recording.Path)), relative: recording.Path, kind: "recording", mediaType: recording.MediaType},
 	}
 	var artifacts []liveVisualEvidenceProofArtifactFile
 	for _, file := range files {

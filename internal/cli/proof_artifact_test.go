@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -28,7 +29,6 @@ func TestLiveProofArtifactOptionsParseRetentionAndDestination(t *testing.T) {
 		liveProofArtifactDirEnv:     "/tmp/maya-stall-proof",
 		liveProofRetentionDaysEnv:   "5",
 		liveProofPublicHostAliasEnv: "maya-live-proof-host",
-		liveProofMediaReviewedEnv:   "true",
 	}
 	options, err := liveVisualEvidenceProofArtifactOptionsFromEnv(func(key string) (string, bool) {
 		value, ok := env[key]
@@ -37,7 +37,7 @@ func TestLiveProofArtifactOptionsParseRetentionAndDestination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse options: %v", err)
 	}
-	if !options.Enabled || options.Destination != env[liveProofArtifactDirEnv] || options.RetentionDays != 5 || options.PublicHostAlias != env[liveProofPublicHostAliasEnv] || !options.MediaReviewed {
+	if !options.Enabled || options.Destination != env[liveProofArtifactDirEnv] || options.RetentionDays != 5 || options.PublicHostAlias != env[liveProofPublicHostAliasEnv] {
 		t.Fatalf("options = %+v", options)
 	}
 }
@@ -57,16 +57,18 @@ func TestLiveProofArtifactOptionsRejectInvalidRetention(t *testing.T) {
 }
 
 func TestPublishLiveProofArtifactWritesManifestHashesAndSelectedContent(t *testing.T) {
+	screenshotBytes := pngHeaderBytes()
+	recordingBytes := mp4HeaderBytes()
 	evidenceDir := writeLiveVisualEvidenceProofBundle(t,
 		runtimeMetadata{Profile: "ssh-sessiond", HostAdapter: "ssh", BrokerAdapter: "gg-mayasessiond", LiveProofEligible: true},
 		[]visualEvidenceArtifact{
-			{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(pngHeaderBytes())},
-			{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(mp4HeaderBytes())},
+			{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(screenshotBytes)},
+			{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(recordingBytes)},
 			{Kind: "screenshot", Path: "screenshots/viewport.jpg", MediaType: "image/jpeg", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(jpegHeaderBytes())},
 		},
 		map[string][]byte{
-			"screenshots/desktop-screenshot.png": pngHeaderBytes(),
-			"recordings/desktop-recording.mp4":   mp4HeaderBytes(),
+			"screenshots/desktop-screenshot.png": screenshotBytes,
+			"recordings/desktop-recording.mp4":   recordingBytes,
 			"screenshots/viewport.jpg":           jpegHeaderBytes(),
 		},
 	)
@@ -77,7 +79,6 @@ func TestPublishLiveProofArtifactWritesManifestHashesAndSelectedContent(t *testi
 		Destination:     destination,
 		RetentionDays:   2,
 		PublicHostAlias: "maya-live-proof-host",
-		MediaReviewed:   true,
 	})
 	if err != nil {
 		t.Fatalf("publish proof artifact: %v", err)
@@ -89,16 +90,20 @@ func TestPublishLiveProofArtifactWritesManifestHashesAndSelectedContent(t *testi
 	for _, relative := range []string{
 		liveProofArtifactManifestName,
 		liveProofEvidenceMetadataName,
-		liveProofMediaReviewName,
-		"screenshots/desktop-screenshot.png",
-		"recordings/desktop-recording.mp4",
 	} {
 		if _, err := os.Stat(filepath.Join(destination, filepath.FromSlash(relative))); err != nil {
 			t.Fatalf("expected proof artifact %s: %v", relative, err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(destination, "screenshots", "viewport.jpg")); !os.IsNotExist(err) {
-		t.Fatalf("proof artifact included non-desktop viewport screenshot, stat err = %v", err)
+	for _, relative := range []string{"screenshots/viewport.jpg", "screenshots/desktop-screenshot.png", "recordings/desktop-recording.mp4"} {
+		if _, err := os.Stat(filepath.Join(destination, filepath.FromSlash(relative))); !os.IsNotExist(err) {
+			t.Fatalf("public proof artifact included private pixel media %s, stat err = %v", relative, err)
+		}
+	}
+	var metadata liveVisualEvidenceProofMetadata
+	readJSONFile(t, filepath.Join(destination, liveProofEvidenceMetadataName), &metadata)
+	if metadata.MediaPublished || len(metadata.VisualEvidence) != 2 {
+		t.Fatalf("public metadata = %+v, want two verified source records and no published pixel media", metadata)
 	}
 
 	var manifest liveVisualEvidenceProofArtifactManifest
@@ -106,12 +111,7 @@ func TestPublishLiveProofArtifactWritesManifestHashesAndSelectedContent(t *testi
 	if manifest.SelectedHostAlias != "maya-live-proof-host" || manifest.RetentionDays != 2 {
 		t.Fatalf("manifest metadata = %+v", manifest)
 	}
-	wantPaths := map[string]string{
-		liveProofEvidenceMetadataName:        "application/json",
-		liveProofMediaReviewName:             "application/json",
-		"screenshots/desktop-screenshot.png": "image/png",
-		"recordings/desktop-recording.mp4":   "video/mp4",
-	}
+	wantPaths := map[string]string{liveProofEvidenceMetadataName: "application/json"}
 	if len(manifest.Artifacts) != len(wantPaths) {
 		t.Fatalf("manifest artifacts = %+v, want %d entries", manifest.Artifacts, len(wantPaths))
 	}
@@ -134,6 +134,59 @@ func TestPublishLiveProofArtifactWritesManifestHashesAndSelectedContent(t *testi
 	}
 }
 
+func TestLegacyTrustedWorkflowCompatibilityAddsMetadataMarkersNotPixels(t *testing.T) {
+	destination := t.TempDir()
+	metadata := liveVisualEvidenceProofMetadata{MediaPublished: false}
+	if err := writeJSONFile(filepath.Join(destination, liveProofEvidenceMetadataName), metadata); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	metadataEntry, err := proofArtifactFileEntry(destination, liveProofEvidenceMetadataName, "metadata", "application/json")
+	if err != nil {
+		t.Fatalf("metadata entry: %v", err)
+	}
+	manifest := liveVisualEvidenceProofArtifactManifest{Artifacts: []liveVisualEvidenceProofArtifactFile{metadataEntry}}
+	if err := writeJSONFile(filepath.Join(destination, liveProofArtifactManifestName), manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	if err := addLegacyTrustedWorkflowMetadataCompatibility(destination); err != nil {
+		t.Fatalf("add legacy compatibility: %v", err)
+	}
+
+	wantFiles := []string{
+		liveProofEvidenceMetadataName,
+		liveProofArtifactManifestName,
+		"media-review.json",
+		"recordings/recording.mp4",
+		"screenshots/desktop-screenshot.png",
+	}
+	for _, relative := range wantFiles {
+		if _, err := os.Stat(filepath.Join(destination, filepath.FromSlash(relative))); err != nil {
+			t.Fatalf("compatibility file %s: %v", relative, err)
+		}
+	}
+	for _, relative := range []string{"recordings/recording.mp4", "screenshots/desktop-screenshot.png"} {
+		content, err := os.ReadFile(filepath.Join(destination, filepath.FromSlash(relative)))
+		if err != nil {
+			t.Fatalf("read marker %s: %v", relative, err)
+		}
+		if bytes.HasPrefix(content, pngHeaderBytes()) || bytes.Contains(content, []byte("ftyp")) {
+			t.Fatalf("compatibility marker %s contains pixel-media bytes", relative)
+		}
+		var marker map[string]any
+		if err := json.Unmarshal(content, &marker); err != nil {
+			t.Fatalf("compatibility marker %s is not JSON metadata: %v", relative, err)
+		}
+		if marker["mediaPublished"] != false || marker["kind"] != "metadata-only-compatibility-marker" {
+			t.Fatalf("compatibility marker %s = %+v", relative, marker)
+		}
+	}
+	readJSONFile(t, filepath.Join(destination, liveProofArtifactManifestName), &manifest)
+	if len(manifest.Artifacts) != 4 {
+		t.Fatalf("manifest artifacts = %+v, want metadata plus three compatibility markers", manifest.Artifacts)
+	}
+}
+
 func TestPublishLiveProofArtifactRejectsMissingLiveArtifactPath(t *testing.T) {
 	evidenceDir := writeLiveVisualEvidenceProofBundle(t,
 		runtimeMetadata{Profile: "ssh-sessiond", HostAdapter: "ssh", BrokerAdapter: "gg-mayasessiond", LiveProofEligible: true},
@@ -149,7 +202,6 @@ func TestPublishLiveProofArtifactRejectsMissingLiveArtifactPath(t *testing.T) {
 		Enabled:         true,
 		Destination:     filepath.Join(t.TempDir(), "proof"),
 		PublicHostAlias: "maya-live-proof-host",
-		MediaReviewed:   true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "desktop-recording.mp4") {
 		t.Fatalf("missing artifact error = %v", err)
@@ -171,7 +223,6 @@ func TestPublishLiveProofArtifactRejectsTraversalRecordingPath(t *testing.T) {
 		Enabled:         true,
 		Destination:     filepath.Join(t.TempDir(), "proof"),
 		PublicHostAlias: "maya-live-proof-host",
-		MediaReviewed:   true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "desktop recording artifacts") {
 		t.Fatalf("traversal recording path error = %v", err)
@@ -197,34 +248,11 @@ func TestPublishLiveProofArtifactRejectsConfidentialHostAlias(t *testing.T) {
 	}
 
 	_, err := publishLiveVisualEvidenceProofArtifact(evidenceDir, liveVisualEvidenceProofArtifactOptions{
-		Enabled:       true,
-		Destination:   filepath.Join(t.TempDir(), "proof"),
-		MediaReviewed: true,
+		Enabled:     true,
+		Destination: filepath.Join(t.TempDir(), "proof"),
 	})
 	if err == nil || !strings.Contains(err.Error(), liveProofPublicHostAliasEnv) {
 		t.Fatalf("confidential alias error = %v", err)
-	}
-}
-
-func TestPublishLiveProofArtifactRequiresReviewedMedia(t *testing.T) {
-	evidenceDir := writeLiveVisualEvidenceProofBundle(t,
-		runtimeMetadata{Profile: "ssh-sessiond", HostAdapter: "ssh", BrokerAdapter: "gg-mayasessiond", LiveProofEligible: true},
-		[]visualEvidenceArtifact{
-			{Kind: "screenshot", Path: "screenshots/desktop-screenshot.png", MediaType: "image/png", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(pngHeaderBytes())},
-			{Kind: "recording", Path: "recordings/desktop-recording.mp4", MediaType: "video/mp4", Origin: visualEvidenceOriginBrokerCapture, SHA256: sha256HexOfBytes(mp4HeaderBytes())},
-		},
-		map[string][]byte{
-			"screenshots/desktop-screenshot.png": pngHeaderBytes(),
-			"recordings/desktop-recording.mp4":   mp4HeaderBytes(),
-		},
-	)
-	_, err := publishLiveVisualEvidenceProofArtifact(evidenceDir, liveVisualEvidenceProofArtifactOptions{
-		Enabled:         true,
-		Destination:     filepath.Join(t.TempDir(), "proof"),
-		PublicHostAlias: "maya-live-proof-host",
-	})
-	if err == nil || !strings.Contains(err.Error(), liveProofMediaReviewedEnv) {
-		t.Fatalf("media review error = %v", err)
 	}
 }
 
@@ -281,7 +309,6 @@ func TestPublishLiveProofArtifactRejectsNonBrokerProvenance(t *testing.T) {
 				Enabled:         true,
 				Destination:     filepath.Join(t.TempDir(), "proof"),
 				PublicHostAlias: "maya-live-proof-host",
-				MediaReviewed:   true,
 			})
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("publish proof artifact error = %v, want containing %q", err, tt.wantErr)

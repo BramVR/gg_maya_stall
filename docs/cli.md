@@ -41,6 +41,7 @@ See [version](commands/version.md), [init](commands/init.md),
 
 ```text
 maya-stall run [--json] [host flags] [lock flags] [stop flags] <scenario>
+maya-stall history [--json] [--scenario <name>] [--host <id>] [--state <state>] [--since <duration-or-rfc3339>]
 maya-stall status [--run <run-id>]
 maya-stall attach <run-id>
 maya-stall attach <run-id> screenshot
@@ -65,13 +66,17 @@ Lock and stop flags:
 --stop-after success|failure|always|never
 ```
 
-See [run](commands/run.md), [status](commands/status.md),
+See [run](commands/run.md), [history](commands/history.md), [status](commands/status.md),
 [attach](commands/attach.md), and [stop](commands/stop.md).
 
 An identified Scenario submission receives a Run ID before validation, host
 selection, or remote checks. `--json` emits newline-delimited acceptance and
 terminal records; syntax that never identifies a Scenario emits one usage-error
 record and creates no run.
+
+Accepted runs are retained in the embedded Run Ledger after transient state
+cleanup. `history --json` returns a stable versioned object and supports exact
+Scenario, Maya Host, state, and recent-time filters.
 
 ### Visual Evidence
 
@@ -117,6 +122,23 @@ Evidence policy, and Validators. It must not contain Host Credentials, private
 hostnames, SSH keys, Windows users, license details, Host Pools, or Evidence
 Store secrets.
 
+Optional embedded Run Ledger policy also belongs in Repo Run Config:
+
+```yaml
+runLedger:
+  retention: 720h
+  maxEvents: 10000
+  maxEventBytes: 8388608
+  maxLogBytes: 1048576
+```
+
+Defaults are 30 days, 10,000 events, 8 MiB of retained event data, and 1 MiB
+of retained log data per run. `retention` must be a positive Go duration.
+`maxEvents` accepts 3 through 100,000, `maxEventBytes` accepts 1 KiB through
+64 MiB, and `maxLogBytes` accepts 96 bytes through 64 MiB.
+Automatic retention removes only expired `completed` and `failed` ledger
+records. It does not delete Evidence Bundles or expire unresolved records.
+
 Host config is passed explicitly:
 
 ```sh
@@ -159,6 +181,10 @@ Internal run state and Host Locks live under hidden repo-local state:
 ```text
 .maya-stall/state/
 ```
+
+The durable embedded ledger is stored below
+`.maya-stall/state/ledger/runs/<run-id>/`; transient operational state remains
+under `.maya-stall/state/runs/<run-id>/`.
 
 Published bundles contain:
 

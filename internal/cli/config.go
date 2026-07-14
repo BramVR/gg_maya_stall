@@ -10,6 +10,7 @@ import (
 
 type repoRunConfig struct {
 	Version   int                       `yaml:"version"`
+	RunLedger runLedgerConfig           `yaml:"runLedger"`
 	Scenarios map[string]scenarioConfig `yaml:"scenarios"`
 }
 

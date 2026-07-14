@@ -6,6 +6,7 @@ Release history starts with `v0.1.0`.
 
 ## Unreleased
 
+- Added a durable embedded Run Ledger with bounded structured events and retained logs, configurable terminal history retention, stable filtered `maya-stall history --json`, and the same Run ID across terminal `status`, `attach`, Evidence Bundles, and cleanup: https://github.com/BramVR/gg_maya_stall/issues/114.
 - Added `maya-stall plan` to inspect normalized Scenario payload bytes, hashes, requirements, and static Target Profile/Maya Host compatibility without SSH, Session Broker, Evidence Store, Host Lock, or external mutation: https://github.com/BramVR/gg_maya_stall/pull/148.
 - Changed Scenario submission to emit a Run ID before Repo Run Config, Scenario, host-selection, or remote validation and to preserve early failures as minimal versioned Evidence Bundles with ordered events, diagnostics, remediation, capture, and cleanup state: https://github.com/BramVR/gg_maya_stall/pull/139.
 - Changed protected live Visual Evidence publication to keep desktop PNG/MP4 pixels runner-local and upload only public-safe metadata with verified source hashes and explicit `mediaPublished: false`: https://github.com/BramVR/gg_maya_stall/pull/139.

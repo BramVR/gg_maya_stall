@@ -50,6 +50,9 @@ descriptive; code is the source-backed check when behavior claims disagree.
   collection, Validator execution, and Evidence Bundle layout:
   `internal/cli/run.go`
 - Kept run state, `status`, `attach`, and `stop`: `internal/cli/run_state.go`
+- Embedded Run Ledger, `history`, retention, bounded events/logs, and terminal
+  status/attach: `internal/cli/run_ledger.go`,
+  `internal/cli/run_ledger_test.go`
 - Run-scoped attach screenshot/control helpers:
   `internal/cli/run_scoped_ops.go`
 - Crabbox-inspired defaults: `internal/cli/crabbox_defaults.go`

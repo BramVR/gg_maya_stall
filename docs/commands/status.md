@@ -1,6 +1,7 @@
 # status
 
-`maya-stall status` shows kept run state.
+Unscoped `maya-stall status` lists kept sessions that still hold Host Locks.
+`maya-stall status --run <run-id>` shows one run's current or durable state.
 
 ```sh
 maya-stall status
@@ -17,5 +18,12 @@ then asks the Session Broker whether the retained Maya UI Session still exists.
 If the broker session disappeared or changed, status reports `state: stale`
 instead of pretending local state is enough.
 
+Completed and failed Run IDs remain queryable from the embedded Run Ledger
+after transient state is cleaned and until configured ledger retention expires
+them. Their status includes Scenario, Target Profile, Maya Host, result status,
+acceptance time, and Evidence Bundle path.
+
 Kept Sessions remain visible until `maya-stall stop <run-id>` performs
 broker-backed cleanup, removes local run state, and releases the Host Lock.
+The same Run ID then transitions to `completed`, `failed`, or `cleanup-failed`
+in durable history.

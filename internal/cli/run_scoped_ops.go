@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const runScopedScreenshotName = "run-scoped-screenshot.png"
@@ -128,13 +129,21 @@ func captureRunScopedScreenshot(repoDir string, runID string) (runOutcome, visua
 	}
 	artifact.TargetProfile = run.Manifest.TargetProfile
 	artifact.Host = run.Manifest.Host
+	durabilityWarnings := make([]string, 0, 3)
 	if err := appendEvent(context.EventsPath, "attach.screenshot.captured", artifact.Path); err != nil {
-		return runOutcome{}, visualEvidenceArtifact{}, err
+		durabilityWarnings = append(durabilityWarnings, fmt.Sprintf("record transient screenshot event: %v", err))
 	}
 	if err := appendRunScopedVisualEvidence(repoDir, runID, artifact, context.EventsPath); err != nil {
-		return runOutcome{}, visualEvidenceArtifact{}, err
+		durabilityWarnings = append(durabilityWarnings, fmt.Sprintf("refresh Evidence visual metadata: %v", err))
 	}
-	return runScopedOutcome(run, context), artifact, nil
+	if err := refreshRunLedgerArtifacts(repoDir, runID, time.Now()); err != nil {
+		durabilityWarnings = append(durabilityWarnings, fmt.Sprintf("refresh embedded run ledger: %v", err))
+	}
+	outcome := runScopedOutcome(run, context)
+	if len(durabilityWarnings) > 0 {
+		outcome.DurabilityWarning = "screenshot succeeded but " + strings.Join(durabilityWarnings, "; ")
+	}
+	return outcome, artifact, nil
 }
 
 func clickRunScopedDesktop(repoDir string, options attachOptions) (desktopControlOutcome, error) {
@@ -162,17 +171,31 @@ func clickRunScopedDesktop(repoDir string, options attachOptions) (desktopContro
 	if err := clicker.ClickDesktop(desktopClickRequest{RemoteRoot: remoteRoot, X: options.X, Y: options.Y}); err != nil {
 		return desktopControlOutcome{}, err
 	}
+	durabilityWarnings := make([]string, 0, 3)
 	if err := appendEvent(context.EventsPath, "attach.control.click", fmt.Sprintf("x=%d y=%d", options.X, options.Y)); err != nil {
-		return desktopControlOutcome{}, err
+		durabilityWarnings = append(durabilityWarnings, fmt.Sprintf("record transient click event: %v", err))
+	}
+	if err := appendRunScopedEvidenceEvents(context.EventsPath, filepath.Join(context.EvidenceDir, evidenceEventsFileName)); err != nil {
+		durabilityWarnings = append(durabilityWarnings, fmt.Sprintf("refresh Evidence events: %v", err))
+	}
+	if refreshErr := refreshRunLedgerArtifacts(repoDir, options.RunID, time.Now()); refreshErr != nil {
+		durabilityWarnings = append(durabilityWarnings, fmt.Sprintf("refresh embedded run ledger: %v", refreshErr))
+	}
+	durabilityWarning := ""
+	if len(durabilityWarnings) > 0 {
+		// The click is non-idempotent; surface degraded durability without making
+		// a successful click look retryable. Stop will make another bounded sync.
+		durabilityWarning = "click succeeded but " + strings.Join(durabilityWarnings, "; ")
 	}
 	return desktopControlOutcome{
-		Action:        "click",
-		TargetProfile: run.Manifest.TargetProfile,
-		Host:          run.Manifest.Host,
-		Runtime:       run.Manifest.Runtime,
-		X:             options.X,
-		Y:             options.Y,
-		DryRun:        false,
+		Action:            "click",
+		TargetProfile:     run.Manifest.TargetProfile,
+		Host:              run.Manifest.Host,
+		Runtime:           run.Manifest.Runtime,
+		X:                 options.X,
+		Y:                 options.Y,
+		DryRun:            false,
+		DurabilityWarning: durabilityWarning,
 	}, nil
 }
 

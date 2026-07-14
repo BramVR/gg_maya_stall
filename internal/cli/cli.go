@@ -62,6 +62,26 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 			return 0
 		}
 		return 1
+	case "plan":
+		options, err := parsePlanArgs(args[1:])
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "maya-stall plan: %v\n", err)
+			return 2
+		}
+		plan, err := buildScenarioPlan(workDir, options)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "maya-stall plan: %v\n", err)
+			var userErr *usageError
+			if errors.As(err, &userErr) {
+				return 2
+			}
+			return 1
+		}
+		printScenarioPlan(stdout, plan, options.JSON)
+		if !plan.Ready {
+			return 1
+		}
+		return 0
 	case "run":
 		options, err := parseRunArgs(args[1:])
 		jsonOutput := requestedRunJSON(args[1:])
@@ -442,6 +462,7 @@ Usage:
   maya-stall version
   maya-stall init
   maya-stall doctor [--host-config <path>] [--target-profile <name>] [--host <id>] [--scenario <name>] [--repair-trusted-plugin-allowlist]
+  maya-stall plan [--json] [--host-config <path>] <scenario>
   maya-stall run [--json] [--host-config <path>] [--target-profile <name>] [--host <id>] [--host-lock-wait <duration>|--host-lock-fail-fast] [--keep-on-failure|--stop-after <success|failure|always|never>] <scenario>
   maya-stall screenshot [--host-config <path>] [--target-profile <name>] [--host <id>]
   maya-stall record [--host-config <path>] [--target-profile <name>] [--host <id>]
@@ -463,6 +484,7 @@ Commands:
   evidence collect   run a Scenario and write a complete Evidence Bundle
   evidence publish   copy an Evidence Bundle to a filesystem Evidence Store
   init      write a repo-only sample .maya-stall.yaml
+  plan      inspect a normalized Scenario and optional host compatibility without host contact
   record   capture a Session Broker recording artifact
   review-comment   create or update a GitHub PR or GitLab MR Review Comment
   run       run a named Scenario with fake or configured SSH transport

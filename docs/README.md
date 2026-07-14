@@ -82,6 +82,7 @@ Then verify the command surface:
 
 ```sh
 maya-stall init
+maya-stall plan smoke
 maya-stall doctor --scenario smoke
 maya-stall run smoke
 maya-stall evidence collect smoke
@@ -113,7 +114,7 @@ Pick whichever matches your intent:
   [CLI overview](cli.md), [Concepts and glossary](concepts.md).
 - **Use the CLI:** [Command reference](commands/README.md),
   [init](commands/init.md), [doctor](commands/doctor.md),
-  [run](commands/run.md), [evidence](commands/evidence.md),
+  [plan](commands/plan.md), [run](commands/run.md), [evidence](commands/evidence.md),
   [screenshot](commands/screenshot.md), [record](commands/record.md),
   [review-comment](commands/review-comment.md).
 - **Prepare real hosts:** [Windows Maya Host setup](setup/windows-maya-host.md).

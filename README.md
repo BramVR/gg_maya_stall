@@ -82,6 +82,7 @@ maya-stall init
 Run the generated fake Scenario:
 
 ```sh
+maya-stall plan smoke
 maya-stall doctor --scenario smoke
 maya-stall run smoke
 maya-stall evidence collect smoke

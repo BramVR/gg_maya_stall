@@ -509,7 +509,7 @@ func parseRunArgs(args []string) (runOptions, error) {
 			options.HostPin = args[i]
 		case "--host-lock-wait":
 			i++
-			if i >= len(args) || args[i] == "" {
+			if i >= len(args) || args[i] == "" || strings.HasPrefix(args[i], "--") {
 				return options, newUsageError("--host-lock-wait needs a duration")
 			}
 			duration, err := time.ParseDuration(args[i])
@@ -530,7 +530,7 @@ func parseRunArgs(args []string) (runOptions, error) {
 				return options, newUsageError("Stop Policy already set")
 			}
 			i++
-			if i >= len(args) || args[i] == "" {
+			if i >= len(args) || args[i] == "" || strings.HasPrefix(args[i], "--") {
 				return options, newUsageError("--stop-after needs success, failure, always, or never")
 			}
 			if !isValidStopAfter(args[i]) {

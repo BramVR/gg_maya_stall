@@ -261,8 +261,19 @@ func TestRunJSONModeSurvivesMissingOptionValue(t *testing.T) {
 		t.Fatalf("identified JSON submission failure = code %d stdout %q stderr %q", code, stdout.String(), stderr.String())
 	}
 	results := decodeRunJSONLines(t, stdout.Bytes())
-	if len(results) != 2 || results[0].Kind != "run-accepted" || results[1].Kind != "run" || results[1].Status != resultStatusFailed {
+	if len(results) != 2 || results[0].Kind != "run-accepted" || results[1].Kind != "run" || results[1].Status != resultStatusFailed || !strings.Contains(results[1].Diagnostic, "--stop-after needs success, failure, always, or never") {
 		t.Fatalf("identified JSON submission records = %+v", results)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"run", "smoke", "--host-lock-wait", "--json"}, &stdout, &stderr, dir, "test-version")
+	if code != 1 {
+		t.Fatalf("missing host-lock wait value = code %d stdout %q stderr %q", code, stdout.String(), stderr.String())
+	}
+	results = decodeRunJSONLines(t, stdout.Bytes())
+	if len(results) != 2 || results[1].FailedLayer != "submission" || !strings.Contains(results[1].Diagnostic, "--host-lock-wait needs a duration") {
+		t.Fatalf("missing host-lock wait classification = %+v", results)
 	}
 
 	stdout.Reset()

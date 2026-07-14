@@ -582,7 +582,7 @@ func TestFreshRunSessionLifecycleRecordsIdentityAndStopPolicy(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read evidence events: %v", err)
 			}
-			if !strings.Contains(string(events), `{"detail":"`+wantSessionID+`","event":"broker.session.fresh"`) {
+			if !eventRecordsContain(readEventRecords(t, filepath.Join(evidence, "events.jsonl")), "broker.session.fresh", wantSessionID) {
 				t.Fatalf("evidence events missing fresh session identity:\n%s", string(events))
 			}
 			hasStopped := strings.Contains(string(events), `"broker.session.stopped"`)
@@ -684,9 +684,18 @@ func TestFreshRunStopsPartiallyStartedSession(t *testing.T) {
 	if readErr != nil {
 		t.Fatalf("read partial-start events: %v", readErr)
 	}
-	if !strings.Contains(string(events), `"detail":"fake-partial-session","event":"broker.session.stopped"`) {
+	if !eventRecordsContain(readEventRecords(t, filepath.Join(evidence, "events.jsonl")), "broker.session.stopped", "fake-partial-session") {
 		t.Fatalf("partial-start events missing stopped session:\n%s", string(events))
 	}
+}
+
+func eventRecordsContain(records []map[string]any, eventName string, detail string) bool {
+	for _, record := range records {
+		if record["event"] == eventName && record["detail"] == detail {
+			return true
+		}
+	}
+	return false
 }
 
 func TestFreshRunRejectsRetainedSessionIdentityChange(t *testing.T) {
@@ -758,7 +767,7 @@ func TestFreshRunDeferredStopRetainsStateWhenRemoteCleanupFails(t *testing.T) {
 	}
 }
 
-func TestFreshRunStopCleansStateWhenEvidenceSyncFails(t *testing.T) {
+func TestFreshRunStopPreservesRecoverableStateWhenEvidenceSyncFails(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	broker := &syncFailingStopSessionBroker{fakeSessionBroker: fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "passed"}}}
 	runtime := defaultRunRuntime()
@@ -768,16 +777,26 @@ func TestFreshRunStopCleansStateWhenEvidenceSyncFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "read run events after stopping run") {
 		t.Fatalf("Fresh Run error = %v, want evidence sync failure", err)
 	}
-	if broker.cleanupCalls != 1 {
-		t.Fatalf("cleanup calls = %d, want 1", broker.cleanupCalls)
+	if broker.cleanupCalls != 0 {
+		t.Fatalf("cleanup calls = %d, want 0 before durable recovery", broker.cleanupCalls)
 	}
 	evidenceDir := onlyRunDir(t, filepath.Join(dir, "artifacts", "maya-stall"))
 	runID := filepath.Base(evidenceDir)
+	if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "runs", runID)); statErr != nil {
+		t.Fatalf("sync-failure Run State missing: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")); statErr != nil {
+		t.Fatalf("sync-failure Host Lock missing: %v", statErr)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"stop", runID}, &stdout, &stderr, dir, "test-version"); code != 0 {
+		t.Fatalf("stop sync-failure recovery exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
 	if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "runs", runID)); !os.IsNotExist(statErr) {
-		t.Fatalf("sync-failure run state = %v, want removed", statErr)
+		t.Fatalf("sync-failure Run State after stop = %v, want removed", statErr)
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")); !os.IsNotExist(statErr) {
-		t.Fatalf("sync-failure Host Lock = %v, want released", statErr)
+		t.Fatalf("sync-failure Host Lock after stop = %v, want removed", statErr)
 	}
 }
 

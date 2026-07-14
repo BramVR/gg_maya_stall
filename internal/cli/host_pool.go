@@ -570,7 +570,18 @@ func acquireHostLock(repoDir string, hostID string) (func() error, bool, error) 
 		return nil, false, err
 	}
 	lockDir := filepath.Join(repoDir, ".maya-stall", "state", "locks", "hosts")
-	return acquireHostLockAtDir(lockDir, hostID)
+	var release func() error
+	var locked bool
+	err := withLocalHostSideMutex(lockDir, hostID, func() error {
+		var acquireErr error
+		release, locked, acquireErr = acquireHostLockAtDir(lockDir, hostID)
+		return acquireErr
+	})
+	if err != nil && release != nil {
+		cleanupErr := release()
+		return nil, false, errors.Join(err, cleanupErr)
+	}
+	return release, locked, err
 }
 
 func acquireRunHostLock(repoDir string, host mayaHostConfig) (runHostLock, bool, error) {
@@ -589,9 +600,16 @@ func acquireRunHostLock(repoDir string, host mayaHostConfig) (runHostLock, bool,
 		}
 		return runHostLock{}, locked, nil
 	}
+	ownedRunID := ""
 	return runHostLock{
 		release: func() error {
-			return errors.Join(hostSideLock.release(), localRelease())
+			localReleaseErr := error(nil)
+			if ownedRunID == "" {
+				localReleaseErr = localRelease()
+			} else {
+				localReleaseErr = removeRepoHostLockForRun(repoDir, host.ID, ownedRunID)
+			}
+			return errors.Join(hostSideLock.release(), localReleaseErr)
 		},
 		renew: func() error {
 			return hostSideLock.renew(host.ID)
@@ -600,13 +618,21 @@ func acquireRunHostLock(repoDir string, host mayaHostConfig) (runHostLock, bool,
 			if err := hostSideLock.markActive(host.ID, runID); err != nil {
 				return err
 			}
-			return markHostLockActiveWithAuthority(repoDir, host.ID, runID, hasAuthoritativeHostSideLock(host))
+			if err := markHostLockActiveWithAuthority(repoDir, host.ID, runID, hasAuthoritativeHostSideLock(host)); err != nil {
+				return err
+			}
+			ownedRunID = runID
+			return nil
 		},
 		markKept: func(runID string) error {
 			if err := hostSideLock.markKept(host.ID, runID); err != nil {
 				return err
 			}
-			return markHostLockKeptWithAuthority(repoDir, host.ID, runID, hasAuthoritativeHostSideLock(host))
+			if err := markHostLockKeptWithAuthority(repoDir, host.ID, runID, hasAuthoritativeHostSideLock(host)); err != nil {
+				return err
+			}
+			ownedRunID = runID
+			return nil
 		},
 	}, false, nil
 }
@@ -649,12 +675,25 @@ func releaseHostSideLock(host mayaHostConfig, runID string) error {
 func verifyHostSideLockForRun(host mayaHostConfig, runID string) error {
 	if host.usesRealSSH() {
 		if lockDir, ok := fakeSSHHostSideLockDir(host); ok {
-			return verifyHostSideLockForRunAtDir(lockDir, "host", runID, false)
+			return verifyHostSideLockForRunAtDir(lockDir, "host", runID, false, false)
 		}
 		return verifyRemoteHostLockForRun(host, runID)
 	}
 	if lockDir, ok := fakeHostSideLockDir(host); ok {
-		return verifyHostSideLockForRunAtDir(lockDir, host.ID, runID, false)
+		return verifyHostSideLockForRunAtDir(lockDir, host.ID, runID, false, false)
+	}
+	return nil
+}
+
+func verifyCleanupHostSideLockForRun(host mayaHostConfig, runID string) error {
+	if host.usesRealSSH() {
+		if lockDir, ok := fakeSSHHostSideLockDir(host); ok {
+			return verifyHostSideLockForRunAtDir(lockDir, "host", runID, false, true)
+		}
+		return verifyCleanupRemoteHostLockForRun(host, runID)
+	}
+	if lockDir, ok := fakeHostSideLockDir(host); ok {
+		return verifyHostSideLockForRunAtDir(lockDir, host.ID, runID, false, true)
 	}
 	return nil
 }
@@ -662,17 +701,17 @@ func verifyHostSideLockForRun(host mayaHostConfig, runID string) error {
 func verifyKeptHostSideLockForRun(host mayaHostConfig, runID string) error {
 	if host.usesRealSSH() {
 		if lockDir, ok := fakeSSHHostSideLockDir(host); ok {
-			return verifyHostSideLockForRunAtDir(lockDir, "host", runID, true)
+			return verifyHostSideLockForRunAtDir(lockDir, "host", runID, true, false)
 		}
 		return verifyKeptRemoteHostLockForRun(host, runID)
 	}
 	if lockDir, ok := fakeHostSideLockDir(host); ok {
-		return verifyHostSideLockForRunAtDir(lockDir, host.ID, runID, true)
+		return verifyHostSideLockForRunAtDir(lockDir, host.ID, runID, true, false)
 	}
 	return nil
 }
 
-func verifyHostSideLockForRunAtDir(lockDir string, hostID string, runID string, requireKept bool) error {
+func verifyHostSideLockForRunAtDir(lockDir string, hostID string, runID string, requireKept bool, allowStaleActive bool) error {
 	return withLocalHostSideMutex(lockDir, hostID, func() error {
 		lockPath := filepath.Join(lockDir, hostID+".lock")
 		content, err := os.ReadFile(lockPath)
@@ -683,7 +722,7 @@ func verifyHostSideLockForRunAtDir(lockDir string, hostID string, runID string, 
 		if owner.KeptRun == runID {
 			return nil
 		}
-		if requireKept || owner.ActiveRun != runID || isStaleHostSideOwner(owner) {
+		if requireKept || owner.ActiveRun != runID || !allowStaleActive && isStaleHostSideOwner(owner) {
 			return fmt.Errorf("%w for %s", errHostLockOwnershipChanged, hostID)
 		}
 		return nil
@@ -777,6 +816,19 @@ func acquireLocalHostSideLock(lockDir string, hostID string, content string) (*h
 func withLocalHostSideMutex(lockDir string, hostID string, action func() error) error {
 	deadline := time.Now().Add(5 * time.Second)
 	mutexDir := filepath.Join(lockDir, ".mutexes")
+	if err := os.MkdirAll(lockDir, 0o755); err != nil {
+		return err
+	}
+	if err := os.Mkdir(mutexDir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	info, err := os.Lstat(mutexDir)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("host lock mutex path %s must be a directory, not a symlink", mutexDir)
+	}
 	for {
 		release, locked, err := acquireHostLockAtDir(mutexDir, hostID)
 		if err != nil {
@@ -869,7 +921,9 @@ func replaceHostLockOwner(repoDir string, hostID string, content string) error {
 	if err := ensureOutputPathHasNoSymlinkParent(repoDir, filepath.Join(".maya-stall", "state", "locks", "hosts")); err != nil {
 		return err
 	}
-	return replaceHostLockOwnerAtDir(lockDir, hostID, content)
+	return withLocalHostSideMutex(lockDir, hostID, func() error {
+		return replaceHostLockOwnerAtDir(lockDir, hostID, content)
+	})
 }
 
 func replaceHostLockOwnerAtDir(lockDir string, hostID string, content string) error {

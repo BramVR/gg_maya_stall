@@ -65,6 +65,10 @@ workspace.
 **Run ID** - the stable identity created for a submitted Scenario before config
 validation, host selection, or remote preflight.
 
+**Run Ledger** - durable bounded metadata, ordered lifecycle events, and
+retained logs for every accepted Run ID. It survives transient Run State
+cleanup and does not replace Evidence Bundles.
+
 **Maya UI Session** - an interactive Autodesk Maya desktop process used for a
 run. Raw SSH-launched service-session Maya is not accepted as UI proof.
 

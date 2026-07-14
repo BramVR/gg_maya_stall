@@ -97,6 +97,18 @@ maya-stall attach <run-id> control click --x 960 --y 540
 maya-stall stop <run-id>
 ```
 
+Inspect durable history after either normal cleanup or explicit stop:
+
+```sh
+maya-stall history --json
+maya-stall status --run <run-id>
+maya-stall attach <run-id>
+```
+
+Repo Run Config can optionally bound embedded history with `runLedger`
+`retention`, `maxEvents`, `maxEventBytes`, and `maxLogBytes`. These settings do
+not remove or truncate Evidence Bundles.
+
 ## Step 4. Write A Scenario Result
 
 Maya Stall passes the Scenario Result path to Maya scripts as

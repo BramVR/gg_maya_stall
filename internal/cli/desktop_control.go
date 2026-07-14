@@ -19,13 +19,14 @@ type desktopControlOptions struct {
 }
 
 type desktopControlOutcome struct {
-	Action        string
-	TargetProfile string
-	Host          string
-	Runtime       runtimeMetadata
-	X             int
-	Y             int
-	DryRun        bool
+	Action            string
+	TargetProfile     string
+	Host              string
+	Runtime           runtimeMetadata
+	X                 int
+	Y                 int
+	DryRun            bool
+	DurabilityWarning string
 }
 
 func parseDesktopControlArgs(args []string) (desktopControlOptions, error) {
@@ -154,4 +155,7 @@ func printDesktopControlOutcome(stdout io.Writer, outcome desktopControlOutcome)
 	_, _ = fmt.Fprintf(stdout, "x: %d\n", outcome.X)
 	_, _ = fmt.Fprintf(stdout, "y: %d\n", outcome.Y)
 	_, _ = fmt.Fprintf(stdout, "dryRun: %t\n", outcome.DryRun)
+	if outcome.DurabilityWarning != "" {
+		_, _ = fmt.Fprintf(stdout, "durabilityWarning: %s\n", outcome.DurabilityWarning)
+	}
 }

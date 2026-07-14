@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -80,7 +81,11 @@ func newRunRetentionRecord(context runContext, manifest runManifest, host mayaHo
 
 func writeRunRetentionRecord(context runContext, record runRetentionRecord) error {
 	record.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	return writeJSONFile(filepath.Join(context.StateDir, "run-record.json"), record)
+	content, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeRunLedgerBytes(filepath.Join(context.StateDir, "run-record.json"), append(content, '\n'))
 }
 
 func fallbackRunRetentionRecord(repoDir string, stateDir string, manifest runManifest) runRetentionRecord {

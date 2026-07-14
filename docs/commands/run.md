@@ -26,6 +26,11 @@ still writes a minimal Evidence Bundle with a versioned manifest, ordered
 events, failed layer, diagnostic, remediation hint, capture state, and cleanup
 state.
 
+Every accepted Run ID also receives a durable embedded Run Ledger record before
+Scenario execution. The record survives normal transient Run State cleanup and
+is updated to `completed`, `failed`, `kept`, or `cleanup-failed` with bounded
+ordered events and retained logs.
+
 Use `--json` for stable newline-delimited JSON. Accepted submissions emit an
 immediate `run-accepted` record and a terminal `run` record. A usage error emits
 one `usage-error` record. Runs that proceed use the same Run ID in Run State,
@@ -120,6 +125,7 @@ downloads, and Evidence Bundle output discovery use the same paths.
 For each run, Maya Stall derives local and remote paths from one Run Workspace:
 
 - local state: `.maya-stall/state/runs/<run-id>/`
+- embedded Run Ledger: `.maya-stall/state/ledger/runs/<run-id>/`
 - local staged payload mirror: `.maya-stall/state/runs/<run-id>/payload/`
 - local workspace: `.maya-stall/state/runs/<run-id>/workspace/`
 - local Evidence Bundle: `artifacts/maya-stall/<run-id>/`
@@ -211,3 +217,9 @@ remote session metadata needed by `status`, `attach`, and `stop`.
 
 Kept sessions are visible through truth-seeking `status`, readable through
 read-only `attach`, and cleaned with broker-backed `stop`.
+
+Accepted runs remain discoverable with `maya-stall history` while their ledger
+records are retained. Completed and failed records expire after the configured
+ledger retention window (30 days by default); unresolved records do not expire.
+Ledger retention is separate from Host/session cleanup and Evidence Bundle
+retention.

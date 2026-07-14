@@ -124,18 +124,19 @@ type runContext struct {
 }
 
 type runOutcome struct {
-	RunID            string
-	Scenario         string
-	TargetProfile    string
-	Host             string
-	StateDir         string
-	EvidenceDir      string
-	Result           ScenarioResult
-	Validators       []validatorResult
-	StopPolicy       string
-	FollowUpCommands []string
-	Accepted         bool
-	Failure          *runFailureEvidence
+	RunID             string
+	Scenario          string
+	TargetProfile     string
+	Host              string
+	StateDir          string
+	EvidenceDir       string
+	Result            ScenarioResult
+	Validators        []validatorResult
+	StopPolicy        string
+	FollowUpCommands  []string
+	Accepted          bool
+	Failure           *runFailureEvidence
+	DurabilityWarning string
 }
 
 type runManifest struct {
@@ -1111,7 +1112,7 @@ func appendEvent(path string, event string, detail string) error {
 }
 
 func appendEventRecord(path string, record map[string]string) error {
-	content, err := json.Marshal(record)
+	content, err := json.Marshal(newRunEventRecord(record))
 	if err != nil {
 		return err
 	}
@@ -1127,7 +1128,57 @@ func appendEventRecord(path string, record map[string]string) error {
 	return err
 }
 
-func copySequencedEvents(source string, destination string) error {
+func newRunEventRecord(record map[string]string) map[string]any {
+	eventType := record["event"]
+	details := make(map[string]any)
+	structured := map[string]any{
+		"event":     eventType,
+		"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+		"phase":     runEventPhase(eventType),
+		"type":      eventType,
+		"stream":    "lifecycle",
+		"details":   details,
+	}
+	for key, value := range record {
+		if key == "event" {
+			continue
+		}
+		structured[key] = value
+		if key == "detail" {
+			details["message"] = value
+		} else {
+			details[key] = value
+		}
+	}
+	return structured
+}
+
+func runEventPhase(eventType string) string {
+	switch {
+	case strings.HasPrefix(eventType, "run.accepted"):
+		return "submission"
+	case strings.HasPrefix(eventType, "run.started"), strings.HasPrefix(eventType, "broker.session.fresh"):
+		return "launching"
+	case strings.HasPrefix(eventType, "broker.session.started"):
+		return "executing"
+	case strings.HasPrefix(eventType, "visual-evidence"), strings.HasPrefix(eventType, "broker.screenshot"), strings.HasPrefix(eventType, "broker.recording"):
+		return "collecting"
+	case strings.HasPrefix(eventType, "broker.session.stopped"):
+		return "cleaning"
+	case strings.HasPrefix(eventType, "run.completed"), strings.HasPrefix(eventType, "run.failed"):
+		return "finalizing"
+	case strings.HasPrefix(eventType, "attach"):
+		return "debugging"
+	default:
+		return "lifecycle"
+	}
+}
+
+func copySequencedEvents(source string, destination string, fallbackTimestamps ...string) error {
+	fallbackTimestamp := time.Now().UTC().Format(time.RFC3339Nano)
+	if len(fallbackTimestamps) > 0 && fallbackTimestamps[0] != "" {
+		fallbackTimestamp = fallbackTimestamps[0]
+	}
 	content, err := os.ReadFile(source)
 	if err != nil {
 		return err
@@ -1143,7 +1194,7 @@ func copySequencedEvents(source string, destination string) error {
 			return fmt.Errorf("parse run event %d: %w", index+1, err)
 		}
 		sequence++
-		event["sequence"] = sequence
+		event = normalizeRunLedgerEvent(event, sequence, fallbackTimestamp)
 		encoded, err := json.Marshal(event)
 		if err != nil {
 			return err

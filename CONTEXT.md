@@ -72,6 +72,10 @@ _Avoid_: Reused session, warm session
 The stable identity created for a submitted Scenario before config validation, host selection, or remote preflight.
 _Avoid_: Maya process ID, workspace path
 
+**Run Ledger**:
+Durable bounded metadata, lifecycle events, and retained logs for every accepted Run ID, independent from transient Run State and Evidence Bundles.
+_Avoid_: Run State, Evidence Store
+
 **Debug Attach**:
 A Maya Stall run that intentionally reuses an existing Maya UI Session for investigation.
 _Avoid_: Fresh run, CI run

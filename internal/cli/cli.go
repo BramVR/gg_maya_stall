@@ -14,6 +14,7 @@ import (
 const defaultConfigName = ".maya-stall.yaml"
 
 var configNames = []string{".maya-stall.yaml", "maya-stall.yaml"}
+var errRepoRunConfigNotFound = errors.New("no Maya Stall repo config found")
 
 // Run executes maya-stall with process-style arguments and returns an exit code.
 func Run(args []string, stdout io.Writer, stderr io.Writer, workDir string, version string) int {
@@ -79,6 +80,25 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 		}
 		printScenarioPlan(stdout, plan, options.JSON)
 		if !plan.Ready {
+			return 1
+		}
+		return 0
+	case "history":
+		options, err := parseHistoryArgs(args[1:])
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "maya-stall history: %v\n", err)
+			return 2
+		}
+		now := time.Now
+		if runtime.Now != nil {
+			now = runtime.Now
+		}
+		if err := printRunHistory(workDir, options, now(), stdout); err != nil {
+			_, _ = fmt.Fprintf(stderr, "maya-stall history: %v\n", err)
+			var userErr *usageError
+			if errors.As(err, &userErr) {
+				return 2
+			}
 			return 1
 		}
 		return 0
@@ -317,7 +337,11 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 			fmt.Fprintf(stderr, "maya-stall stop: %v\n", err)
 			return 2
 		}
-		if err := stopRun(workDir, runID); err != nil {
+		now := time.Now
+		if runtime.Now != nil {
+			now = runtime.Now
+		}
+		if err := stopRun(workDir, runID, now); err != nil {
 			var userErr *usageError
 			if errors.As(err, &userErr) {
 				fmt.Fprintf(stderr, "maya-stall stop: %v\n", err)
@@ -452,6 +476,9 @@ func requestedRunJSON(args []string) bool {
 func printVisualEvidenceOutcome(stdout io.Writer, outcome runOutcome, artifact visualEvidenceArtifact) {
 	printRunOutcome(stdout, outcome)
 	fmt.Fprintf(stdout, "artifact: %s\n", artifact.Path)
+	if outcome.DurabilityWarning != "" {
+		_, _ = fmt.Fprintf(stdout, "durabilityWarning: %s\n", outcome.DurabilityWarning)
+	}
 }
 
 func printHelp(w io.Writer) {
@@ -463,6 +490,7 @@ Usage:
   maya-stall init
   maya-stall doctor [--host-config <path>] [--target-profile <name>] [--host <id>] [--scenario <name>] [--repair-trusted-plugin-allowlist]
   maya-stall plan [--json] [--host-config <path>] <scenario>
+  maya-stall history [--json] [--scenario <name>] [--host <id>] [--state <state>] [--since <duration-or-rfc3339>]
   maya-stall run [--json] [--host-config <path>] [--target-profile <name>] [--host <id>] [--host-lock-wait <duration>|--host-lock-fail-fast] [--keep-on-failure|--stop-after <success|failure|always|never>] <scenario>
   maya-stall screenshot [--host-config <path>] [--target-profile <name>] [--host <id>]
   maya-stall record [--host-config <path>] [--target-profile <name>] [--host <id>]
@@ -484,6 +512,7 @@ Commands:
   evidence collect   run a Scenario and write a complete Evidence Bundle
   evidence publish   copy an Evidence Bundle to a filesystem Evidence Store
   init      write a repo-only sample .maya-stall.yaml
+  history   list durable embedded run history
   plan      inspect a normalized Scenario and optional host compatibility without host contact
   record   capture a Session Broker recording artifact
   review-comment   create or update a GitHub PR or GitLab MR Review Comment
@@ -634,7 +663,7 @@ func DiscoverConfig(dir string) (string, error) {
 			return "", err
 		}
 	}
-	return "", fmt.Errorf("no Maya Stall repo config found in %s", dir)
+	return "", fmt.Errorf("%w in %s", errRepoRunConfigNotFound, dir)
 }
 
 func writeInitialConfig(dir string) error {

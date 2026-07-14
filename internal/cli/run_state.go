@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type statusOptions struct {
@@ -68,9 +69,51 @@ func validateRunID(runID string) error {
 
 func printStatus(repoDir string, options statusOptions, stdout io.Writer) error {
 	if options.RunID != "" {
-		run, err := readKeptRun(repoDir, options.RunID)
+		ledgerRecord, ledgerErr := readRunLedgerRecord(repoDir, options.RunID)
+		if ledgerErr == nil {
+			retained, err := runLedgerUsesRetainedState(repoDir, ledgerRecord)
+			if err != nil {
+				return err
+			}
+			if ledgerRecord.State != "kept" && !retained {
+				return printLedgerRunStatus(repoDir, options.RunID, stdout)
+			}
+		}
+		var ledgerUsageErr *usageError
+		if ledgerErr != nil && !errors.As(ledgerErr, &ledgerUsageErr) {
+			return ledgerErr
+		}
+		stateManifest := filepath.Join(repoDir, ".maya-stall", "state", "runs", options.RunID, evidenceManifestFileName)
+		if _, err := os.Lstat(stateManifest); errors.Is(err, os.ErrNotExist) {
+			if ledgerErr == nil && ledgerRecord.State == "kept" {
+				return fmt.Errorf("kept run %q is missing transient Run State; refusing unverified ledger-only status", options.RunID)
+			}
+			return printLedgerRunStatus(repoDir, options.RunID, stdout)
+		} else if err != nil {
+			return err
+		}
+		run, err := readKeptRunState(repoDir, options.RunID)
 		if err != nil {
 			return err
+		}
+		if run.Record.Status == "running" && run.Record.StopPhase == "" {
+			run.Bundle.Status = run.Record.Status
+			if err := ensureOutputPathHasNoSymlinkParent(repoDir, filepath.Join("artifacts", "maya-stall", options.RunID)); err != nil {
+				return err
+			}
+			evidencePath := filepath.Join(repoDir, "artifacts", "maya-stall", options.RunID, evidenceBundleFileName)
+			if evidenceBytes, evidenceErr := os.ReadFile(evidencePath); evidenceErr == nil {
+				if err := json.Unmarshal(evidenceBytes, &run.Bundle); err != nil {
+					return fmt.Errorf("parse run evidence: %w", err)
+				}
+			} else if !errors.Is(evidenceErr, os.ErrNotExist) {
+				return evidenceErr
+			}
+		} else {
+			run, err = readKeptRun(repoDir, options.RunID)
+			if err != nil {
+				return err
+			}
 		}
 		if err := refreshKeptRunStatus(&run); err != nil {
 			return err
@@ -128,6 +171,32 @@ func printKeptRunStatus(stdout io.Writer, run keptRun) {
 }
 
 func attachRun(repoDir string, runID string, stdout io.Writer) error {
+	if err := validateRunID(runID); err != nil {
+		return err
+	}
+	ledgerRecord, ledgerErr := readRunLedgerRecord(repoDir, runID)
+	if ledgerErr == nil {
+		retained, err := runLedgerUsesRetainedState(repoDir, ledgerRecord)
+		if err != nil {
+			return err
+		}
+		if ledgerRecord.State != "kept" && !retained {
+			return attachLedgerRun(repoDir, runID, stdout)
+		}
+	}
+	var ledgerUsageErr *usageError
+	if ledgerErr != nil && !errors.As(ledgerErr, &ledgerUsageErr) {
+		return ledgerErr
+	}
+	stateManifest := filepath.Join(repoDir, ".maya-stall", "state", "runs", runID, evidenceManifestFileName)
+	if _, err := os.Lstat(stateManifest); errors.Is(err, os.ErrNotExist) {
+		if ledgerErr == nil && ledgerRecord.State == "kept" {
+			return fmt.Errorf("kept run %q is missing transient Run State; refusing unverified ledger-only attach", runID)
+		}
+		return attachLedgerRun(repoDir, runID, stdout)
+	} else if err != nil {
+		return err
+	}
 	run, err := readKeptRunState(repoDir, runID)
 	if err != nil {
 		return err
@@ -147,12 +216,67 @@ func attachRun(repoDir string, runID string, stdout io.Writer) error {
 	return broker.AttachRetainedRun(run.Record, stdout)
 }
 
-func stopRun(repoDir string, runID string) error {
+func runLedgerUsesRetainedState(repoDir string, record runLedgerRecord) (bool, error) {
+	if record.StopPhase == "host-lock-released" {
+		return false, nil
+	}
+	if record.State == "kept" {
+		return true, nil
+	}
+	if record.State != "submitted" && record.State != "cleanup-failed" {
+		return false, nil
+	}
+	return isRetainedRunRecord(repoDir, record.RunID)
+}
+
+func isRetainedRunRecord(repoDir string, runID string) (bool, error) {
+	path := filepath.Join(repoDir, ".maya-stall", "state", "runs", runID, "run-record.json")
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return false, fmt.Errorf("retained Run Record %s must be a regular file", path)
+	}
+	content, err := readRunLedgerBytes(path)
+	if err != nil {
+		return false, err
+	}
+	var record runRetentionRecord
+	if err := json.Unmarshal(content, &record); err != nil {
+		return false, fmt.Errorf("parse retained Run Record: %w", err)
+	}
+	if record.StopPhase != "" {
+		return false, nil
+	}
+	return record.Status == "kept" && record.RetentionReason != "" || record.Status == "running" && record.RemoteSession.SessionID != "", nil
+}
+
+func stopRun(repoDir string, runID string, now func() time.Time) error {
+	if now == nil {
+		now = time.Now
+	}
+	if err := prepareRunLedgerForStop(repoDir, runID, now()); err != nil {
+		return err
+	}
+	stopErr := stopKeptRun(repoDir, runID, now())
+	ledgerErr := updateRunLedgerAfterStop(repoDir, runID, stopErr, now())
+	return errors.Join(stopErr, ledgerErr)
+}
+
+func stopKeptRun(repoDir string, runID string, now time.Time) error {
 	manifest, stateDir, found, err := readStopRunManifest(repoDir, runID)
 	if err != nil {
 		return err
 	}
 	if !found {
+		record, ledgerErr := readRunLedgerRecord(repoDir, runID)
+		if ledgerErr == nil && record.StopPhase == "host-lock-released" {
+			return cleanupRunState(repoDir, runID)
+		}
 		return releaseMatchingKeptHostLock(repoDir, runID)
 	}
 	if err := validateHostID(manifest.Host); err != nil {
@@ -161,38 +285,68 @@ func stopRun(repoDir string, runID string) error {
 	if err := ensureOutputPathHasNoSymlinkParent(repoDir, filepath.Join(".maya-stall", "state", "locks", "hosts")); err != nil {
 		return err
 	}
-	lockPath := filepath.Join(repoDir, ".maya-stall", "state", "locks", "hosts", manifest.Host+".lock")
 	record, err := readRunRetentionRecord(repoDir, stateDir, manifest)
 	if err != nil {
 		return err
 	}
-	if err := ensureRunHasKeptLock(repoDir, manifest, runID, record.HostLockAuthoritative); err != nil {
-		return err
+	ledgerRecord, ledgerErr := readRunLedgerRecord(repoDir, runID)
+	if ledgerErr == nil && record.StopPhase == "" {
+		switch ledgerRecord.StopPhase {
+		case "session-stopped", "broker-cleaned", "host-lock-released":
+			record.StopPhase = ledgerRecord.StopPhase
+		}
 	}
-	if record.HostLockAuthoritative {
-		if record.StopPhase == "" {
-			if err := verifyKeptHostSideLockForRun(record.HostConfig, runID); err != nil {
+	if record.StopPhase == "host-lock-released" {
+		return finishReleasedStopRun(repoDir, stateDir, manifest.Host, runID, record, now)
+	}
+	cleanupFailedRunning := ledgerErr == nil && ledgerRecord.State == "cleanup-failed" && record.Status == "running" && record.StopPhase == ""
+	activeCleanupRecovery := false
+	if cleanupFailedRunning {
+		activeCleanupRecovery, err = repoHostLockUsesActiveRun(repoDir, manifest.Host, runID)
+		if err != nil {
+			return err
+		}
+		if activeCleanupRecovery {
+			if err := requireStaleSubmittedRunController(repoDir, manifest.Host, runID); err != nil {
 				return err
 			}
 		}
 	}
-	if record.StopPhase == "host-lock-released" {
-		if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+	var lockErr error
+	if cleanupFailedRunning || record.StopPhase == "session-stopped" || record.StopPhase == "broker-cleaned" {
+		lockErr = ensureRunHasCleanupPendingLock(repoDir, manifest, runID, record.HostLockAuthoritative || record.StopPhase == "broker-cleaned")
+	} else {
+		lockErr = ensureRunHasKeptLock(repoDir, manifest, runID, record.HostLockAuthoritative)
+	}
+	if lockErr != nil {
+		return lockErr
+	}
+	if record.HostLockAuthoritative {
+		if record.StopPhase == "" {
+			var verifyErr error
+			if activeCleanupRecovery {
+				verifyErr = verifyCleanupHostSideLockForRun(record.HostConfig, runID)
+			} else {
+				verifyErr = verifyKeptHostSideLockForRun(record.HostConfig, runID)
+			}
+			if verifyErr != nil {
+				return verifyErr
+			}
 		}
-		if err := cleanupRunState(repoDir, runID); err != nil {
-			return err
-		}
-		return nil
 	}
 	if record.LegacyMissingRecord && manifest.Runtime.BrokerAdapter != "fake" {
-		if err := cleanupRunState(repoDir, runID); err != nil {
-			return err
+		if _, ledgerErr := readRunLedgerRecord(repoDir, runID); ledgerErr == nil {
+			return fmt.Errorf("kept run %q is missing its durable Run Record; refusing to stop the broker session or release the authoritative Host Lock", runID)
+		} else {
+			var usageErr *usageError
+			if !errors.As(ledgerErr, &usageErr) {
+				return ledgerErr
+			}
+			if err := removeRepoHostLockForRun(repoDir, manifest.Host, runID); err != nil {
+				return err
+			}
+			return cleanupRunState(repoDir, runID)
 		}
-		if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		return nil
 	}
 	broker, err := retentionBrokerForRecord(record)
 	if err != nil {
@@ -202,33 +356,76 @@ func stopRun(repoDir string, runID string) error {
 	if err := requireRetentionCapability(broker, manifest.Runtime.BrokerAdapter, "stop retained session", capabilities.StopRetainedSession); err != nil {
 		return err
 	}
-	if record.StopPhase == "" {
+	if record.StopPhase == "" || record.StopPhase == "session-stopped" {
 		if err := broker.StopRetainedRun(record); err != nil {
 			return err
 		}
-		record.StopPhase = "broker-stopped"
-		if err := writeRunRetentionRecord(runContext{StateDir: stateDir}, record); err != nil {
-			return err
-		}
 	}
+	record.StopPhase = "broker-cleaned"
+	if err := checkpointRunLedgerStopPhase(repoDir, runID, record.StopPhase, now); err != nil {
+		return err
+	}
+	transientRecordErr := writeRunRetentionRecord(runContext{StateDir: stateDir}, record)
 	if record.HostLockAuthoritative {
 		if err := releaseHostSideLock(record.HostConfig, runID); err != nil {
 			if !errors.Is(err, errHostLockOwnershipChanged) {
-				return err
+				return errors.Join(transientRecordErr, err)
 			}
 		}
 	}
+	finishErr := finishReleasedStopRun(repoDir, stateDir, manifest.Host, runID, record, now)
+	if finishErr == nil {
+		return nil
+	}
+	return errors.Join(transientRecordErr, finishErr)
+}
+
+func finishReleasedStopRun(repoDir string, stateDir string, hostID string, runID string, record runRetentionRecord, now time.Time) error {
+	if err := removeRepoHostLockForRun(repoDir, hostID, runID); err != nil {
+		return err
+	}
+	if err := checkpointRunLedgerStopPhase(repoDir, runID, "host-lock-released", now); err != nil {
+		return err
+	}
 	record.StopPhase = "host-lock-released"
-	if err := writeRunRetentionRecord(runContext{StateDir: stateDir}, record); err != nil {
+	transientRecordErr := writeRunRetentionRecord(runContext{StateDir: stateDir}, record)
+	cleanupErr := cleanupRunState(repoDir, runID)
+	if cleanupErr == nil {
+		return nil
+	}
+	return errors.Join(transientRecordErr, cleanupErr)
+}
+
+func removeRepoHostLockForRun(repoDir string, hostID string, runID string) error {
+	if err := validateHostID(hostID); err != nil {
 		return err
 	}
-	if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if err := cleanupRunState(repoDir, runID); err != nil {
-		return err
-	}
-	return nil
+	lockDir := filepath.Join(repoDir, ".maya-stall", "state", "locks", "hosts")
+	lockPath := filepath.Join(lockDir, hostID+".lock")
+	return withLocalHostSideMutex(lockDir, hostID, func() error {
+		info, err := os.Lstat(lockPath)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("host lock %s must be a regular file, not a symlink", lockPath)
+		}
+		content, err := os.ReadFile(lockPath)
+		if err != nil {
+			return err
+		}
+		owner := parseHostLockOwner(string(content))
+		if owner.KeptRun == runID || owner.ActiveRun == runID {
+			return os.Remove(lockPath)
+		}
+		if owner.KeptRun != "" || owner.ActiveRun != "" {
+			return nil
+		}
+		return fmt.Errorf("host lock %s has no recognizable run owner", lockPath)
+	})
 }
 
 func readStopRunManifest(repoDir string, runID string) (runManifest, string, bool, error) {
@@ -285,7 +482,7 @@ func releaseMatchingKeptHostLock(repoDir string, runID string) error {
 			if parseHostLockOwner(string(content)).Authoritative {
 				return fmt.Errorf("kept run %q is missing its run record; refusing to release only the repo-local Host Lock mirror", runID)
 			}
-			return os.Remove(lockPath)
+			return removeRepoHostLockForRun(repoDir, strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name())), runID)
 		}
 	}
 	return newUsageError("kept run %q not found", runID)
@@ -367,12 +564,25 @@ func readKeptRunState(repoDir string, runID string) (keptRun, error) {
 	if err != nil {
 		return keptRun{}, err
 	}
-	if err := ensureRunHasKeptLock(repoDir, manifest, runID, record.HostLockAuthoritative); err != nil {
-		return keptRun{}, err
+	active := record.Status == "running" && record.StopPhase == ""
+	var lockErr error
+	if active {
+		lockErr = ensureRunHasCleanupPendingLock(repoDir, manifest, runID, record.HostLockAuthoritative)
+	} else {
+		lockErr = ensureRunHasKeptLock(repoDir, manifest, runID, record.HostLockAuthoritative)
+	}
+	if lockErr != nil {
+		return keptRun{}, lockErr
 	}
 	if record.HostLockAuthoritative {
-		if err := verifyKeptHostSideLockForRun(record.HostConfig, runID); err != nil {
-			return keptRun{}, err
+		var verifyErr error
+		if active {
+			verifyErr = verifyHostSideLockForRun(record.HostConfig, runID)
+		} else {
+			verifyErr = verifyKeptHostSideLockForRun(record.HostConfig, runID)
+		}
+		if verifyErr != nil {
+			return keptRun{}, verifyErr
 		}
 	}
 	return keptRun{RunID: runID, StateDir: stateDir, Manifest: manifest, Record: record}, nil
@@ -382,7 +592,7 @@ func readRunRetentionRecord(repoDir string, stateDir string, manifest runManifes
 	if err := ensureWorkspacePathHasNoSymlinkAncestor(stateDir, "run-record.json"); err != nil {
 		return runRetentionRecord{}, err
 	}
-	content, err := os.ReadFile(filepath.Join(stateDir, "run-record.json"))
+	content, err := readRunLedgerBytes(filepath.Join(stateDir, "run-record.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return fallbackRunRetentionRecord(repoDir, stateDir, manifest), nil
 	}
@@ -392,6 +602,13 @@ func readRunRetentionRecord(repoDir string, stateDir string, manifest runManifes
 	var record runRetentionRecord
 	if err := json.Unmarshal(content, &record); err != nil {
 		return runRetentionRecord{}, fmt.Errorf("parse kept run record: %w", err)
+	}
+	if record.RemoteSession.SessionID == "" && manifest.BrokerSession != nil {
+		record.RemoteSession = retainedSessionRecord{
+			BrokerAdapter: manifest.BrokerSession.BrokerAdapter,
+			SessionID:     manifest.BrokerSession.SessionID,
+			Status:        "running",
+		}
 	}
 	return record, nil
 }
@@ -417,6 +634,10 @@ func refreshKeptRunStatus(run *keptRun) error {
 	status, err := broker.StatusRetainedRun(run.Record)
 	if err != nil {
 		return err
+	}
+	if run.Record.Status == "running" && run.Record.StopPhase == "" {
+		status.State = "running"
+		status.Detail = "Maya UI Session is owned by an active or cleanup-pending run"
 	}
 	run.RemoteStatus = status
 	return nil
@@ -468,6 +689,35 @@ func ensureRunHasKeptLock(repoDir string, manifest runManifest, runID string, al
 	return nil
 }
 
+func ensureRunHasCleanupPendingLock(repoDir string, manifest runManifest, runID string, allowMissingMirror bool) error {
+	if err := validateHostID(manifest.Host); err != nil {
+		return err
+	}
+	if err := ensureOutputPathHasNoSymlinkParent(repoDir, filepath.Join(".maya-stall", "state", "locks", "hosts")); err != nil {
+		return err
+	}
+	lockPath := filepath.Join(repoDir, ".maya-stall", "state", "locks", "hosts", manifest.Host+".lock")
+	info, err := os.Lstat(lockPath)
+	if errors.Is(err, os.ErrNotExist) && allowMissingMirror {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("host lock %s must be a regular file, not a symlink", lockPath)
+	}
+	content, err := os.ReadFile(lockPath)
+	if err != nil {
+		return err
+	}
+	owner := parseHostLockOwner(string(content))
+	if owner.KeptRun == runID || owner.ActiveRun == runID {
+		return nil
+	}
+	return fmt.Errorf("host lock for %s does not belong to cleanup-pending run %s", manifest.Host, runID)
+}
+
 func readHostLockKeptRun(lockPath string) (string, bool, error) {
 	info, err := os.Lstat(lockPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -513,7 +763,7 @@ func copyTextFile(path string, stdout io.Writer) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("%s must be a regular file", path)
 	}
-	file, err := os.Open(path)
+	file, err := openRunLedgerRead(path)
 	if err != nil {
 		return err
 	}

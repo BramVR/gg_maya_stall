@@ -48,6 +48,8 @@ type freshRunLifecycle struct {
 	failedLayer                   runFailureLayer
 	failure                       *runFailureEvidence
 	selectionCleanupState         string
+	acceptedAt                    time.Time
+	ledgerPolicy                  runLedgerPolicy
 }
 
 func newFreshRun(repoDir string, options runOptions, runtime runRuntime) freshRun {
@@ -55,10 +57,11 @@ func newFreshRun(repoDir string, options runOptions, runtime runRuntime) freshRu
 		runtime.Now = time.Now
 	}
 	return &freshRunLifecycle{
-		repoDir:    repoDir,
-		options:    options,
-		runtime:    runtime,
-		stopPolicy: "stopped",
+		repoDir:      repoDir,
+		options:      options,
+		runtime:      runtime,
+		stopPolicy:   "stopped",
+		ledgerPolicy: defaultRunLedgerPolicy(),
 	}
 }
 
@@ -67,16 +70,28 @@ func failAcceptedSubmission(repoDir string, options runOptions, runtime runRunti
 		runtime.Now = time.Now
 	}
 	run := &freshRunLifecycle{
-		repoDir:    repoDir,
-		options:    options,
-		runtime:    runtime,
-		stopPolicy: "stopped",
+		repoDir:      repoDir,
+		options:      options,
+		runtime:      runtime,
+		stopPolicy:   "stopped",
+		ledgerPolicy: defaultRunLedgerPolicy(),
 	}
 	if err := run.accept(); err != nil {
 		return runOutcome{}, errors.Join(submissionErr, err, run.cleanupUnacceptedOwnership())
 	}
+	if policy, available := availableRunLedgerPolicy(repoDir); available {
+		run.ledgerPolicy = policy
+		if retentionErr := pruneRunLedger(run.repoDir, policy, run.acceptedAt, run.manifest.RunID); retentionErr != nil {
+			submissionErr = errors.Join(submissionErr, fmt.Errorf("apply embedded run ledger retention: %w", retentionErr))
+		}
+	}
 	run.failedLayer = failureLayerSubmission
-	return run.finishEarlyFailure(submissionErr)
+	outcome, runErr := run.finishEarlyFailure(submissionErr)
+	ledgerErr := finalizeRunLedger(run.repoDir, outcome, run.manifest, run.ledgerPolicy, run.runtime.Now())
+	if ledgerErr != nil {
+		ledgerErr = fmt.Errorf("finalize embedded run ledger for %s: %w", run.manifest.RunID, ledgerErr)
+	}
+	return outcome, errors.Join(runErr, ledgerErr)
 }
 
 func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
@@ -94,12 +109,15 @@ func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 				cleanupIncomplete = true
 			} else {
 				run.sessionSettled = true
-				if syncErr := run.syncEvidenceEvents(); syncErr != nil {
+				syncErr := run.syncEvidenceEvents()
+				if syncErr != nil {
 					err = errors.Join(err, syncErr)
-				}
-				if cleanupErr := run.cleanupStoppedRun(); cleanupErr != nil {
+					cleanupIncomplete = true
+					if preserveErr := run.preserveStoppedRunForCleanup(); preserveErr != nil {
+						err = errors.Join(err, preserveErr)
+					}
+				} else if cleanupErr := run.finishStoppedRunCleanup(); cleanupErr != nil {
 					err = errors.Join(err, cleanupErr)
-					run.releaseHostLock = false
 					cleanupIncomplete = true
 				}
 			}
@@ -150,6 +168,11 @@ func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 			}
 			outcome = run.currentOutcome()
 		}
+		if run.accepted {
+			if ledgerErr := finalizeRunLedger(run.repoDir, outcome, run.manifest, run.ledgerPolicy, run.runtime.Now()); ledgerErr != nil {
+				err = errors.Join(err, fmt.Errorf("finalize embedded run ledger for %s: %w", run.manifest.RunID, ledgerErr))
+			}
+		}
 	}()
 
 	if err := run.setup(); err != nil {
@@ -196,6 +219,14 @@ func (run *freshRunLifecycle) setup() error {
 	config, configPath, err := loadRepoRunConfig(run.repoDir)
 	if err != nil {
 		return err
+	}
+	ledgerPolicy, err := resolveRunLedgerPolicy(config.RunLedger)
+	if err != nil {
+		return err
+	}
+	run.ledgerPolicy = ledgerPolicy
+	if err := pruneRunLedger(run.repoDir, run.ledgerPolicy, run.acceptedAt, run.manifest.RunID); err != nil {
+		return fmt.Errorf("apply embedded run ledger retention: %w", err)
 	}
 	run.configPath = configPath
 	run.failedLayer = failureLayerScenario
@@ -323,7 +354,8 @@ func (run *freshRunLifecycle) setup() error {
 }
 
 func (run *freshRunLifecycle) accept() error {
-	baseRunID := run.runtime.Now().UTC().Format("20060102T150405.000000000Z")
+	run.acceptedAt = run.runtime.Now().UTC()
+	baseRunID := run.acceptedAt.Format("20060102T150405.000000000Z")
 	for attempt := 0; ; attempt++ {
 		runID := baseRunID
 		if attempt > 0 {
@@ -345,6 +377,11 @@ func (run *freshRunLifecycle) accept() error {
 			Environment: map[string]string{
 				scenarioResultEnvVar: workspace.LocalScenarioResultPath(),
 			},
+		}
+		if _, err := os.Lstat(runLedgerDir(run.repoDir, runID)); err == nil {
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
 		}
 		if _, err := os.Lstat(context.EvidenceDir); err == nil {
 			continue
@@ -379,6 +416,9 @@ func (run *freshRunLifecycle) accept() error {
 	}
 	if err := appendEvent(run.context.EventsPath, "run.accepted", run.options.ScenarioName); err != nil {
 		return err
+	}
+	if err := initializeRunLedger(run.repoDir, run.manifest, run.acceptedAt, run.context.EventsPath); err != nil {
+		return errors.Join(fmt.Errorf("initialize embedded run ledger: %w", err), cleanupRunLedgerRecord(run.repoDir, run.manifest.RunID))
 	}
 	run.accepted = true
 	if run.runtime.Accepted != nil {
@@ -555,7 +595,9 @@ func appendSequencedEvidenceEvent(path string, eventName string, detail string) 
 		}
 		sequence = len(lines) + 1
 	}
-	record, err := json.Marshal(map[string]any{"detail": detail, "event": eventName, "sequence": sequence})
+	structured := newRunEventRecord(map[string]string{"detail": detail, "event": eventName})
+	structured["sequence"] = sequence
+	record, err := json.Marshal(structured)
 	if err != nil {
 		return err
 	}
@@ -721,6 +763,21 @@ func (run *freshRunLifecycle) startFreshSession() error {
 		run.manifest.BrokerSession = &session
 		if manifestErr := writeJSONFile(filepath.Join(run.context.StateDir, "manifest.json"), run.manifest); manifestErr != nil {
 			return errors.Join(err, manifestErr)
+		}
+		record, recordErr := readRunRetentionRecord(run.repoDir, run.context.StateDir, run.manifest)
+		if recordErr == nil {
+			record.RemoteSession = retainedSessionRecord{
+				BrokerAdapter: session.BrokerAdapter,
+				SessionID:     session.SessionID,
+				Status:        "running",
+			}
+			if retention, ok := run.runtime.Broker.(runRetentionBroker); ok {
+				record.BrokerCapabilities = retention.RetentionCapabilities()
+			}
+			recordErr = writeRunRetentionRecord(run.context, record)
+		}
+		if recordErr != nil {
+			return errors.Join(err, fmt.Errorf("record owned Maya UI Session for %s: %w", run.manifest.RunID, recordErr))
 		}
 	}
 	if err != nil {
@@ -1000,12 +1057,12 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 		}
 		run.sessionSettled = true
 		syncErr := run.syncEvidenceEvents()
-		cleanupErr := run.cleanupStoppedRun()
-		if cleanupErr != nil {
-			run.releaseHostLock = false
+		if syncErr != nil {
+			preserveErr := run.preserveStoppedRunForCleanup()
+			return runOutcome{}, errors.Join(syncErr, preserveErr)
 		}
-		if syncErr != nil || cleanupErr != nil {
-			return runOutcome{}, errors.Join(syncErr, cleanupErr)
+		if cleanupErr := run.finishStoppedRunCleanup(); cleanupErr != nil {
+			return runOutcome{}, cleanupErr
 		}
 	}
 	if run.stopPolicy == "kept" {
@@ -1127,18 +1184,99 @@ func (run *freshRunLifecycle) currentOutcome() runOutcome {
 	}
 }
 
-func (run *freshRunLifecycle) cleanupStoppedRun() error {
+func (run *freshRunLifecycle) finishStoppedRunCleanup() error {
+	if err := run.preserveStoppedRunForCleanup(); err != nil {
+		return err
+	}
 	if retention, ok := run.runtime.Broker.(runRetentionBroker); ok && retention.RetentionCapabilities().CleanupRetainedWorkspace {
 		if err := retention.CleanupRun(run.context); err != nil {
 			return fmt.Errorf("clean up remote run workspace for %s: %w", run.manifest.RunID, err)
 		}
 	}
-	if run.manifest.RunID != "" {
-		if err := cleanupRunState(run.repoDir, run.manifest.RunID); err != nil {
-			return fmt.Errorf("clean up Fresh Run state for %s: %w", run.manifest.RunID, err)
-		}
+	record, err := readRunRetentionRecord(run.repoDir, run.context.StateDir, run.manifest)
+	if err != nil {
+		return err
+	}
+	record.StopPhase = "broker-cleaned"
+	if err := writeRunRetentionRecord(run.context, record); err != nil {
+		return err
+	}
+	if err := checkpointRunLedgerStopPhase(run.repoDir, run.manifest.RunID, record.StopPhase, run.runtime.Now()); err != nil {
+		return err
+	}
+	if err := run.host.release(); err != nil {
+		return fmt.Errorf("release Host Lock for %s: %w", run.host.HostID, err)
+	}
+	run.releaseHostLock = false
+	record.StopPhase = "host-lock-released"
+	if err := writeRunRetentionRecord(run.context, record); err != nil {
+		return err
+	}
+	if err := checkpointRunLedgerStopPhase(run.repoDir, run.manifest.RunID, record.StopPhase, run.runtime.Now()); err != nil {
+		return err
+	}
+	if err := cleanupRunState(run.repoDir, run.manifest.RunID); err != nil {
+		return fmt.Errorf("clean up Fresh Run state for %s: %w", run.manifest.RunID, err)
 	}
 	return nil
+}
+
+func (run *freshRunLifecycle) preserveStoppedRunForCleanup() error {
+	var preservationErr error
+	if run.stopHostLockHeartbeat != nil {
+		if err := run.stopHostLockHeartbeat(); err != nil {
+			preservationErr = errors.Join(preservationErr, fmt.Errorf("renew Host Lock for %s: %w", run.host.HostID, err))
+		}
+		run.stopHostLockHeartbeat = nil
+		run.checkHostLockHeartbeat = nil
+	}
+	record := newRunRetentionRecord(run.context, run.manifest, run.host.Config, "kept", "cleanup-pending-after-ledger-failure")
+	record.StopPhase = "session-stopped"
+	record.RemoteSession = retainedSessionRecord{
+		BrokerAdapter: run.session.BrokerAdapter,
+		SessionID:     run.session.SessionID,
+		Status:        "stopped",
+	}
+	if retention, ok := run.runtime.Broker.(runRetentionBroker); ok {
+		record.BrokerCapabilities = retention.RetentionCapabilities()
+	}
+	if err := writeRunRetentionRecord(run.context, record); err != nil {
+		return errors.Join(preservationErr, run.completeCleanupAfterRecoveryFailure(fmt.Errorf("record stopped run cleanup recovery for %s: %w", run.manifest.RunID, err)))
+	}
+	if err := run.host.markKept(run.manifest.RunID); err != nil {
+		return errors.Join(preservationErr, run.completeCleanupAfterRecoveryFailure(fmt.Errorf("mark stopped run cleanup recovery for %s: %w", run.manifest.RunID, err)))
+	}
+	run.releaseHostLock = false
+	return preservationErr
+}
+
+func (run *freshRunLifecycle) completeCleanupAfterRecoveryFailure(recoveryErr error) error {
+	if err := checkpointRunLedgerStopPhase(run.repoDir, run.manifest.RunID, "session-stopped", run.runtime.Now()); err != nil {
+		run.releaseHostLock = false
+		return errors.Join(recoveryErr, fmt.Errorf("checkpoint stopped cleanup recovery for %s: %w", run.manifest.RunID, err))
+	}
+	if retention, ok := run.runtime.Broker.(runRetentionBroker); ok && retention.RetentionCapabilities().CleanupRetainedWorkspace {
+		if err := retention.CleanupRun(run.context); err != nil {
+			run.releaseHostLock = false
+			return errors.Join(recoveryErr, fmt.Errorf("clean up remote run workspace for %s after recovery failure: %w", run.manifest.RunID, err))
+		}
+	}
+	if err := checkpointRunLedgerStopPhase(run.repoDir, run.manifest.RunID, "broker-cleaned", run.runtime.Now()); err != nil {
+		run.releaseHostLock = false
+		return errors.Join(recoveryErr, fmt.Errorf("checkpoint cleaned broker recovery for %s: %w", run.manifest.RunID, err))
+	}
+	if err := run.host.release(); err != nil {
+		run.releaseHostLock = false
+		return errors.Join(recoveryErr, fmt.Errorf("release Host Lock for %s after recovery failure: %w", run.host.HostID, err))
+	}
+	run.releaseHostLock = false
+	if err := checkpointRunLedgerStopPhase(run.repoDir, run.manifest.RunID, "host-lock-released", run.runtime.Now()); err != nil {
+		return errors.Join(recoveryErr, fmt.Errorf("checkpoint released Host Lock recovery for %s: %w", run.manifest.RunID, err))
+	}
+	if err := cleanupRunState(run.repoDir, run.manifest.RunID); err != nil {
+		return errors.Join(recoveryErr, fmt.Errorf("clean up Fresh Run state for %s after recovery failure: %w", run.manifest.RunID, err))
+	}
+	return recoveryErr
 }
 
 func (run *freshRunLifecycle) syncEvidenceEvents() error {

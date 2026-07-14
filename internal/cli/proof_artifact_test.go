@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -130,6 +131,59 @@ func TestPublishLiveProofArtifactWritesManifestHashesAndSelectedContent(t *testi
 		if artifact.SHA256 != hex.EncodeToString(sum[:]) {
 			t.Fatalf("artifact %s sha = %s, want %s", artifact.Path, artifact.SHA256, hex.EncodeToString(sum[:]))
 		}
+	}
+}
+
+func TestLegacyTrustedWorkflowCompatibilityAddsMetadataMarkersNotPixels(t *testing.T) {
+	destination := t.TempDir()
+	metadata := liveVisualEvidenceProofMetadata{MediaPublished: false}
+	if err := writeJSONFile(filepath.Join(destination, liveProofEvidenceMetadataName), metadata); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	metadataEntry, err := proofArtifactFileEntry(destination, liveProofEvidenceMetadataName, "metadata", "application/json")
+	if err != nil {
+		t.Fatalf("metadata entry: %v", err)
+	}
+	manifest := liveVisualEvidenceProofArtifactManifest{Artifacts: []liveVisualEvidenceProofArtifactFile{metadataEntry}}
+	if err := writeJSONFile(filepath.Join(destination, liveProofArtifactManifestName), manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	if err := addLegacyTrustedWorkflowMetadataCompatibility(destination); err != nil {
+		t.Fatalf("add legacy compatibility: %v", err)
+	}
+
+	wantFiles := []string{
+		liveProofEvidenceMetadataName,
+		liveProofArtifactManifestName,
+		"media-review.json",
+		"recordings/recording.mp4",
+		"screenshots/desktop-screenshot.png",
+	}
+	for _, relative := range wantFiles {
+		if _, err := os.Stat(filepath.Join(destination, filepath.FromSlash(relative))); err != nil {
+			t.Fatalf("compatibility file %s: %v", relative, err)
+		}
+	}
+	for _, relative := range []string{"recordings/recording.mp4", "screenshots/desktop-screenshot.png"} {
+		content, err := os.ReadFile(filepath.Join(destination, filepath.FromSlash(relative)))
+		if err != nil {
+			t.Fatalf("read marker %s: %v", relative, err)
+		}
+		if bytes.HasPrefix(content, pngHeaderBytes()) || bytes.Contains(content, []byte("ftyp")) {
+			t.Fatalf("compatibility marker %s contains pixel-media bytes", relative)
+		}
+		var marker map[string]any
+		if err := json.Unmarshal(content, &marker); err != nil {
+			t.Fatalf("compatibility marker %s is not JSON metadata: %v", relative, err)
+		}
+		if marker["mediaPublished"] != false || marker["kind"] != "metadata-only-compatibility-marker" {
+			t.Fatalf("compatibility marker %s = %+v", relative, marker)
+		}
+	}
+	readJSONFile(t, filepath.Join(destination, liveProofArtifactManifestName), &manifest)
+	if len(manifest.Artifacts) != 4 {
+		t.Fatalf("manifest artifacts = %+v, want metadata plus three compatibility markers", manifest.Artifacts)
 	}
 }
 

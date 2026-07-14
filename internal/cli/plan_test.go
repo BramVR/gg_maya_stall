@@ -120,7 +120,7 @@ func TestPlanSummarizesDirectoryPayloadDeterministically(t *testing.T) {
 	for _, name := range []string{"a.py", "nested/b.py"} {
 		_, _ = digest.Write([]byte(name))
 		_, _ = digest.Write([]byte{0})
-		_, _ = digest.Write([]byte(fmt.Sprintf("%d", len(files[name]))))
+		_, _ = fmt.Fprintf(digest, "%d", len(files[name]))
 		_, _ = digest.Write([]byte{0})
 		_, _ = digest.Write(files[name])
 	}

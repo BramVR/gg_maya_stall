@@ -386,11 +386,14 @@ func summarizePlanPayload(path string) (int64, string, error) {
 		if err != nil {
 			return 0, "", err
 		}
-		defer file.Close()
 		digest := sha256.New()
-		size, err := io.Copy(digest, file)
-		if err != nil {
-			return 0, "", err
+		size, copyErr := io.Copy(digest, file)
+		closeErr := file.Close()
+		if copyErr != nil {
+			return 0, "", copyErr
+		}
+		if closeErr != nil {
+			return 0, "", closeErr
 		}
 		return size, hex.EncodeToString(digest.Sum(nil)), nil
 	}

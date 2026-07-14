@@ -65,12 +65,12 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 	case "plan":
 		options, err := parsePlanArgs(args[1:])
 		if err != nil {
-			fmt.Fprintf(stderr, "maya-stall plan: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "maya-stall plan: %v\n", err)
 			return 2
 		}
 		plan, err := buildScenarioPlan(workDir, options)
 		if err != nil {
-			fmt.Fprintf(stderr, "maya-stall plan: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "maya-stall plan: %v\n", err)
 			var userErr *usageError
 			if errors.As(err, &userErr) {
 				return 2

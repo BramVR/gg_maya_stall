@@ -6,7 +6,7 @@ Release history starts with `v0.1.0`.
 
 ## Unreleased
 
-- Added `maya-stall plan` to inspect normalized Scenario payload bytes, hashes, requirements, and static Target Profile/Maya Host compatibility without SSH, Session Broker, Evidence Store, Host Lock, or external mutation: https://github.com/BramVR/gg_maya_stall/issues/113.
+- Added `maya-stall plan` to inspect normalized Scenario payload bytes, hashes, requirements, and static Target Profile/Maya Host compatibility without SSH, Session Broker, Evidence Store, Host Lock, or external mutation: https://github.com/BramVR/gg_maya_stall/pull/148.
 - Changed Scenario submission to emit a Run ID before Repo Run Config, Scenario, host-selection, or remote validation and to preserve early failures as minimal versioned Evidence Bundles with ordered events, diagnostics, remediation, capture, and cleanup state: https://github.com/BramVR/gg_maya_stall/pull/139.
 - Changed protected live Visual Evidence publication to keep desktop PNG/MP4 pixels runner-local and upload only public-safe metadata with verified source hashes and explicit `mediaPublished: false`: https://github.com/BramVR/gg_maya_stall/pull/139.
 - Added Visual Evidence Provenance: every Visual Evidence artifact records an origin (`broker-capture`, `fake-broker-capture`, or `discovered`) and a SHA256 hash in the Evidence Bundle and published artifact manifests, Session Broker captures append `*.capture-requested` and `*.captured` events to `events.jsonl`, and live-proof-eligible bundles fail on Visual Evidence that was not captured through the Session Broker: https://github.com/BramVR/gg_maya_stall/pull/107.

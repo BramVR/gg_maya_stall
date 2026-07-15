@@ -294,7 +294,7 @@ func (run *freshRunLifecycle) stopSessionAfterFailure() error {
 		return err
 	case <-timer.C:
 		run.sessionOperationUnsettled = true
-		return fmt.Errorf("Session Broker did not stop within %s after cancellation", wait)
+		return fmt.Errorf("session broker did not stop within %s after cancellation", wait)
 	}
 }
 
@@ -330,7 +330,7 @@ func (run *freshRunLifecycle) stopSessionDuringSettlement() error {
 			return errors.Join(cancelErr, stopErr)
 		case <-timer.C:
 			run.sessionOperationUnsettled = true
-			return errors.Join(cancelErr, fmt.Errorf("Session Broker did not stop within %s after cancellation", wait))
+			return errors.Join(cancelErr, fmt.Errorf("session broker did not stop within %s after cancellation", wait))
 		}
 	}
 }
@@ -995,7 +995,7 @@ func (run *freshRunLifecycle) startSessionWithCancellation() (brokerSessionIdent
 		case <-timer.C:
 			run.sessionOperationUnsettled = true
 			run.releaseHostLock = false
-			return brokerSessionIdentity{}, errors.Join(cancelErr, fmt.Errorf("Session Broker did not finish startup within %s after cancellation", wait))
+			return brokerSessionIdentity{}, errors.Join(cancelErr, fmt.Errorf("session broker did not finish startup within %s after cancellation", wait))
 		}
 	}
 }
@@ -1096,7 +1096,7 @@ func (run *freshRunLifecycle) runBrokerScenario() (ScenarioResult, error) {
 				stopDone = true
 			case <-timer.C:
 				run.sessionOperationUnsettled = true
-				return ScenarioResult{}, errors.Join(cancelErr, stopErr, fmt.Errorf("Session Broker did not stop within %s after cancellation", wait))
+				return ScenarioResult{}, errors.Join(cancelErr, stopErr, fmt.Errorf("session broker did not stop within %s after cancellation", wait))
 			}
 		}
 		if stopErr == nil {

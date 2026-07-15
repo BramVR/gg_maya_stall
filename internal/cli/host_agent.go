@@ -322,14 +322,14 @@ func postControlPlaneJSONWithLimitContext(ctx context.Context, rawURL string, to
 	}
 	token, ok := os.LookupEnv(tokenEnv)
 	if !ok || token == "" {
-		return fmt.Errorf("Control Plane credential environment variable %s is not set", tokenEnv)
+		return fmt.Errorf("Control Plane credential environment variable %s is not set", tokenEnv) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	content, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
 	if len(content) > maximumControlPlaneSubmissionBytes {
-		return fmt.Errorf("Control Plane request exceeds size limit")
+		return fmt.Errorf("Control Plane request exceeds size limit") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(endpoint.String(), "/")+path, bytes.NewReader(content))
 	if err != nil {
@@ -363,7 +363,7 @@ func ensureHostAgentDirectory(path string) error {
 		return err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return fmt.Errorf("Windows Host Agent directory %s must be a directory, not a symlink", path)
+		return fmt.Errorf("Windows Host Agent directory %s must be a directory, not a symlink", path) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	return validateHostAgentDirectoryPermissions(path, info)
 }
@@ -1391,11 +1391,11 @@ func (handler *controlPlaneHandler) finishHostAgentAssignment(assignment *contro
 	defer handler.mu.Unlock()
 	current := handler.assignments[assignment.record.RunID]
 	if current != assignment || assignment.record.State != "confirmed" || !assignment.finishing {
-		return fmt.Errorf("Host Lock ownership changed")
+		return fmt.Errorf("Host Lock ownership changed") //nolint:staticcheck // Host Lock is a product term.
 	}
 	agent := handler.hostAgents[assignment.record.AgentID]
 	if !handler.acceptHostAgentSession(agent, sessionID) {
-		return fmt.Errorf("Windows Host Agent session changed before completion commit")
+		return fmt.Errorf("Windows Host Agent session changed before completion commit") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	finishing := assignment.record
 	finishing.State = "finishing"
@@ -1628,7 +1628,7 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 	handler.mu.Lock()
 	if handler.hostAgents[selected.status.AgentID] != selected || selected.status.State != "reserving" || selected.status.RunID != "" {
 		handler.mu.Unlock()
-		return failBeforeTransition(errors.New("Windows Host Agent reservation changed"))
+		return failBeforeTransition(errors.New("Windows Host Agent reservation changed")) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	if selected.status.SessionID == "" || !handler.runtime.Now().Before(selected.sessionExpiresAt) {
 		selected.status.State = "offline"
@@ -1636,7 +1636,7 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 		selected.sessionExpiresAt = time.Time{}
 		persistErr := handler.persistHostAgentStatus(selected)
 		handler.mu.Unlock()
-		return failBeforeTransition(errors.Join(errors.New("Windows Host Agent process-session lease expired during reservation"), persistErr))
+		return failBeforeTransition(errors.Join(errors.New("Windows Host Agent process-session lease expired during reservation"), persistErr)) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	quarantineMarkerPath := handler.hostAgentQuarantinePath(record.AgentID)
 	quarantineIntent := record
@@ -1655,10 +1655,10 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 	}
 	handler.mu.Lock()
 	if handler.hostAgents[selected.status.AgentID] != selected || selected.status.State != "reserving" || selected.status.RunID != "" {
-		transitionErr = errors.Join(transitionErr, errors.New("Windows Host Agent reservation changed during acceptance"))
+		transitionErr = errors.Join(transitionErr, errors.New("Windows Host Agent reservation changed during acceptance")) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	if selected.status.SessionID == "" || !handler.runtime.Now().Before(selected.sessionExpiresAt) {
-		transitionErr = errors.Join(transitionErr, errors.New("Windows Host Agent process-session lease expired during acceptance"))
+		transitionErr = errors.Join(transitionErr, errors.New("Windows Host Agent process-session lease expired during acceptance")) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	if transitionErr == nil {
 		transitionErr = handler.ensureHostAgentTransition(record)
@@ -1684,7 +1684,7 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 			statusErr = handler.persistHostAgentStatus(selected)
 		}
 		handler.mu.Unlock()
-		outcome, failureErr := handler.finishAcceptedHostAgentFailure(run, selected, errors.Join(transitionErr, markerErr, statusErr, errors.New("Windows Host Agent slot quarantined after incomplete assignment transition")))
+		outcome, failureErr := handler.finishAcceptedHostAgentFailure(run, selected, errors.Join(transitionErr, markerErr, statusErr, errors.New("Windows Host Agent slot quarantined after incomplete assignment transition"))) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 		handler.mu.Lock()
 		terminalLedger, terminalLedgerErr := readRunLedgerRecord(repoDir, runID)
 		var quarantineTransitionErr error
@@ -1947,37 +1947,37 @@ func (handler *controlPlaneHandler) acceptHostAgentCompletion(assignment *contro
 		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, err
 	}
 	if record.Host != assignment.record.HostID || record.Status == resultStatusPassed && record.State != "completed" || record.Status == resultStatusFailed && record.State != "failed" || record.Status != resultStatusPassed && record.Status != resultStatusFailed {
-		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, fmt.Errorf("Windows Host Agent did not return a cleaned terminal run")
+		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, fmt.Errorf("Windows Host Agent did not return a cleaned terminal run") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	result, err := readControlPlaneResult(stagingRoot, record)
 	if err != nil {
 		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, err
 	}
 	if !result.Final || result.CleanupState != "completed" {
-		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, fmt.Errorf("Windows Host Agent cleanup is not complete")
+		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, fmt.Errorf("Windows Host Agent cleanup is not complete") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	evidence, err := readControlPlaneEvidence(stagingRoot, record)
 	if err != nil {
 		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, err
 	}
 	if evidence.Bundle.Scenario != assignment.record.Submission.Scenario || evidence.Bundle.TargetProfile != expectedProfile || evidence.Bundle.Host != assignment.record.HostID {
-		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, fmt.Errorf("Windows Host Agent Evidence Bundle changed immutable run identity")
+		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, fmt.Errorf("Windows Host Agent Evidence Bundle changed immutable run identity") //nolint:staticcheck // Product terms start the user-facing diagnostic.
 	}
 	for _, artifact := range evidence.Bundle.VisualEvidence {
 		if artifact.TargetProfile != "" && artifact.TargetProfile != expectedProfile || artifact.Host != "" && artifact.Host != assignment.record.HostID {
-			return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, fmt.Errorf("Windows Host Agent Visual Evidence changed target identity")
+			return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, fmt.Errorf("Windows Host Agent Visual Evidence changed target identity") //nolint:staticcheck // Product terms start the user-facing diagnostic.
 		}
 	}
 	stagedOutcome := runOutcomeFromCommandJSON(completion.Terminal)
 	if stagedOutcome.Result.Status != record.Status || result.Status != record.Status || result.Result.Status != record.Status || evidence.Bundle.Status != record.Status {
-		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, fmt.Errorf("Windows Host Agent terminal status does not match durable result")
+		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, fmt.Errorf("Windows Host Agent terminal status does not match durable result") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	original, err := readRunLedgerRecord(assignment.repoDir, assignment.record.RunID)
 	if err != nil {
 		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, err
 	}
 	if record.RunID != original.RunID || record.Scenario != original.Scenario || record.TargetProfile != original.TargetProfile || record.Host != original.Host {
-		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, fmt.Errorf("Windows Host Agent changed immutable Run Ledger identity")
+		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, fmt.Errorf("Windows Host Agent changed immutable Run Ledger identity") //nolint:staticcheck // Product terms start the user-facing diagnostic.
 	}
 	merged := record
 	merged.Version = original.Version
@@ -2038,7 +2038,7 @@ func validateHostAgentCompletionIdentity(assignment hostAgentAssignmentRecord, t
 
 func validateHostAgentResultFiles(runID string, files []controlPlaneFile) error {
 	if len(files) == 0 || len(files) > 10_000 {
-		return fmt.Errorf("Windows Host Agent result file count is invalid")
+		return fmt.Errorf("Windows Host Agent result file count is invalid") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	ledgerRoot := filepath.ToSlash(filepath.Join(".maya-stall", "state", "ledger", "runs", runID))
 	evidenceRoot := filepath.ToSlash(filepath.Join("artifacts", "maya-stall", runID))
@@ -2053,7 +2053,7 @@ func validateHostAgentResultFiles(runID string, files []controlPlaneFile) error 
 			return fmt.Errorf("invalid Windows Host Agent result path")
 		}
 		if clean != ledgerRoot && !strings.HasPrefix(clean, ledgerRoot+"/") && clean != evidenceRoot && !strings.HasPrefix(clean, evidenceRoot+"/") {
-			return fmt.Errorf("Windows Host Agent result path is outside durable run data")
+			return fmt.Errorf("Windows Host Agent result path is outside durable run data") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 		}
 		seen[clean] = true
 		kinds[clean] = file.Kind
@@ -2061,7 +2061,7 @@ func validateHostAgentResultFiles(runID string, files []controlPlaneFile) error 
 	for path := range kinds {
 		for parent := filepath.ToSlash(filepath.Dir(filepath.FromSlash(path))); parent != "."; parent = filepath.ToSlash(filepath.Dir(filepath.FromSlash(parent))) {
 			if kinds[parent] == "file" {
-				return fmt.Errorf("Windows Host Agent result file cannot contain child paths")
+				return fmt.Errorf("Windows Host Agent result file cannot contain child paths") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 			}
 		}
 	}
@@ -2070,7 +2070,7 @@ func validateHostAgentResultFiles(runID string, files []controlPlaneFile) error 
 		filepath.ToSlash(filepath.Join(evidenceRoot, evidenceBundleFileName)),
 	} {
 		if !seen[required] {
-			return fmt.Errorf("Windows Host Agent result is missing %s", required)
+			return fmt.Errorf("Windows Host Agent result is missing %s", required) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 		}
 	}
 	return nil
@@ -2149,7 +2149,7 @@ func runHostAgentOnce(options hostAgentRunOnceOptions, runtime runRuntime, stdou
 		return err
 	}
 	if status.SessionID == "" {
-		return fmt.Errorf("Control Plane did not return a Windows Host Agent session")
+		return fmt.Errorf("Control Plane did not return a Windows Host Agent session") //nolint:staticcheck // Product terms start the user-facing diagnostic.
 	}
 	options.SessionID = status.SessionID
 	stopHeartbeat, heartbeatErrors, executionCancel := startHostAgentHeartbeat(options, runtime)
@@ -2219,7 +2219,7 @@ func runHostAgentOnce(options hostAgentRunOnceOptions, runtime runRuntime, stdou
 		return failConfirmedHostAgentAssignment(options, assignment, runtime, "renewing its process-session fence", errors.Join(runErr, heartbeatErr))
 	}
 	if outcome.Host != assignment.HostID || outcome.Scenario != assignment.Submission.Scenario || outcome.TargetProfile != targetProfile {
-		identityErr := fmt.Errorf("Windows Host Agent run did not reach the assigned Host identity")
+		identityErr := fmt.Errorf("Windows Host Agent run did not reach the assigned Host identity") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 		return failConfirmedHostAgentAssignment(options, assignment, runtime, "executing the assigned Scenario", errors.Join(runErr, identityErr))
 	}
 	files, snapshotErr := buildHostAgentResultFilesSanitized(repoDir, assignment.RunID, []string{repoDir, options.WorkRoot})
@@ -2271,7 +2271,7 @@ func startHostAgentHeartbeat(options hostAgentRunOnceOptions, runtime runRuntime
 					Version: hostAgentAPIVersion, SessionID: options.SessionID,
 				}, heartbeatRuntime, http.StatusOK, &status)
 				if err != nil {
-					heartbeatErr := fmt.Errorf("Windows Host Agent process-session heartbeat: %w", err)
+					heartbeatErr := fmt.Errorf("Windows Host Agent process-session heartbeat: %w", err) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 					heartbeatErrors <- heartbeatErr
 					executionCancel <- heartbeatErr
 					return
@@ -2359,7 +2359,7 @@ func pollHostAgentAssignment(options hostAgentRunOnceOptions, runtime runRuntime
 
 func validateHostAgentAssignment(options hostAgentRunOnceOptions, assignment hostAgentAssignmentResponse) error {
 	if assignment.Version != hostAgentAPIVersion || assignment.Kind != "host-agent-assignment" || assignment.AgentID != options.AgentID || assignment.HostID != options.HostID || validateRunID(assignment.RunID) != nil || assignment.LockToken == "" {
-		return fmt.Errorf("Control Plane returned an unsupported Windows Host Agent assignment")
+		return fmt.Errorf("Control Plane returned an unsupported Windows Host Agent assignment") //nolint:staticcheck // Product terms start the user-facing diagnostic.
 	}
 	return nil
 }
@@ -2450,7 +2450,7 @@ func appendHostAgentResultPath(repoDir string, relativeRoot string, sanitizer ho
 			return walkErr
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
-			return fmt.Errorf("Windows Host Agent result must not contain symlinks")
+			return fmt.Errorf("Windows Host Agent result must not contain symlinks") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 		}
 		relative, err := filepath.Rel(repoDir, path)
 		if err != nil {
@@ -2473,7 +2473,7 @@ func appendHostAgentResultPath(repoDir string, relativeRoot string, sanitizer ho
 			return err
 		}
 		if !info.Mode().IsRegular() {
-			return fmt.Errorf("Windows Host Agent result must contain only regular files")
+			return fmt.Errorf("Windows Host Agent result must contain only regular files") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 		}
 		if err := addControlPlaneSnapshotEstimate(estimated, info.Size(), relative); err != nil {
 			return err
@@ -2483,7 +2483,7 @@ func appendHostAgentResultPath(repoDir string, relativeRoot string, sanitizer ho
 			return err
 		}
 		if int64(len(content)) != info.Size() {
-			return fmt.Errorf("Windows Host Agent result changed while reading")
+			return fmt.Errorf("Windows Host Agent result changed while reading") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 		}
 		if len(sanitizer) > 0 && utf8.Valid(content) && !bytes.ContainsRune(content, '\x00') {
 			content = []byte(sanitizer.sanitize(string(content)))

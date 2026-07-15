@@ -47,9 +47,10 @@ through host config outside the consuming repo.
 The CLI has two operating modes. Embedded Mode is the default and keeps run
 ownership in the current checkout. Configured Control Plane Mode submits the
 same Scenario contract and declared payload snapshot to an authenticated HTTPS
-service. It can synchronously complete the fake Scenario through a registered
-outbound Windows Host Agent while keeping Host credentials and scheduling state
-outside Repo Run Config. Mode selection uses CLI flags, not Repo Run Config.
+service. It can synchronously complete a fake or Agent-configured real Scenario
+through a registered outbound Windows Host Agent while keeping Host credentials
+and scheduling state outside Repo Run Config. Mode selection uses CLI flags,
+not Repo Run Config.
 
 ## A Run, End To End
 

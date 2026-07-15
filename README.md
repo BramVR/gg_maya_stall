@@ -25,8 +25,9 @@ keeps the session according to the Stop Policy.
 The default Embedded Mode owns that lifecycle in the current checkout. An
 optional Configured Control Plane Mode submits the same repo-owned Scenario and
 declared payload snapshot to an authenticated HTTPS service without changing
-Repo Run Config. The Control Plane can execute a fake Scenario through one
-registered Windows Host Agent over an outbound authenticated connection.
+Repo Run Config. The Control Plane can execute a fake or Agent-configured real
+Scenario through one registered Windows Host Agent over an outbound
+authenticated connection.
 
 ## Who Maya Stall Is For
 

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -84,6 +85,29 @@ func TestFreshRunLifecycleSelectsUniqueRunIDWithoutChangingExistingEvidence(t *t
 	}
 	if content, readErr := os.ReadFile(blockingEvidencePath); readErr != nil || string(content) != "keep\n" {
 		t.Fatalf("Fresh Run changed blocking Evidence path: content=%q err=%v", content, readErr)
+	}
+}
+
+func TestFreshRunSessionBindingFailureStopsSessionAndReleasesHostLock(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	runtime := defaultRunRuntime()
+	runtime.SessionStarted = func(brokerSessionIdentity) error {
+		return fmt.Errorf("shared Host Lock binding rejected")
+	}
+	outcome, err := newFreshRun(dir, runOptions{
+		ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways,
+	}, runtime).Run()
+	if err == nil || !strings.Contains(err.Error(), "shared Host Lock binding rejected") {
+		t.Fatalf("Fresh Run session binding error = %v", err)
+	}
+	if outcome.Failure == nil || outcome.Failure.CleanupState != "completed" || outcome.StopPolicy != "stopped" {
+		t.Fatalf("Fresh Run session binding failure outcome = %+v", outcome)
+	}
+	if _, statErr := os.Lstat(filepath.Join(dir, ".maya-stall", "state", "locks", "hosts", defaultFakeHostID+".lock")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("session binding failure retained Host Lock: %v", statErr)
+	}
+	if _, statErr := os.Lstat(filepath.Join(dir, ".maya-stall", "state", "runs", outcome.RunID)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("session binding failure retained run workspace: %v", statErr)
 	}
 }
 

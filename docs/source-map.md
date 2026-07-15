@@ -60,8 +60,11 @@ descriptive; code is the source-backed check when behavior claims disagree.
   submission snapshots, durable run reads, and Control Plane server:
   `internal/cli/control_plane.go`, `internal/cli/control_plane_test.go`
 - Windows Host Agent enrollment, outbound assignment polling, durable Host Lock
-  fencing, fake execution, result transfer, and restart recovery:
+  and Maya UI Session fencing, fake/real execution, result transfer, and
+  restart recovery:
   `internal/cli/host_agent.go`, `internal/cli/host_agent_test.go`
+- Protected shared-path real Maya proof:
+  `internal/cli/live_shared_agent_smoke_test.go`
 
 ## Doctor
 

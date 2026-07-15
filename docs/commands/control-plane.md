@@ -20,7 +20,7 @@ symlinks.
 
 The server creates a missing data directory privately. It never changes an
 existing directory's permissions; an existing root must already be private
-(`0700` or stricter). Per-run state and the shared fake-host lock namespace are
+(`0700` or stricter). Per-run state and the shared Host Lock namespaces are
 private children.
 
 ## Enroll A Windows Host Agent
@@ -48,18 +48,22 @@ ready Agent process. Registration issues a leased, ephemeral process-session
 fence; heartbeats renew it during execution, concurrent live processes using
 the same Agent identity are rejected, and a replacement may take over only
 after the prior lease expires and before execution confirmation. Loss after
-confirmation quarantines the assignment. The Control
+confirmation quarantines the assignment. New assignments require an Agent that
+advertises exact Maya UI Session binding during registration. Older version 1
+Agents remain protocol-compatible for already-active assignments but are not
+eligible for new work after reconnecting. The Control
 Plane atomically persists the assignment and a unique
 token-fenced Host Lock before making work visible. A Host has one slot. A
 second assignment fails without changing the existing lock or assignment.
 Restarted Control Planes reload active locks and keep their Hosts unavailable.
 An unverified Maya shutdown moves the assignment to `quarantined`; its Agent
-and shared fake-host locks remain unavailable. Version 1 has no automated
+and shared Host Locks remain unavailable. Version 1 has no automated
 quarantine recovery endpoint; this is an intentional fail-closed boundary.
 
 Run the Agent with [`host-agent run-once`](host-agent.md). It makes only outbound
-authenticated HTTPS requests, confirms the exact Host Lock token, executes one
-fake Scenario, transfers bounded Run Ledger and Evidence files, cleans its run
+authenticated HTTPS requests, confirms the exact Host Lock token, binds the
+launched Maya UI Session identity, executes one fake or Agent-configured real
+Scenario, transfers bounded Run Ledger and Evidence files, cleans its run
 workspace, and releases the shared Host Lock only after the Control Plane has
 accepted durable terminal state.
 
@@ -82,20 +86,22 @@ The version 1 API uses bearer authentication and origin-only HTTPS client URLs:
 - `POST /v1/host-agents/<agent-id>/heartbeat`
 - `POST /v1/host-agents/<agent-id>/assignments/next`
 - `POST /v1/host-agents/<agent-id>/assignments/<run-id>/confirm`
+- `POST /v1/host-agents/<agent-id>/assignments/<run-id>/session`
 - `POST /v1/host-agents/<agent-id>/assignments/<run-id>/complete`
 - `POST /v1/host-agents/<agent-id>/assignments/<run-id>/fail`
 
 Submission returns newline-delimited versioned records on the same HTTPS
 response. The first record returns the durable Run ID immediately after the
-Run Ledger accepts it; the second returns the terminal fake result. The CLI
+Run Ledger accepts it; the second returns the terminal result. The CLI
 prints the same acceptance and terminal records with `run --json`.
 
 With no Agent enrollment, the server preserves the original in-process fake
 execution path. With an enrollment, it waits synchronously for the registered
-Agent to finish the fake assignment. Registered Agent runs require
+Agent to finish the assignment. Registered Agent runs require
 `--stop-after always`; policies that could retain a session fail before an
-assignment is created. Real Maya execution through the Agent is not implemented
-by this slice.
+assignment is created. Real execution requires an Agent-local Host config;
+submitting clients cannot send Host config or silently fall back to
+embedded/direct-SSH ownership.
 
 Kept runs remain readable and are never reported as final success, but this
 first slice has no configured-mode attach or stop mutation. It therefore omits

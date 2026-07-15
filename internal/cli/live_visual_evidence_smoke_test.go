@@ -374,6 +374,13 @@ func TestLiveVisualEvidenceProofWorkflowRequiresSmokePass(t *testing.T) {
 	if got := strings.Count(text, "go test -json ./internal/cli -run"); got != 1 {
 		t.Fatalf("live smoke Go test process count = %d, want 1", got)
 	}
+	sshSmoke, err := os.ReadFile("live_ssh_smoke_test.go")
+	if err != nil {
+		t.Fatalf("read live SSH smoke: %v", err)
+	}
+	if !strings.Contains(string(sshSmoke), `t.Run("shared Host Agent path", runOptInRealSharedHostAgentRunSmoke)`) {
+		t.Fatal("protected live SSH smoke does not require the shared Host Agent path")
+	}
 }
 
 func TestRealSSHSmokeScreenshotAndControlArgs(t *testing.T) {

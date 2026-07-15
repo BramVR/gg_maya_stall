@@ -151,13 +151,16 @@ maya-stall host-agent run-once \
   --agent-id windows-agent-01 \
   --host maya-win-01 \
   --work-root C:/maya-stall/agent \
+  --host-config C:/maya-stall/config/hosts.yaml \
   --credential-env MAYA_STALL_HOST_AGENT_CREDENTIAL
 ```
 
 Start `run-once` before submitting the Scenario. It waits for one assignment,
-executes that fake Scenario, transfers durable Evidence and Run Ledger state,
-cleans its run workspace, and exits. See [control-plane](commands/control-plane.md)
-and [host-agent](commands/host-agent.md).
+executes the real Scenario selected by its operator-owned Host config, transfers
+durable Evidence and Run Ledger state, cleans its run workspace, and exits.
+Omit `--host-config` only for the explicit fake development path. See
+[control-plane](commands/control-plane.md) and
+[host-agent](commands/host-agent.md).
 
 ## Step 5. Write A Scenario Result
 

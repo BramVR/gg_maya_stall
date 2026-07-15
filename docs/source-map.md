@@ -56,6 +56,9 @@ descriptive; code is the source-backed check when behavior claims disagree.
 - Run-scoped attach screenshot/control helpers:
   `internal/cli/run_scoped_ops.go`
 - Crabbox-inspired defaults: `internal/cli/crabbox_defaults.go`
+- Embedded/Configured Control Plane mode selection, authenticated API,
+  submission snapshots, durable run reads, and Control Plane server:
+  `internal/cli/control_plane.go`, `internal/cli/control_plane_test.go`
 
 ## Doctor
 

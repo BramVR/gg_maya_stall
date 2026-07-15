@@ -12,7 +12,10 @@ import (
 )
 
 type statusOptions struct {
-	RunID string
+	RunID                string
+	JSON                 bool
+	ControlPlane         string
+	ControlPlaneTokenEnv string
 }
 
 type keptRun struct {
@@ -37,6 +40,20 @@ func parseStatusArgs(args []string) (statusOptions, error) {
 				return statusOptions{}, err
 			}
 			options.RunID = args[i]
+		case "--json":
+			options.JSON = true
+		case "--control-plane":
+			i++
+			if i >= len(args) || args[i] == "" || strings.HasPrefix(args[i], "--") {
+				return statusOptions{}, newUsageError("--control-plane needs an HTTPS URL")
+			}
+			options.ControlPlane = args[i]
+		case "--control-plane-token-env":
+			i++
+			if i >= len(args) || args[i] == "" || strings.HasPrefix(args[i], "--") {
+				return statusOptions{}, newUsageError("--control-plane-token-env needs an environment variable name")
+			}
+			options.ControlPlaneTokenEnv = args[i]
 		default:
 			return statusOptions{}, newUsageError("unknown status option %q", args[i])
 		}
@@ -97,7 +114,6 @@ func printStatus(repoDir string, options statusOptions, stdout io.Writer) error 
 			return err
 		}
 		if run.Record.Status == "running" && run.Record.StopPhase == "" {
-			run.Bundle.Status = run.Record.Status
 			if err := ensureOutputPathHasNoSymlinkParent(repoDir, filepath.Join("artifacts", "maya-stall", options.RunID)); err != nil {
 				return err
 			}
@@ -109,6 +125,7 @@ func printStatus(repoDir string, options statusOptions, stdout io.Writer) error 
 			} else if !errors.Is(evidenceErr, os.ErrNotExist) {
 				return evidenceErr
 			}
+			run.Bundle.Status = run.Record.Status
 		} else {
 			run, err = readKeptRun(repoDir, options.RunID)
 			if err != nil {

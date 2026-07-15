@@ -109,7 +109,33 @@ Repo Run Config can optionally bound embedded history with `runLedger`
 `retention`, `maxEvents`, `maxEventBytes`, and `maxLogBytes`. These settings do
 not remove or truncate Evidence Bundles.
 
-## Step 4. Write A Scenario Result
+## Step 4. Optionally Use A Fake Control Plane
+
+Start the Control Plane with an environment-sourced bearer token, private data
+directory, and operator-managed TLS certificate and key:
+
+```sh
+maya-stall control-plane serve \
+  --data-dir /var/lib/maya-stall/control-plane \
+  --tls-cert /etc/maya-stall/tls.crt \
+  --tls-key /etc/maya-stall/tls.key
+```
+
+Set the same `MAYA_STALL_CONTROL_PLANE_TOKEN` in the client environment, then
+submit and read the fake run:
+
+```sh
+maya-stall run --control-plane https://maya-stall.example.com smoke
+maya-stall status --control-plane https://maya-stall.example.com --json --run <run-id>
+maya-stall events --control-plane https://maya-stall.example.com <run-id>
+maya-stall logs --control-plane https://maya-stall.example.com <run-id>
+maya-stall result --control-plane https://maya-stall.example.com <run-id>
+```
+
+The URL selects Configured Control Plane Mode; Repo Run Config stays unchanged.
+Omit it to keep using Embedded Mode. This initial configured path is fake-only.
+
+## Step 5. Write A Scenario Result
 
 Maya Stall passes the Scenario Result path to Maya scripts as
 `MAYA_STALL_SCENARIO_RESULT`. Scripts can use the optional Python helper:
@@ -131,7 +157,7 @@ maya_stall.write_result(
 The helper writes JSON and creates parent directories as needed. Scenario
 authors may also write the protocol directly.
 
-## Step 5. Load Trusted Plugin Artifacts When Configured
+## Step 6. Load Trusted Plugin Artifacts When Configured
 
 For real Maya UI runs, Maya may warn when a plug-in loads from a fresh
 per-run workspace. Consuming repos should still declare Plugin Artifacts in
@@ -153,7 +179,7 @@ Operators configure and trust that stable location on the Maya Host with
 `trustedPluginArtifactsRoot`; consuming repos should not commit host-specific
 trusted paths or ask Maya Stall to disable plug-in security.
 
-## Step 6. Add Validators
+## Step 7. Add Validators
 
 Validators compare Evidence Bundle outputs against Expected Outputs:
 
@@ -181,7 +207,7 @@ validators:
 
 Validator failures mark the run failed and are recorded in `evidence.json`.
 
-## Step 7. Collect And Publish Evidence
+## Step 8. Collect And Publish Evidence
 
 Collect a full Evidence Bundle:
 
@@ -229,7 +255,7 @@ maya-stall review-comment gitlab \
 
 Use `--dry-run` to render locally without credentials or network writes.
 
-## Step 7. Prepare A Real Windows Maya Host
+## Step 9. Prepare A Real Windows Maya Host
 
 Follow the [Windows Maya Host setup checklist](setup/windows-maya-host.md). The
 host must provide OpenSSH, an interactive logged-in desktop, Autodesk Maya, a

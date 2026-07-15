@@ -370,6 +370,16 @@ func selectHostForRunValidated(repoDir string, options runOptions, validate func
 	if err != nil {
 		return hostRuntime{}, err
 	}
+	if options.SharedFakeWorkRoot != "" {
+		for poolName, pool := range config.HostPools {
+			for index := range pool.Hosts {
+				if !pool.Hosts[index].usesRealSSH() {
+					pool.Hosts[index].WorkRoot = options.SharedFakeWorkRoot
+				}
+			}
+			config.HostPools[poolName] = pool
+		}
+	}
 	if options.TargetProfile == "" {
 		options.TargetProfile = "default"
 	}

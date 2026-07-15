@@ -12,7 +12,15 @@ maya-stall evidence collect smoke
 maya-stall evidence collect --json smoke
 maya-stall evidence collect --host-config ci-hosts.yaml --target-profile ci smoke
 maya-stall evidence collect --host-config ci-hosts.yaml --target-profile ci --host maya-win-01 smoke
+maya-stall evidence collect --control-plane https://maya-stall.example.com smoke
 ```
+
+`--control-plane <origin-only-https-url>` selects Configured Control Plane Mode
+without changing Repo Run Config. The bearer token defaults to
+`MAYA_STALL_CONTROL_PLANE_TOKEN`; `--control-plane-token-env <name>` selects a
+different environment variable. The first configured path executes fake
+Scenarios only and returns API evidence by Run ID. Omitting the flag preserves
+Embedded Mode.
 
 The bundle includes:
 

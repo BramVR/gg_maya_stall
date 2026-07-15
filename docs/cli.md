@@ -40,14 +40,31 @@ See [version](commands/version.md), [init](commands/init.md),
 ### Run Lifecycle
 
 ```text
-maya-stall run [--json] [host flags] [lock flags] [stop flags] <scenario>
+maya-stall run [--json] [control-plane flags] [host flags] [lock flags] [stop flags] <scenario>
 maya-stall history [--json] [--scenario <name>] [--host <id>] [--state <state>] [--since <duration-or-rfc3339>]
-maya-stall status [--run <run-id>]
+maya-stall status [--json] [control-plane flags] --run <run-id>
+maya-stall events [--json] [control-plane flags] <run-id>
+maya-stall logs [--json] [control-plane flags] <run-id>
+maya-stall result [--json] [control-plane flags] <run-id>
 maya-stall attach <run-id>
 maya-stall attach <run-id> screenshot
 maya-stall attach <run-id> control click --x <pixels> --y <pixels>
 maya-stall stop <run-id>
 ```
+
+Control Plane flags:
+
+```text
+--control-plane <origin-only-https-url>
+--control-plane-token-env <environment-variable-name>
+```
+
+Omitting `--control-plane` selects Embedded Mode. Providing it selects
+Configured Control Plane Mode without changing Repo Run Config. The default
+token environment variable is `MAYA_STALL_CONTROL_PLANE_TOKEN`; token values
+are never command arguments or config fields. Configured mode owns Maya Host
+selection, so client host, lock, and pin flags are rejected. Target Profile and
+Stop Policy remain part of the submitted Scenario request.
 
 Common host flags:
 
@@ -66,7 +83,9 @@ Lock and stop flags:
 --stop-after success|failure|always|never
 ```
 
-See [run](commands/run.md), [history](commands/history.md), [status](commands/status.md),
+See [run](commands/run.md), [history](commands/history.md),
+[status](commands/status.md), [events](commands/events.md),
+[logs](commands/logs.md), [result](commands/result.md),
 [attach](commands/attach.md), and [stop](commands/stop.md).
 
 An identified Scenario submission receives a Run ID before validation, host
@@ -77,6 +96,11 @@ record and creates no run.
 Accepted runs are retained in the embedded Run Ledger after transient state
 cleanup. `history --json` returns a stable versioned object and supports exact
 Scenario, Maya Host, state, and recent-time filters.
+
+`status`, `events`, `logs`, and `result` render the same versioned response
+contracts in Embedded and Configured Control Plane modes. Configured reads use
+the Run ID returned by submission. The first Control Plane implementation runs
+fake Scenarios synchronously and persists its own Run Ledger and Evidence.
 
 ### Visual Evidence
 
@@ -99,7 +123,7 @@ verify the current Host Lock owner before touching the desktop.
 ### Evidence And Review Publishing
 
 ```text
-maya-stall evidence collect [--json] [host flags] <scenario>
+maya-stall evidence collect [--json] [control-plane flags] [host flags] <scenario>
 maya-stall evidence publish --destination <path> --base-url <url> <evidence-bundle-dir>
 maya-stall review-comment github --repo <owner/name> --pr <number> [--token-env <name>] [--api-url <url>] [--dry-run] <published-evidence-dir>
 maya-stall review-comment gitlab --project <path-or-id> --merge-request <iid> [--token-env <name>] [--base-url <url>] [--dry-run] <published-evidence-dir>

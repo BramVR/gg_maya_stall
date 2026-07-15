@@ -22,6 +22,11 @@ Maya Host, stages the Run Payload, asks the Session Broker to run the Scenario
 inside Maya, captures an Evidence Bundle, runs Validators, and cleans up or
 keeps the session according to the Stop Policy.
 
+The default Embedded Mode owns that lifecycle in the current checkout. An
+optional Configured Control Plane Mode submits the same repo-owned Scenario and
+declared payload snapshot to an authenticated HTTPS service without changing
+Repo Run Config. The first Control Plane slice executes fake Scenarios only.
+
 ## Who Maya Stall Is For
 
 Maya Stall fits teams that maintain Maya plugins, tools, or scenes where a
@@ -86,6 +91,17 @@ maya-stall plan smoke
 maya-stall doctor --scenario smoke
 maya-stall run smoke
 maya-stall evidence collect smoke
+```
+
+To route the fake Scenario through a configured Control Plane, set its bearer
+token in `MAYA_STALL_CONTROL_PLANE_TOKEN` and pass an origin-only HTTPS URL:
+
+```sh
+maya-stall run --control-plane https://maya-stall.example.com smoke
+maya-stall status --control-plane https://maya-stall.example.com --json --run <run-id>
+maya-stall events --control-plane https://maya-stall.example.com <run-id>
+maya-stall logs --control-plane https://maya-stall.example.com <run-id>
+maya-stall result --control-plane https://maya-stall.example.com <run-id>
 ```
 
 Capture standalone Visual Evidence:

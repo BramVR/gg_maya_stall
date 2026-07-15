@@ -102,13 +102,37 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 			return 1
 		}
 		return 0
+	case "events", "logs", "result":
+		options, err := parseRunReadArgs(args[0], args[1:])
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "maya-stall %s: %v\n", args[0], err)
+			return 2
+		}
+		if err := printRunReadThroughMode(workDir, args[0], options, stdout, runtime); err != nil {
+			_, _ = fmt.Fprintf(stderr, "maya-stall %s: %v\n", args[0], err)
+			var userErr *usageError
+			if errors.As(err, &userErr) {
+				return 2
+			}
+			return 1
+		}
+		return 0
 	case "run":
 		options, err := parseRunArgs(args[1:])
 		jsonOutput := requestedRunJSON(args[1:])
 		if err != nil {
 			if options.ScenarioName != "" {
 				runtime = withRunAcceptanceOutput(runtime, stdout, jsonOutput)
-				outcome, acceptedErr := failAcceptedSubmission(workDir, options, runtime, err)
+				outcome, acceptedErr := failAcceptedSubmissionThroughMode(workDir, options, runtime, err)
+				var userErr *usageError
+				if outcome.RunID == "" && errors.As(acceptedErr, &userErr) {
+					if jsonOutput {
+						printRunCommandJSON(stdout, runCommandJSON{Version: 1, Kind: "usage-error", Accepted: false, Error: acceptedErr.Error()})
+					} else {
+						_, _ = fmt.Fprintf(stderr, "maya-stall run: %v\n", acceptedErr)
+					}
+					return 2
+				}
 				if outcome.RunID != "" {
 					printRunCommandOutcome(stdout, outcome, jsonOutput)
 				}
@@ -123,7 +147,7 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 			return 2
 		}
 		runtime = withRunAcceptanceOutput(runtime, stdout, jsonOutput)
-		outcome, err := runScenario(workDir, options, runtime)
+		outcome, err := runScenarioThroughMode(workDir, options, runtime)
 		if err != nil {
 			if outcome.RunID != "" {
 				printRunCommandOutcome(stdout, outcome, jsonOutput)
@@ -197,6 +221,21 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 		}
 		printDesktopControlOutcome(stdout, outcome)
 		return 0
+	case "control-plane":
+		if len(args) < 2 || args[1] != "serve" {
+			_, _ = fmt.Fprintln(stderr, "maya-stall control-plane: expected serve")
+			return 2
+		}
+		options, err := parseControlPlaneServeArgs(args[2:], workDir)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "maya-stall control-plane serve: %v\n", err)
+			return 2
+		}
+		if err := runControlPlaneServer(options, runtime, stdout); err != nil {
+			_, _ = fmt.Fprintf(stderr, "maya-stall control-plane serve: %v\n", err)
+			return 1
+		}
+		return 0
 	case "evidence":
 		if len(args) < 2 {
 			fmt.Fprintf(stderr, "maya-stall evidence: expected collect or publish\n")
@@ -209,7 +248,16 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 			if err != nil {
 				if options.ScenarioName != "" {
 					runtime = withRunAcceptanceOutput(runtime, stdout, jsonOutput)
-					outcome, acceptedErr := failAcceptedSubmission(workDir, options, runtime, err)
+					outcome, acceptedErr := failAcceptedSubmissionThroughMode(workDir, options, runtime, err)
+					var userErr *usageError
+					if outcome.RunID == "" && errors.As(acceptedErr, &userErr) {
+						if jsonOutput {
+							printRunCommandJSON(stdout, runCommandJSON{Version: 1, Kind: "usage-error", Accepted: false, Error: acceptedErr.Error()})
+						} else {
+							_, _ = fmt.Fprintf(stderr, "maya-stall evidence collect: %v\n", acceptedErr)
+						}
+						return 2
+					}
 					if outcome.RunID != "" {
 						printRunCommandOutcome(stdout, outcome, jsonOutput)
 					}
@@ -224,7 +272,7 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 				return 2
 			}
 			runtime = withRunAcceptanceOutput(runtime, stdout, jsonOutput)
-			outcome, err := runScenario(workDir, options, runtime)
+			outcome, err := runScenarioThroughMode(workDir, options, runtime)
 			if err != nil {
 				if outcome.RunID != "" {
 					printRunCommandOutcome(stdout, outcome, jsonOutput)
@@ -305,7 +353,7 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 			fmt.Fprintf(stderr, "maya-stall status: %v\n", err)
 			return 2
 		}
-		if err := printStatus(workDir, options, stdout); err != nil {
+		if err := printStatusThroughMode(workDir, options, stdout, runtime); err != nil {
 			var userErr *usageError
 			if errors.As(err, &userErr) {
 				fmt.Fprintf(stderr, "maya-stall status: %v\n", err)
@@ -491,15 +539,19 @@ Usage:
   maya-stall doctor [--host-config <path>] [--target-profile <name>] [--host <id>] [--scenario <name>] [--repair-trusted-plugin-allowlist]
   maya-stall plan [--json] [--host-config <path>] <scenario>
   maya-stall history [--json] [--scenario <name>] [--host <id>] [--state <state>] [--since <duration-or-rfc3339>]
-  maya-stall run [--json] [--host-config <path>] [--target-profile <name>] [--host <id>] [--host-lock-wait <duration>|--host-lock-fail-fast] [--keep-on-failure|--stop-after <success|failure|always|never>] <scenario>
+  maya-stall run [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] [--host-config <path>] [--target-profile <name>] [--host <id>] [--host-lock-wait <duration>|--host-lock-fail-fast] [--keep-on-failure|--stop-after <success|failure|always|never>] <scenario>
+  maya-stall status [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] --run <run-id>
+  maya-stall events [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] <run-id>
+  maya-stall logs [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] <run-id>
+  maya-stall result [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] <run-id>
+  maya-stall control-plane serve --data-dir <path> --tls-cert <path> --tls-key <path> [--listen <host:port>] [--token-env <name>]
   maya-stall screenshot [--host-config <path>] [--target-profile <name>] [--host <id>]
   maya-stall record [--host-config <path>] [--target-profile <name>] [--host <id>]
   maya-stall control click --x <pixels> --y <pixels> [--host-config <path>] [--target-profile <name>] [--host <id>] [--dry-run]
-  maya-stall evidence collect [--json] [--host-config <path>] [--target-profile <name>] [--host <id>] <scenario>
+  maya-stall evidence collect [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] [--host-config <path>] [--target-profile <name>] [--host <id>] <scenario>
   maya-stall evidence publish --destination <path> --base-url <url> <evidence-bundle-dir>
   maya-stall review-comment github --repo <owner/name> --pr <number> [--token-env <name>] [--api-url <url>] [--dry-run] <published-evidence-dir>
   maya-stall review-comment gitlab --project <path-or-id> --merge-request <iid> [--token-env <name>] [--base-url <url>] [--dry-run] <published-evidence-dir>
-  maya-stall status [--run <run-id>]
   maya-stall attach <run-id>
   maya-stall attach <run-id> screenshot
   maya-stall attach <run-id> control click --x <pixels> --y <pixels>
@@ -508,39 +560,67 @@ Usage:
 Commands:
   attach   observe a run or perform run-scoped screenshot/control
   control click   send an explicit desktop click through the Session Broker
+  control-plane serve   run the authenticated HTTPS Control Plane
   doctor   check local config, Target Profile, and Host Health layers
   evidence collect   run a Scenario and write a complete Evidence Bundle
   evidence publish   copy an Evidence Bundle to a filesystem Evidence Store
+  events    read ordered durable events for one run
   init      write a repo-only sample .maya-stall.yaml
+  logs      read bounded retained logs for one run
   history   list durable embedded run history
   plan      inspect a normalized Scenario and optional host compatibility without host contact
   record   capture a Session Broker recording artifact
   review-comment   create or update a GitHub PR or GitLab MR Review Comment
-  run       run a named Scenario with fake or configured SSH transport
+  result    read the final Scenario and cleanup result for one run
+  run       run a named Scenario in embedded or configured Control Plane mode
   screenshot   capture a Session Broker screenshot artifact
-  status   show kept run state
+  status   show current or durable run state
   stop     stop a kept run and release its Host Lock
   version   print the maya-stall version
 `)
 }
 
 type runOptions struct {
-	ScenarioName  string
-	HostConfig    string
-	TargetProfile string
-	HostPin       string
-	HostLockWait  time.Duration
-	StopAfter     string
+	ScenarioName         string
+	HostConfig           string
+	TargetProfile        string
+	HostPin              string
+	HostLockWait         time.Duration
+	StopAfter            string
+	ControlPlane         string
+	ControlPlaneSet      bool
+	ControlPlaneTokenEnv string
+	AssignedRunID        string
+	HostOptionsSet       bool
+	SharedFakeWorkRoot   string
 }
 
 func parseRunArgs(args []string) (runOptions, error) {
 	options := runOptions{TargetProfile: "default", StopAfter: stopAfterAlways}
+	selection := preScanControlPlaneSelection(args)
+	options.ControlPlane = selection.ControlPlane
+	options.ControlPlaneSet = selection.ControlPlaneSet
+	options.ControlPlaneTokenEnv = selection.ControlPlaneTokenEnv
 	stopPolicySet := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch arg {
 		case "--json":
+		case "--control-plane":
+			options.ControlPlaneSet = true
+			i++
+			if i >= len(args) || args[i] == "" || strings.HasPrefix(args[i], "--") {
+				return options, newUsageError("--control-plane needs an HTTPS URL")
+			}
+			options.ControlPlane = args[i]
+		case "--control-plane-token-env":
+			i++
+			if i >= len(args) || args[i] == "" || strings.HasPrefix(args[i], "--") {
+				return options, newUsageError("--control-plane-token-env needs an environment variable name")
+			}
+			options.ControlPlaneTokenEnv = args[i]
 		case "--host-config":
+			options.HostOptionsSet = true
 			i++
 			if i >= len(args) || args[i] == "" || strings.HasPrefix(args[i], "--") {
 				return options, newUsageError("--host-config needs a path")
@@ -553,12 +633,14 @@ func parseRunArgs(args []string) (runOptions, error) {
 			}
 			options.TargetProfile = args[i]
 		case "--host":
+			options.HostOptionsSet = true
 			i++
 			if i >= len(args) || args[i] == "" || strings.HasPrefix(args[i], "--") {
 				return options, newUsageError("--host needs a Maya Host id")
 			}
 			options.HostPin = args[i]
 		case "--host-lock-wait":
+			options.HostOptionsSet = true
 			i++
 			if i >= len(args) || args[i] == "" || strings.HasPrefix(args[i], "--") {
 				return options, newUsageError("--host-lock-wait needs a duration")
@@ -569,6 +651,7 @@ func parseRunArgs(args []string) (runOptions, error) {
 			}
 			options.HostLockWait = duration
 		case "--host-lock-fail-fast":
+			options.HostOptionsSet = true
 			options.HostLockWait = 0
 		case "--keep-on-failure":
 			if stopPolicySet {
@@ -603,6 +686,26 @@ func parseRunArgs(args []string) (runOptions, error) {
 		return options, newUsageError("expected Scenario name")
 	}
 	return options, nil
+}
+
+func preScanControlPlaneSelection(args []string) runOptions {
+	var options runOptions
+	for index := 0; index < len(args); index++ {
+		switch args[index] {
+		case "--control-plane":
+			options.ControlPlaneSet = true
+			if index+1 < len(args) && args[index+1] != "" && !strings.HasPrefix(args[index+1], "--") {
+				options.ControlPlane = args[index+1]
+				index++
+			}
+		case "--control-plane-token-env":
+			if index+1 < len(args) && args[index+1] != "" && !strings.HasPrefix(args[index+1], "--") {
+				options.ControlPlaneTokenEnv = args[index+1]
+				index++
+			}
+		}
+	}
+	return options
 }
 
 type doctorOptions struct {

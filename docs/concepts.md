@@ -36,6 +36,13 @@ Host Pool in external host config.
 **Control Plane** - the shared Maya Stall service that records submitted runs,
 schedules them across Host Pools, owns shared Host Locks, and keeps run history.
 
+**Embedded Mode** - the default single-controller mode. The CLI executes the
+Scenario and keeps its Run Ledger and Evidence Bundle in the Consuming Repo.
+
+**Configured Control Plane Mode** - shared mode selected with an external
+Control Plane HTTPS URL and bearer-token environment variable. The Control
+Plane owns execution and durable run records; Repo Run Config does not change.
+
 **Maya Host** - an owned physical or virtual Windows machine with one isolated
 interactive desktop, Autodesk Maya, a writable work root, and the services
 needed to provide one Maya Stall execution slot.

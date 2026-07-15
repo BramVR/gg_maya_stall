@@ -44,6 +44,12 @@ and a Session Broker such as `gg_mayasessiond`.
 Default tests and default commands use fake/local transport. Real SSH is opt-in
 through host config outside the consuming repo.
 
+The CLI has two operating modes. Embedded Mode is the default and keeps run
+ownership in the current checkout. Configured Control Plane Mode submits the
+same Scenario contract and declared payload snapshot to an authenticated HTTPS
+service; its first vertical slice is synchronous and fake-only. Mode selection
+uses CLI flags, not Repo Run Config.
+
 ## A Run, End To End
 
 1. The CLI loads repo config from `.maya-stall.yaml` or `maya-stall.yaml`.
@@ -88,6 +94,12 @@ maya-stall run smoke
 maya-stall evidence collect smoke
 ```
 
+For a configured fake Control Plane, set
+`MAYA_STALL_CONTROL_PLANE_TOKEN` and add
+`--control-plane https://maya-stall.example.com` to `run` or `evidence
+collect`. Read the returned Run ID with `status`, `events`, `logs`, and
+`result` using the same flag.
+
 Publish a completed Evidence Bundle:
 
 ```sh
@@ -114,7 +126,10 @@ Pick whichever matches your intent:
   [CLI overview](cli.md), [Concepts and glossary](concepts.md).
 - **Use the CLI:** [Command reference](commands/README.md),
   [init](commands/init.md), [doctor](commands/doctor.md),
-  [plan](commands/plan.md), [run](commands/run.md), [evidence](commands/evidence.md),
+  [plan](commands/plan.md), [run](commands/run.md),
+  [control-plane](commands/control-plane.md), [events](commands/events.md),
+  [logs](commands/logs.md), [result](commands/result.md),
+  [evidence](commands/evidence.md),
   [screenshot](commands/screenshot.md), [record](commands/record.md),
   [review-comment](commands/review-comment.md).
 - **Prepare real hosts:** [Windows Maya Host setup](setup/windows-maya-host.md).

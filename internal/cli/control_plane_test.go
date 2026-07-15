@@ -1,0 +1,1074 @@
+package cli
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestRunCompletesFakeScenarioThroughConfiguredControlPlane(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	dataDir := privateTempDir(t)
+	handler, err := newControlPlaneHandler(dataDir, "test-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "test-token")
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &stdout, &stderr, repoDir, "test-version", runtime)
+
+	if code != 0 {
+		t.Fatalf("shared run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	results := decodeRunJSONLines(t, stdout.Bytes())
+	if len(results) != 2 || results[0].Kind != "run-accepted" || results[1].Kind != "run" || results[1].Status != resultStatusPassed {
+		t.Fatalf("shared run output = %+v", results)
+	}
+	runID := results[0].RunID
+	if results[0].EvidenceDir != "/v1/runs/"+runID+"/evidence" || results[1].EvidenceDir != results[0].EvidenceDir {
+		t.Fatalf("shared run evidence links = accepted %q terminal %q", results[0].EvidenceDir, results[1].EvidenceDir)
+	}
+	serverRepo := filepath.Join(dataDir, "runs", runID, "repo")
+	if _, err := os.Stat(filepath.Join(serverRepo, ".maya-stall", "state", "ledger", "runs", runID, "run.json")); err != nil {
+		t.Fatalf("Control Plane Run Ledger: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(serverRepo, "artifacts", "maya-stall", runID, evidenceBundleFileName)); err != nil {
+		t.Fatalf("Control Plane Evidence Bundle: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, ".maya-stall")); !os.IsNotExist(err) {
+		t.Fatalf("shared run client state = %v, want absent", err)
+	}
+	var evidence controlPlaneEvidenceResponse
+	if err := getControlPlaneJSON(server.URL, "", "/v1/runs/"+runID+"/evidence", runtime, &evidence); err != nil {
+		t.Fatalf("read Control Plane evidence: %v", err)
+	}
+	if evidence.Version != 1 || evidence.Kind != "evidence" || evidence.RunID != runID || evidence.Bundle.RunID != runID || evidence.Bundle.Status != resultStatusPassed {
+		t.Fatalf("shared evidence response = %+v", evidence)
+	}
+	evidence.Bundle.RunID = "20260101T000000.000000000Z"
+	corrupt, err := json.Marshal(evidence.Bundle)
+	if err != nil {
+		t.Fatalf("marshal mismatched evidence: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(serverRepo, "artifacts", "maya-stall", runID, evidenceBundleFileName), corrupt, 0o600); err != nil {
+		t.Fatalf("write mismatched evidence: %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := RunWithRuntime([]string{"result", "--json", "--control-plane", server.URL, runID}, &stdout, &stderr, repoDir, "test-version", runtime); code != 1 {
+		t.Fatalf("mismatched evidence result exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestConfiguredControlPlaneReturnsRunIDBeforeFakeExecutionCompletes(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	serverRuntime := defaultRunRuntime()
+	serverRuntime.Broker = blockingFakeBroker{
+		fakeSessionBroker: fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "fake passed"}},
+		started:           started,
+		release:           release,
+	}
+	handler, err := newControlPlaneHandler(privateTempDir(t), "test-token", serverRuntime)
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "test-token")
+	accepted := make(chan runOutcome, 1)
+	clientRuntime := defaultRunRuntime()
+	clientRuntime.ControlPlaneHTTPClient = server.Client()
+	clientRuntime.Accepted = func(outcome runOutcome) { accepted <- outcome }
+	done := make(chan int, 1)
+	go func() {
+		done <- RunWithRuntime([]string{"run", "--control-plane", server.URL, "smoke"}, io.Discard, io.Discard, repoDir, "test-version", clientRuntime)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake execution did not start")
+	}
+	var acceptedRun runOutcome
+	select {
+	case acceptedRun = <-accepted:
+		if acceptedRun.RunID == "" || !acceptedRun.Accepted {
+			t.Fatalf("early accepted outcome = %+v", acceptedRun)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Run ID was not returned before fake execution completed")
+	}
+	var resultOut bytes.Buffer
+	var resultErr bytes.Buffer
+	if code := RunWithRuntime([]string{"result", "--json", "--control-plane", server.URL, acceptedRun.RunID}, &resultOut, &resultErr, repoDir, "test-version", clientRuntime); code != 0 {
+		t.Fatalf("active shared result exit code = %d; stdout: %s stderr: %s", code, resultOut.String(), resultErr.String())
+	}
+	var pending controlPlaneResultResponse
+	if err := json.Unmarshal(resultOut.Bytes(), &pending); err != nil || pending.Final || pending.Success || pending.State == "" {
+		t.Fatalf("active shared result = %+v err %v", pending, err)
+	}
+	secondDone := make(chan int, 1)
+	go func() {
+		secondDone <- RunWithRuntime([]string{"run", "--control-plane", server.URL, "smoke"}, io.Discard, io.Discard, repoDir, "test-version", clientRuntime)
+	}()
+	select {
+	case code := <-secondDone:
+		if code != 1 {
+			t.Fatalf("concurrent shared admission exit code = %d, want 1", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("concurrent shared admission waited behind active execution")
+	}
+	close(release)
+	released = true
+	if code := <-done; code != 0 {
+		t.Fatalf("shared blocking run exit code = %d, want 0", code)
+	}
+}
+
+func TestControlPlaneTerminalRejectsPassedOutcomeWhenFinalizationFails(t *testing.T) {
+	repoDir := filepath.Join(t.TempDir(), "server-run")
+	outcome := runOutcome{
+		RunID: "20260101T000000.000000000Z", Scenario: "smoke", Accepted: true,
+		Result: ScenarioResult{Status: resultStatusPassed},
+	}
+
+	terminal := controlPlaneTerminalResponse(outcome, errors.New("finalize "+repoDir+" ledger: disk full"), repoDir)
+
+	if terminal.Status != resultStatusFailed || terminal.FailedLayer != string(failureLayerRunState) || !strings.Contains(terminal.Diagnostic, "disk full") || strings.Contains(terminal.Diagnostic, repoDir) {
+		t.Fatalf("Control Plane terminal after finalization failure = %+v", terminal)
+	}
+}
+
+func TestControlPlaneSanitizerRedactsSharedDataRoot(t *testing.T) {
+	dataDir := privateTempDir(t)
+	repoDir := filepath.Join(dataDir, "runs", "20260101T000000.000000000Z", "repo")
+	privatePath := filepath.Join(dataDir, "fake-host", "state", "locks", "hosts", "fake-local.lock")
+
+	sanitized := sanitizeControlPlaneText("lock failure at "+privatePath, repoDir)
+
+	if strings.Contains(sanitized, dataDir) || !strings.Contains(sanitized, "<control-plane-data>") {
+		t.Fatalf("sanitized shared data path = %q", sanitized)
+	}
+}
+
+func TestControlPlaneTerminalSurfacesFinalizationFailureAfterScenarioFailure(t *testing.T) {
+	repoDir := filepath.Join(t.TempDir(), "server-run")
+	outcome := runOutcome{
+		RunID: "20260101T000000.000000000Z", Scenario: "smoke", Accepted: true,
+		Result:  ScenarioResult{Status: resultStatusFailed},
+		Failure: &runFailureEvidence{FailedLayer: string(failureLayerExecution), Diagnostic: "scenario failed"},
+	}
+	runErr := errors.Join(errors.New("scenario failed"), errors.New("finalize ledger: disk full"))
+
+	terminal := controlPlaneTerminalResponse(outcome, runErr, repoDir)
+
+	if terminal.FailedLayer != string(failureLayerRunState) || !strings.Contains(terminal.Diagnostic, "scenario failed") || !strings.Contains(terminal.Diagnostic, "disk full") {
+		t.Fatalf("Control Plane failed terminal after finalization failure = %+v", terminal)
+	}
+}
+
+func TestStatusReadsConfiguredControlPlaneRunAsStableJSON(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	handler, err := newControlPlaneHandler(privateTempDir(t), "test-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "test-token")
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &stdout, &stderr, repoDir, "test-version", runtime); code != 0 {
+		t.Fatalf("shared run exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := decodeRunJSONLines(t, stdout.Bytes())[0].RunID
+	stdout.Reset()
+	stderr.Reset()
+
+	code := RunWithRuntime([]string{"status", "--json", "--control-plane", server.URL, "--run", runID}, &stdout, &stderr, repoDir, "test-version", runtime)
+
+	if code != 0 {
+		t.Fatalf("shared status exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	var status struct {
+		Version      int    `json:"version"`
+		Kind         string `json:"kind"`
+		RunID        string `json:"runId"`
+		State        string `json:"state"`
+		Status       string `json:"status"`
+		CleanupState string `json:"cleanupState"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
+		t.Fatalf("decode shared status JSON: %v; output: %s", err, stdout.String())
+	}
+	if status.Version != 1 || status.Kind != "status" || status.RunID != runID || status.State != "completed" || status.Status != resultStatusPassed || status.CleanupState != "completed" {
+		t.Fatalf("shared status = %+v", status)
+	}
+}
+
+func TestEventsReadConfiguredControlPlaneRunAsStableJSON(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	handler, err := newControlPlaneHandler(privateTempDir(t), "test-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "test-token")
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &stdout, &stderr, repoDir, "test-version", runtime); code != 0 {
+		t.Fatalf("shared run exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := decodeRunJSONLines(t, stdout.Bytes())[0].RunID
+	stdout.Reset()
+	stderr.Reset()
+
+	code := RunWithRuntime([]string{"events", "--json", "--control-plane", server.URL, runID}, &stdout, &stderr, repoDir, "test-version", runtime)
+
+	if code != 0 {
+		t.Fatalf("shared events exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	var events struct {
+		Version int    `json:"version"`
+		Kind    string `json:"kind"`
+		RunID   string `json:"runId"`
+		Events  []struct {
+			Sequence  int            `json:"sequence"`
+			Timestamp string         `json:"timestamp"`
+			Phase     string         `json:"phase"`
+			Type      string         `json:"type"`
+			Stream    string         `json:"stream"`
+			Details   map[string]any `json:"details"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &events); err != nil {
+		t.Fatalf("decode shared events JSON: %v; output: %s", err, stdout.String())
+	}
+	if events.Version != 1 || events.Kind != "events" || events.RunID != runID || len(events.Events) < 3 {
+		t.Fatalf("shared events = %+v", events)
+	}
+	for index, event := range events.Events {
+		if event.Sequence != index+1 || event.Timestamp == "" || event.Phase == "" || event.Type == "" || event.Stream == "" || event.Details == nil {
+			t.Fatalf("shared event %d = %+v", index, event)
+		}
+	}
+}
+
+func TestLogsReadConfiguredControlPlaneRunAsStableJSON(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	handler, err := newControlPlaneHandler(privateTempDir(t), "test-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "test-token")
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &stdout, &stderr, repoDir, "test-version", runtime); code != 0 {
+		t.Fatalf("shared run exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := decodeRunJSONLines(t, stdout.Bytes())[0].RunID
+	stdout.Reset()
+	stderr.Reset()
+
+	code := RunWithRuntime([]string{"logs", "--json", "--control-plane", server.URL, runID}, &stdout, &stderr, repoDir, "test-version", runtime)
+
+	if code != 0 {
+		t.Fatalf("shared logs exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	var logs struct {
+		Version   int    `json:"version"`
+		Kind      string `json:"kind"`
+		RunID     string `json:"runId"`
+		Content   string `json:"content"`
+		Bytes     int    `json:"bytes"`
+		Truncated bool   `json:"truncated"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &logs); err != nil {
+		t.Fatalf("decode shared logs JSON: %v; output: %s", err, stdout.String())
+	}
+	if logs.Version != 1 || logs.Kind != "logs" || logs.RunID != runID || !strings.Contains(logs.Content, "fake Session Broker ran Scenario") || logs.Bytes != len(logs.Content) || logs.Truncated {
+		t.Fatalf("shared logs = %+v", logs)
+	}
+}
+
+func TestConfiguredControlPlaneReadsLogsAboveDefaultEventLimit(t *testing.T) {
+	const runID = "20260101T000000.000000000Z"
+	content := strings.Repeat("x", 8*1024*1024)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/runs/"+runID+"/logs" {
+			http.NotFound(response, request)
+			return
+		}
+		_ = json.NewEncoder(response).Encode(controlPlaneLogsResponse{
+			Version: controlPlaneAPIVersion,
+			Kind:    "logs",
+			RunID:   runID,
+			Content: content,
+			Bytes:   len(content),
+		})
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "test-token")
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := RunWithRuntime([]string{"logs", "--json", "--control-plane", server.URL, runID}, &stdout, &stderr, t.TempDir(), "test-version", runtime)
+
+	if code != 0 {
+		t.Fatalf("large shared logs exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var logs controlPlaneLogsResponse
+	if err := json.Unmarshal(stdout.Bytes(), &logs); err != nil || logs.Content != content || logs.Bytes != len(content) {
+		t.Fatalf("large shared logs bytes = %d content bytes = %d err = %v", logs.Bytes, len(logs.Content), err)
+	}
+}
+
+func TestResultReadsConfiguredControlPlaneRunAsFinalSuccess(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	handler, err := newControlPlaneHandler(privateTempDir(t), "test-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "test-token")
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &stdout, &stderr, repoDir, "test-version", runtime); code != 0 {
+		t.Fatalf("shared run exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := decodeRunJSONLines(t, stdout.Bytes())[0].RunID
+	stdout.Reset()
+	stderr.Reset()
+
+	code := RunWithRuntime([]string{"result", "--json", "--control-plane", server.URL, runID}, &stdout, &stderr, repoDir, "test-version", runtime)
+
+	if code != 0 {
+		t.Fatalf("shared result exit code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	var result struct {
+		Version      int            `json:"version"`
+		Kind         string         `json:"kind"`
+		RunID        string         `json:"runId"`
+		State        string         `json:"state"`
+		Status       string         `json:"status"`
+		CleanupState string         `json:"cleanupState"`
+		Final        bool           `json:"final"`
+		Success      bool           `json:"success"`
+		Result       ScenarioResult `json:"result"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode shared result JSON: %v; output: %s", err, stdout.String())
+	}
+	if result.Version != 1 || result.Kind != "result" || result.RunID != runID || result.State != "completed" || result.Status != resultStatusPassed || result.CleanupState != "completed" || !result.Final || !result.Success || result.Result.Status != resultStatusPassed {
+		t.Fatalf("shared result = %+v", result)
+	}
+}
+
+func TestConfiguredControlPlaneKeptRunIsNotFinalSuccess(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	handler, err := newControlPlaneHandler(privateTempDir(t), "test-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "test-token")
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "--stop-after", "never", "smoke"}, &stdout, &stderr, repoDir, "test-version", runtime); code != 0 {
+		t.Fatalf("shared kept run exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runOutput := decodeRunJSONLines(t, stdout.Bytes())
+	runID := runOutput[0].RunID
+	if len(runOutput) != 2 || len(runOutput[1].FollowUpCommands) != 0 {
+		t.Fatalf("shared kept run follow-up commands = %#v, want none until configured cleanup exists", runOutput)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := RunWithRuntime([]string{"result", "--json", "--control-plane", server.URL, runID}, &stdout, &stderr, repoDir, "test-version", runtime); code != 0 {
+		t.Fatalf("shared kept result exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	var result controlPlaneResultResponse
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode shared kept result: %v", err)
+	}
+	if result.State != "kept" || result.Status != resultStatusPassed || result.CleanupState != "retained" || result.Final || result.Success {
+		t.Fatalf("shared kept result = %+v", result)
+	}
+}
+
+func TestConfiguredControlPlaneKeptRunBlocksTheSharedFakeHost(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	handler, err := newControlPlaneHandler(privateTempDir(t), "test-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "test-token")
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "--stop-after", "never", "smoke"}, &stdout, &stderr, repoDir, "test-version", runtime); code != 0 {
+		t.Fatalf("shared kept run exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	code := RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &stdout, &stderr, repoDir, "test-version", runtime)
+
+	if code != 1 {
+		t.Fatalf("run behind shared kept lock exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	results := decodeRunJSONLines(t, stdout.Bytes())
+	if len(results) != 2 || results[1].Status != resultStatusFailed || results[1].FailedLayer != string(failureLayerHostSelection) {
+		t.Fatalf("run behind shared kept lock = %+v", results)
+	}
+}
+
+func TestConfiguredControlPlaneCleanupFailedRunIsNotFinalSuccess(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	serverRuntime := defaultRunRuntime()
+	serverRuntime.Broker = cleanupFailingFakeBroker{fakeSessionBroker: fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed, Summary: "Scenario passed before cleanup"}}}
+	handler, err := newControlPlaneHandler(privateTempDir(t), "test-token", serverRuntime)
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "test-token")
+	clientRuntime := defaultRunRuntime()
+	clientRuntime.ControlPlaneHTTPClient = server.Client()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &stdout, &stderr, repoDir, "test-version", clientRuntime); code != 1 {
+		t.Fatalf("shared cleanup-failed run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := decodeRunJSONLines(t, stdout.Bytes())[0].RunID
+	stdout.Reset()
+	stderr.Reset()
+	if code := RunWithRuntime([]string{"result", "--json", "--control-plane", server.URL, runID}, &stdout, &stderr, repoDir, "test-version", clientRuntime); code != 0 {
+		t.Fatalf("shared cleanup-failed result exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	var result controlPlaneResultResponse
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode shared cleanup-failed result: %v", err)
+	}
+	if result.State != "cleanup-failed" || result.CleanupState != "failed" || !result.Final || result.Success {
+		t.Fatalf("shared cleanup-failed result = %+v", result)
+	}
+}
+
+func TestConfiguredControlPlanePersistsValidatorFailureAsTerminalResult(t *testing.T) {
+	repoDir := t.TempDir()
+	mustWriteFile(t, filepath.Join(repoDir, defaultConfigName), `version: 1
+scenarios:
+  smoke:
+    mayaVersion: "2025"
+    payload: {}
+    expectedOutputs:
+      scenarioResult: outputs/result.json
+    validators:
+      - type: scenarioResultStatus
+        status: failed
+`)
+	handler, err := newControlPlaneHandler(privateTempDir(t), "test-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "test-token")
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &stdout, &stderr, repoDir, "test-version", runtime); code != 1 {
+		t.Fatalf("shared validator-failed run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := decodeRunJSONLines(t, stdout.Bytes())[0].RunID
+	stdout.Reset()
+	stderr.Reset()
+	if code := RunWithRuntime([]string{"result", "--json", "--control-plane", server.URL, runID}, &stdout, &stderr, repoDir, "test-version", runtime); code != 0 {
+		t.Fatalf("shared validator-failed result exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	var result controlPlaneResultResponse
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode validator-failed result: %v", err)
+	}
+	if result.State != "failed" || result.Status != resultStatusFailed || result.CleanupState != "completed" || !result.Final || result.Success || len(result.Validators) != 1 || result.Validators[0].Status != resultStatusFailed {
+		t.Fatalf("shared validator-failed result = %+v", result)
+	}
+}
+
+func TestConfiguredControlPlaneAcceptsRunBeforeRepoConfigValidation(t *testing.T) {
+	repoDir := t.TempDir()
+	mustWriteFile(t, filepath.Join(repoDir, defaultConfigName), "version: 1\nscenarios: [invalid\n")
+	dataDir := privateTempDir(t)
+	handler, err := newControlPlaneHandler(dataDir, "test-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "test-token")
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &stdout, &stderr, repoDir, "test-version", runtime)
+
+	if code != 1 {
+		t.Fatalf("shared invalid-config run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	results := decodeRunJSONLines(t, stdout.Bytes())
+	if len(results) != 2 || results[0].Kind != "run-accepted" || results[0].RunID == "" || results[1].FailedLayer != string(failureLayerRepoConfig) {
+		t.Fatalf("shared invalid-config output = %+v", results)
+	}
+	runID := results[0].RunID
+	evidenceDir := filepath.Join(dataDir, "runs", runID, "repo", "artifacts", "maya-stall", runID)
+	bundle := readEvidenceBundle(t, evidenceDir)
+	if bundle.RunID != runID || bundle.Status != resultStatusFailed || bundle.Failure == nil || bundle.Failure.FailedLayer != string(failureLayerRepoConfig) {
+		t.Fatalf("shared invalid-config Evidence Bundle = %+v", bundle)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := RunWithRuntime([]string{"logs", "--json", "--control-plane", server.URL, runID}, &stdout, &stderr, repoDir, "test-version", runtime); code != 0 {
+		t.Fatalf("shared invalid-config logs exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	var logs controlPlaneLogsResponse
+	if err := json.Unmarshal(stdout.Bytes(), &logs); err != nil {
+		t.Fatalf("decode shared invalid-config logs: %v", err)
+	}
+	if strings.Contains(logs.Content, dataDir) || logs.Bytes != len(logs.Content) {
+		t.Fatalf("shared invalid-config logs expose Control Plane data path: %q", logs.Content)
+	}
+}
+
+func TestConfiguredControlPlaneOwnsIdentifiedSubmissionSyntaxFailures(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	dataDir := privateTempDir(t)
+	handler, err := newControlPlaneHandler(dataDir, "test-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "test-token")
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := RunWithRuntime([]string{"run", "--json", "smoke", "--stop-after", "invalid", "--control-plane", server.URL}, &stdout, &stderr, repoDir, "test-version", runtime)
+
+	if code != 1 {
+		t.Fatalf("shared syntax-failed run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	results := decodeRunJSONLines(t, stdout.Bytes())
+	if len(results) != 2 || results[0].RunID == "" || results[1].FailedLayer != string(failureLayerSubmission) {
+		t.Fatalf("shared syntax-failed output = %+v", results)
+	}
+	runID := results[0].RunID
+	if _, err := os.Stat(filepath.Join(dataDir, "runs", runID, "repo", ".maya-stall", "state", "ledger", "runs", runID, "run.json")); err != nil {
+		t.Fatalf("shared syntax-failed Run Ledger: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, ".maya-stall")); !os.IsNotExist(err) {
+		t.Fatalf("shared syntax failure client state = %v, want absent", err)
+	}
+}
+
+func TestMalformedControlPlaneSelectionDoesNotFallBackToEmbeddedMode(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := RunWithRuntime([]string{"run", "--json", "smoke", "--control-plane"}, &stdout, &stderr, repoDir, "test-version", defaultRunRuntime())
+
+	if code != 2 {
+		t.Fatalf("malformed Control Plane selection exit code = %d, want 2; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	results := decodeRunJSONLines(t, stdout.Bytes())
+	if len(results) != 1 || results[0].Kind != "usage-error" || results[0].Accepted || results[0].RunID != "" {
+		t.Fatalf("malformed Control Plane selection output = %+v", results)
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, ".maya-stall")); !os.IsNotExist(err) {
+		t.Fatalf("malformed Control Plane selection embedded state = %v, want absent", err)
+	}
+}
+
+func TestControlPlaneTokenEnvWithoutURLDoesNotFallBackToEmbeddedMode(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := RunWithRuntime([]string{"run", "--json", "smoke", "--control-plane-token-env", "TEST_TOKEN", "--stop-after", "invalid"}, &stdout, &stderr, repoDir, "test-version", defaultRunRuntime())
+
+	if code != 2 {
+		t.Fatalf("token-env-only selection exit code = %d, want 2; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	results := decodeRunJSONLines(t, stdout.Bytes())
+	if len(results) != 1 || results[0].Kind != "usage-error" || results[0].Accepted {
+		t.Fatalf("token-env-only selection output = %+v", results)
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, ".maya-stall")); !os.IsNotExist(err) {
+		t.Fatalf("token-env-only selection embedded state = %v, want absent", err)
+	}
+}
+
+func TestControlPlaneSubmissionRejectsSymlinkedRepoConfig(t *testing.T) {
+	repoDir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "outside.yaml")
+	mustWriteFile(t, target, "version: 1\nscenarios: {}\n")
+	if err := os.Symlink(target, filepath.Join(repoDir, defaultConfigName)); err != nil {
+		t.Fatalf("symlink Repo Run Config: %v", err)
+	}
+
+	if _, err := buildControlPlaneSubmission(repoDir, runOptions{ScenarioName: "smoke"}); err == nil {
+		t.Fatal("symlinked Repo Run Config was accepted for Control Plane upload")
+	}
+}
+
+func TestControlPlaneSubmissionRejectsPayloadThroughSymlinkedAncestor(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	outside := t.TempDir()
+	mustWriteFile(t, filepath.Join(outside, "start.ma"), "private outside scene")
+	if err := os.Remove(filepath.Join(repoDir, "scenes", "start.ma")); err != nil {
+		t.Fatalf("remove fixture scene: %v", err)
+	}
+	if err := os.Remove(filepath.Join(repoDir, "scenes")); err != nil {
+		t.Fatalf("remove fixture scene directory: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(repoDir, "scenes")); err != nil {
+		t.Fatalf("symlink payload ancestor: %v", err)
+	}
+
+	if _, err := buildControlPlaneSubmission(repoDir, runOptions{ScenarioName: "smoke"}); err == nil {
+		t.Fatal("payload through symlinked ancestor was accepted for Control Plane upload")
+	}
+}
+
+func TestControlPlaneSubmissionDeduplicatesDeclaredRepoConfig(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	configPath := filepath.Join(repoDir, defaultConfigName)
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read fixture config: %v", err)
+	}
+	content = bytes.Replace(content, []byte("scripts:\n        - \"maya/smoke.py\""), []byte("scripts:\n        - \"maya/smoke.py\"\n        - \".maya-stall.yaml\""), 1)
+	if err := os.WriteFile(configPath, content, 0o600); err != nil {
+		t.Fatalf("add config to declared payload: %v", err)
+	}
+
+	submission, err := buildControlPlaneSubmission(repoDir, runOptions{ScenarioName: "smoke"})
+	if err != nil {
+		t.Fatalf("build submission with declared config: %v", err)
+	}
+	if err := validateControlPlaneSubmissionFiles(submission); err != nil {
+		t.Fatalf("validate submission with declared config: %v", err)
+	}
+	for _, file := range submission.Files {
+		if file.Path == defaultConfigName {
+			t.Fatalf("Repo Run Config duplicated in submission files: %+v", submission.Files)
+		}
+	}
+}
+
+func TestControlPlaneSubmissionRejectsOversizedPayloadBeforeUpload(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	if err := os.Truncate(filepath.Join(repoDir, "scenes", "start.ma"), maximumControlPlaneSubmissionBytes); err != nil {
+		t.Fatalf("create oversized payload: %v", err)
+	}
+
+	if _, err := buildControlPlaneSubmission(repoDir, runOptions{ScenarioName: "smoke"}); err == nil {
+		t.Fatal("oversized Control Plane payload was accepted for upload")
+	}
+}
+
+func TestStatusContractMatchesEmbeddedAndConfiguredModes(t *testing.T) {
+	for _, mode := range []string{"embedded", "configured"} {
+		t.Run(mode, func(t *testing.T) {
+			repoDir := writeRunConfigFixture(t)
+			runtime := defaultRunRuntime()
+			var modeArgs []string
+			if mode == "configured" {
+				handler, err := newControlPlaneHandler(privateTempDir(t), "test-token", defaultRunRuntime())
+				if err != nil {
+					t.Fatalf("create Control Plane handler: %v", err)
+				}
+				server := httptest.NewTLSServer(handler)
+				t.Cleanup(server.Close)
+				t.Setenv(defaultControlPlaneTokenEnv, "test-token")
+				runtime.ControlPlaneHTTPClient = server.Client()
+				modeArgs = []string{"--control-plane", server.URL}
+			}
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			runArgs := append([]string{"run", "--json"}, modeArgs...)
+			runArgs = append(runArgs, "smoke")
+			if code := RunWithRuntime(runArgs, &stdout, &stderr, repoDir, "test-version", runtime); code != 0 {
+				t.Fatalf("%s run exit code = %d; stdout: %s stderr: %s", mode, code, stdout.String(), stderr.String())
+			}
+			runID := decodeRunJSONLines(t, stdout.Bytes())[0].RunID
+			stdout.Reset()
+			stderr.Reset()
+			statusArgs := append([]string{"status", "--json", "--run", runID}, modeArgs...)
+			if code := RunWithRuntime(statusArgs, &stdout, &stderr, repoDir, "test-version", runtime); code != 0 {
+				t.Fatalf("%s status exit code = %d; stdout: %s stderr: %s", mode, code, stdout.String(), stderr.String())
+			}
+			var status controlPlaneStatusResponse
+			if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
+				t.Fatalf("decode %s status: %v", mode, err)
+			}
+			if status.Version != 1 || status.Kind != "status" || status.RunID != runID || status.State != "completed" || status.Status != resultStatusPassed || status.CleanupState != "completed" {
+				t.Fatalf("%s status = %+v", mode, status)
+			}
+		})
+	}
+}
+
+func TestRunReadContractsExerciseEmbeddedAndConfiguredModesThroughOneSeam(t *testing.T) {
+	for _, mode := range []string{"embedded", "configured"} {
+		t.Run(mode, func(t *testing.T) {
+			repoDir := writeRunConfigFixture(t)
+			runtime := defaultRunRuntime()
+			var modeArgs []string
+			if mode == "configured" {
+				handler, err := newControlPlaneHandler(privateTempDir(t), "test-token", defaultRunRuntime())
+				if err != nil {
+					t.Fatalf("create Control Plane handler: %v", err)
+				}
+				server := httptest.NewTLSServer(handler)
+				t.Cleanup(server.Close)
+				t.Setenv(defaultControlPlaneTokenEnv, "test-token")
+				runtime.ControlPlaneHTTPClient = server.Client()
+				modeArgs = []string{"--control-plane", server.URL}
+			}
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			runArgs := append([]string{"run", "--json"}, modeArgs...)
+			runArgs = append(runArgs, "smoke")
+			if code := RunWithRuntime(runArgs, &stdout, &stderr, repoDir, "test-version", runtime); code != 0 {
+				t.Fatalf("%s run exit code = %d; stdout: %s stderr: %s", mode, code, stdout.String(), stderr.String())
+			}
+			runID := decodeRunJSONLines(t, stdout.Bytes())[0].RunID
+
+			for _, resource := range []string{"status", "events", "logs", "result"} {
+				stdout.Reset()
+				stderr.Reset()
+				var args []string
+				if resource == "status" {
+					args = []string{"status", "--json", "--run", runID}
+				} else {
+					args = []string{resource, "--json", runID}
+				}
+				args = append(args, modeArgs...)
+				if code := RunWithRuntime(args, &stdout, &stderr, repoDir, "test-version", runtime); code != 0 {
+					t.Fatalf("%s %s exit code = %d; stdout: %s stderr: %s", mode, resource, code, stdout.String(), stderr.String())
+				}
+				var envelope struct {
+					Version int    `json:"version"`
+					Kind    string `json:"kind"`
+					RunID   string `json:"runId"`
+				}
+				if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+					t.Fatalf("decode %s %s contract: %v", mode, resource, err)
+				}
+				if envelope.Version != 1 || envelope.Kind != resource || envelope.RunID != runID {
+					t.Fatalf("%s %s envelope = %+v", mode, resource, envelope)
+				}
+			}
+		})
+	}
+}
+
+func TestControlPlaneServeCommandBuildsAuthenticatedTLSServer(t *testing.T) {
+	workDir := t.TempDir()
+	dataDir := filepath.Join(workDir, "control-plane-data")
+	certPath := filepath.Join(workDir, "tls.crt")
+	keyPath := filepath.Join(workDir, "tls.key")
+	mustWriteFile(t, certPath, "test certificate")
+	mustWriteFile(t, keyPath, "test key")
+	t.Setenv(defaultControlPlaneTokenEnv, "test-token")
+	runtime := defaultRunRuntime()
+	called := false
+	runtime.ControlPlaneServe = func(options controlPlaneServeOptions, handler http.Handler) error {
+		called = true
+		if options.Listen != "127.0.0.1:9443" || options.DataDir != dataDir || options.TLSCert != certPath || options.TLSKey != keyPath || handler == nil {
+			t.Fatalf("Control Plane serve options = %+v handler nil = %t", options, handler == nil)
+		}
+		return nil
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := RunWithRuntime([]string{"control-plane", "serve", "--listen", "127.0.0.1:9443", "--data-dir", dataDir, "--tls-cert", certPath, "--tls-key", keyPath}, &stdout, &stderr, workDir, "test-version", runtime)
+
+	if code != 0 || !called || !strings.Contains(stdout.String(), "controlPlane: https://127.0.0.1:9443") {
+		t.Fatalf("serve command = code %d called %t stdout %q stderr %q", code, called, stdout.String(), stderr.String())
+	}
+}
+
+func TestControlPlaneRejectsNonPrivateExistingDataDirWithoutChangingMode(t *testing.T) {
+	dataDir := privateTempDir(t)
+	mustWriteFile(t, filepath.Join(dataDir, "unrelated.txt"), "not Control Plane data")
+	if err := os.Chmod(dataDir, 0o755); err != nil {
+		t.Fatalf("make shared data directory: %v", err)
+	}
+
+	if _, err := newControlPlaneHandler(dataDir, "test-token", defaultRunRuntime()); err == nil {
+		t.Fatal("non-private existing Control Plane data directory was accepted")
+	}
+	info, err := os.Stat(dataDir)
+	if err != nil {
+		t.Fatalf("stat rejected data directory: %v", err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("rejected data directory mode = %04o, want unchanged 0755", info.Mode().Perm())
+	}
+}
+
+func TestControlPlaneAPIRejectsMissingAuthenticationAndUnsupportedVersionWithoutMutation(t *testing.T) {
+	dataDir := privateTempDir(t)
+	handler, err := newControlPlaneHandler(dataDir, "test-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+
+	for _, test := range []struct {
+		name          string
+		token         string
+		rawToken      bool
+		version       int
+		wantHTTPState int
+	}{
+		{name: "missing authentication", version: 1, wantHTTPState: http.StatusUnauthorized},
+		{name: "token without bearer scheme", token: "test-token", rawToken: true, version: 1, wantHTTPState: http.StatusUnauthorized},
+		{name: "unsupported version", token: "test-token", version: 2, wantHTTPState: http.StatusBadRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body, err := json.Marshal(controlPlaneSubmission{Version: test.version, Scenario: "smoke", StopAfter: stopAfterAlways})
+			if err != nil {
+				t.Fatalf("marshal submission: %v", err)
+			}
+			request, err := http.NewRequest(http.MethodPost, server.URL+"/v1/runs", bytes.NewReader(body))
+			if err != nil {
+				t.Fatalf("create submission request: %v", err)
+			}
+			if test.token != "" {
+				if test.rawToken {
+					request.Header.Set("Authorization", test.token)
+				} else {
+					request.Header.Set("Authorization", "Bearer "+test.token)
+				}
+			}
+			response, err := server.Client().Do(request)
+			if err != nil {
+				t.Fatalf("submit request: %v", err)
+			}
+			_, _ = io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
+			if response.StatusCode != test.wantHTTPState {
+				t.Fatalf("HTTP status = %d, want %d", response.StatusCode, test.wantHTTPState)
+			}
+		})
+	}
+	entries, err := os.ReadDir(filepath.Join(dataDir, "runs"))
+	if err != nil {
+		t.Fatalf("read Control Plane runs: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("rejected API submissions created run state: %+v", entries)
+	}
+}
+
+func TestControlPlaneDoesNotExecuteWhenAcceptanceCannotBeWritten(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	submission, err := buildControlPlaneSubmission(repoDir, runOptions{ScenarioName: "smoke", StopAfter: stopAfterAlways})
+	if err != nil {
+		t.Fatalf("build Control Plane submission: %v", err)
+	}
+	body, err := json.Marshal(submission)
+	if err != nil {
+		t.Fatalf("marshal Control Plane submission: %v", err)
+	}
+	ran := false
+	runtime := defaultRunRuntime()
+	runtime.Broker = recordingFakeBroker{fakeSessionBroker: fakeSessionBroker{Result: ScenarioResult{Status: resultStatusPassed}}, ran: &ran}
+	handler, err := newControlPlaneHandler(privateTempDir(t), "test-token", runtime)
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://maya-stall.example.com/v1/runs", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer test-token")
+	response := &failingControlPlaneResponseWriter{header: make(http.Header)}
+
+	handler.ServeHTTP(response, request)
+
+	if ran {
+		t.Fatal("Control Plane executed Scenario after acceptance response failed")
+	}
+}
+
+func TestConfiguredControlPlaneReadsPersistAcrossServerRestart(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	dataDir := privateTempDir(t)
+	handler, err := newControlPlaneHandler(dataDir, "test-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Setenv(defaultControlPlaneTokenEnv, "test-token")
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &stdout, &stderr, repoDir, "test-version", runtime); code != 0 {
+		t.Fatalf("shared run exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := decodeRunJSONLines(t, stdout.Bytes())[0].RunID
+	server.Close()
+
+	restartedHandler, err := newControlPlaneHandler(dataDir, "test-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("restart Control Plane handler: %v", err)
+	}
+	restarted := httptest.NewTLSServer(restartedHandler)
+	t.Cleanup(restarted.Close)
+	runtime.ControlPlaneHTTPClient = restarted.Client()
+	stdout.Reset()
+	stderr.Reset()
+	if code := RunWithRuntime([]string{"status", "--json", "--control-plane", restarted.URL, "--run", runID}, &stdout, &stderr, repoDir, "test-version", runtime); code != 0 {
+		t.Fatalf("restarted status exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	var status controlPlaneStatusResponse
+	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil || status.RunID != runID || status.State != "completed" {
+		t.Fatalf("restarted status = %+v err %v", status, err)
+	}
+}
+
+func TestConfiguredControlPlaneRunReadsHaveHumanOutput(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	handler, err := newControlPlaneHandler(privateTempDir(t), "test-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "test-token")
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &stdout, &stderr, repoDir, "test-version", runtime); code != 0 {
+		t.Fatalf("shared run exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	runID := decodeRunJSONLines(t, stdout.Bytes())[0].RunID
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"status", "--control-plane", server.URL, "--run", runID}, want: "cleanupState: completed"},
+		{args: []string{"events", "--control-plane", server.URL, runID}, want: "events:"},
+		{args: []string{"logs", "--control-plane", server.URL, runID}, want: "fake Session Broker ran Scenario"},
+		{args: []string{"result", "--control-plane", server.URL, runID}, want: "success: true"},
+	} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := RunWithRuntime(test.args, &stdout, &stderr, repoDir, "test-version", runtime); code != 0 || !strings.Contains(stdout.String(), test.want) {
+			t.Fatalf("human command %v = code %d stdout %q stderr %q", test.args, code, stdout.String(), stderr.String())
+		}
+	}
+}
+
+type cleanupFailingFakeBroker struct {
+	fakeSessionBroker
+}
+
+func privateTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("make private temp directory: %v", err)
+	}
+	return dir
+}
+
+type blockingFakeBroker struct {
+	fakeSessionBroker
+	started chan struct{}
+	release chan struct{}
+}
+
+type recordingFakeBroker struct {
+	fakeSessionBroker
+	ran *bool
+}
+
+func (broker recordingFakeBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
+	*broker.ran = true
+	return broker.fakeSessionBroker.RunScenario(context, scenario)
+}
+
+type failingControlPlaneResponseWriter struct {
+	header http.Header
+}
+
+func (writer *failingControlPlaneResponseWriter) Header() http.Header { return writer.header }
+func (*failingControlPlaneResponseWriter) WriteHeader(int)            {}
+func (*failingControlPlaneResponseWriter) Write([]byte) (int, error) {
+	return 0, errors.New("client disconnected")
+}
+
+func (broker blockingFakeBroker) RunScenario(context runContext, scenario scenarioConfig) (ScenarioResult, error) {
+	close(broker.started)
+	<-broker.release
+	return broker.fakeSessionBroker.RunScenario(context, scenario)
+}
+
+func (cleanupFailingFakeBroker) StopSession(runContext, brokerSessionIdentity) error {
+	return errors.New("fake cleanup failed")
+}

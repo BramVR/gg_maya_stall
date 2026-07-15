@@ -14,7 +14,32 @@ maya-stall run --stop-after success smoke
 maya-stall run --stop-after failure smoke
 maya-stall run --stop-after always smoke
 maya-stall run --stop-after never smoke
+maya-stall run --control-plane https://maya-stall.example.com smoke
 ```
+
+## Operating Mode
+
+Omitting `--control-plane` selects Embedded Mode and preserves the existing
+local lifecycle. `--control-plane <origin-only-https-url>` selects Configured
+Control Plane Mode without changing Repo Run Config. The CLI submits the
+selected Scenario, Target Profile, Stop Policy, Repo Run Config, and a safe
+snapshot of declared Run Payload paths. The Control Plane allocates the Run ID
+before validation and owns durable state, execution, Evidence, and cleanup.
+
+Authentication uses a bearer token from
+`MAYA_STALL_CONTROL_PLANE_TOKEN`. `--control-plane-token-env <name>` selects a
+different environment variable; token values are not accepted on the command
+line or in Repo Run Config. Configured mode owns Maya Host selection and rejects
+client host, host-config, pin, and lock flags instead of falling back to local
+ownership.
+
+This first Control Plane path executes fake Scenarios synchronously. It does
+not register a Windows Host Agent, schedule a real Maya Host, or provide
+reconnectable live streaming.
+
+Configured kept runs remain readable and non-final, but this first slice does
+not expose remote attach or stop mutations and does not print embedded-only
+follow-up commands.
 
 ## Behavior
 
@@ -26,8 +51,9 @@ still writes a minimal Evidence Bundle with a versioned manifest, ordered
 events, failed layer, diagnostic, remediation hint, capture state, and cleanup
 state.
 
-Every accepted Run ID also receives a durable embedded Run Ledger record before
-Scenario execution. The record survives normal transient Run State cleanup and
+Every accepted Run ID also receives a durable Run Ledger record before Scenario
+execution. Embedded Mode stores it in the checkout; Configured Control Plane
+Mode stores it in the server-owned run workspace. The record survives transient Run State cleanup and
 is updated to `completed`, `failed`, `kept`, or `cleanup-failed` with bounded
 ordered events and retained logs.
 

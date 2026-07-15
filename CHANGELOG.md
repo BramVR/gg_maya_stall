@@ -6,6 +6,7 @@ Release history starts with `v0.1.0`.
 
 ## Unreleased
 
+- Added an authenticated HTTPS Control Plane mode that snapshots a repo-owned Scenario, runs it through the existing fake lifecycle, persists durable events, bounded logs, Evidence, cleanup, and results by Run ID, and exposes matching JSON and human CLI reads while preserving embedded mode: https://github.com/BramVR/gg_maya_stall/issues/115.
 - Added a durable embedded Run Ledger with bounded structured events and retained logs, configurable terminal history retention, stable filtered `maya-stall history --json`, and the same Run ID across terminal `status`, `attach`, Evidence Bundles, and cleanup: https://github.com/BramVR/gg_maya_stall/issues/114.
 - Added `maya-stall plan` to inspect normalized Scenario payload bytes, hashes, requirements, and static Target Profile/Maya Host compatibility without SSH, Session Broker, Evidence Store, Host Lock, or external mutation: https://github.com/BramVR/gg_maya_stall/pull/148.
 - Changed Scenario submission to emit a Run ID before Repo Run Config, Scenario, host-selection, or remote validation and to preserve early failures as minimal versioned Evidence Bundles with ordered events, diagnostics, remediation, capture, and cleanup state: https://github.com/BramVR/gg_maya_stall/pull/139.

@@ -28,6 +28,14 @@ _Avoid_: Target profile when referring to the individual selectable machines
 The shared Maya Stall service that records submitted runs, schedules them across Host Pools, owns shared Host Locks, and keeps run history.
 _Avoid_: Session Broker, Maya Host
 
+**Embedded Mode**:
+The single-controller mode where the `maya-stall` CLI owns execution and stores the Run Ledger and Evidence Bundle in the Consuming Repo checkout.
+_Avoid_: Control Plane mode, remote mode
+
+**Configured Control Plane Mode**:
+The shared mode selected with an external authenticated Control Plane URL, where the service owns the submitted run and durable records without changing Repo Run Config.
+_Avoid_: Embedded mode, direct SSH mode
+
 **Repo Run Config**:
 Non-secret configuration supplied by a consuming repo for Maya Stall runs.
 _Avoid_: Secrets config, user config

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -28,12 +29,15 @@ const stopAfterNever = "never"
 const evidenceSchemaVersion = 1
 
 type runRuntime struct {
-	Host            runHost
-	Broker          sessionBroker
-	ReadinessHost   runHost
-	ReadinessBroker sessionBroker
-	Now             func() time.Time
-	Accepted        func(runOutcome)
+	Host                   runHost
+	Broker                 sessionBroker
+	ReadinessHost          runHost
+	ReadinessBroker        sessionBroker
+	Now                    func() time.Time
+	Accepted               func(runOutcome)
+	AcceptedCheck          func() error
+	ControlPlaneHTTPClient *http.Client
+	ControlPlaneServe      func(controlPlaneServeOptions, http.Handler) error
 }
 
 type runHost interface {

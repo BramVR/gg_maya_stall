@@ -356,10 +356,18 @@ func (run *freshRunLifecycle) setup() error {
 func (run *freshRunLifecycle) accept() error {
 	run.acceptedAt = run.runtime.Now().UTC()
 	baseRunID := run.acceptedAt.Format("20060102T150405.000000000Z")
+	if run.options.AssignedRunID != "" {
+		if err := validateRunID(run.options.AssignedRunID); err != nil {
+			return err
+		}
+		baseRunID = run.options.AssignedRunID
+	}
 	for attempt := 0; ; attempt++ {
 		runID := baseRunID
-		if attempt > 0 {
+		if attempt > 0 && run.options.AssignedRunID == "" {
 			runID = fmt.Sprintf("%s-%d", baseRunID, attempt)
+		} else if attempt > 0 {
+			return fmt.Errorf("assigned Run ID %s already exists", baseRunID)
 		}
 		workspace, err := newRunWorkspace(run.repoDir, runID, "", evidenceStandaloneResultName)
 		if err != nil {
@@ -423,6 +431,11 @@ func (run *freshRunLifecycle) accept() error {
 	run.accepted = true
 	if run.runtime.Accepted != nil {
 		run.runtime.Accepted(run.currentOutcome())
+	}
+	if run.runtime.AcceptedCheck != nil {
+		if err := run.runtime.AcceptedCheck(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

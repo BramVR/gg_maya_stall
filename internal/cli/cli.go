@@ -577,7 +577,7 @@ Usage:
   maya-stall result [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] <run-id>
   maya-stall control-plane serve --data-dir <path> --tls-cert <path> --tls-key <path> [--listen <host:port>] [--token-env <name>]
   maya-stall control-plane enroll-agent --control-plane <https-url> --agent-id <id> --host <id> --credential-env <name> [--token-env <name>]
-  maya-stall host-agent run-once --control-plane <https-url> --agent-id <id> --host <id> --work-root <path> --credential-env <name>
+  maya-stall host-agent run-once --control-plane <https-url> --agent-id <id> --host <id> --work-root <path> [--host-config <path>] --credential-env <name>
   maya-stall screenshot [--host-config <path>] [--target-profile <name>] [--host <id>]
   maya-stall record [--host-config <path>] [--target-profile <name>] [--host <id>]
   maya-stall control click --x <pixels> --y <pixels> [--host-config <path>] [--target-profile <name>] [--host <id>] [--dry-run]
@@ -602,7 +602,7 @@ Commands:
   init      write a repo-only sample .maya-stall.yaml
   logs      read bounded retained logs for one run
   history   list durable embedded run history
-  host-agent run-once   execute one fake assignment through outbound HTTPS
+  host-agent run-once   execute one fake or Agent-configured real assignment through outbound HTTPS
   plan      inspect a normalized Scenario and optional host compatibility without host contact
   record   capture a Session Broker recording artifact
   review-comment   create or update a GitHub PR or GitLab MR Review Comment

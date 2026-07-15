@@ -948,6 +948,11 @@ func (run *freshRunLifecycle) startFreshSession() error {
 		if recordErr != nil {
 			return errors.Join(err, fmt.Errorf("record owned Maya UI Session for %s: %w", run.manifest.RunID, recordErr))
 		}
+		if run.runtime.SessionStarted != nil {
+			if bindErr := run.runtime.SessionStarted(session); bindErr != nil {
+				return errors.Join(err, fmt.Errorf("bind Maya UI Session for %s: %w", run.manifest.RunID, bindErr))
+			}
+		}
 	}
 	if err != nil {
 		if evidenceErr := ensureFailureLog(run.context, err); evidenceErr != nil {

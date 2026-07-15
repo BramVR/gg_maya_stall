@@ -38,6 +38,7 @@ type runRuntime struct {
 	Now                    func() time.Time
 	Accepted               func(runOutcome)
 	AcceptedCheck          func() error
+	SessionStarted         func(brokerSessionIdentity) error
 	ControlPlaneHTTPClient *http.Client
 	ControlPlaneServe      func(controlPlaneServeOptions, http.Handler) error
 	Cancel                 <-chan error

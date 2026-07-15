@@ -41,6 +41,7 @@ type hostAgentRunOnceOptions struct {
 	AgentID       string
 	HostID        string
 	WorkRoot      string
+	HostConfig    string
 	CredentialEnv string
 	SessionID     string
 }
@@ -61,10 +62,11 @@ type hostAgentEnrollmentRecord struct {
 }
 
 type hostAgentRegistrationRequest struct {
-	Version int    `json:"version"`
-	AgentID string `json:"agentId"`
-	HostID  string `json:"hostId"`
-	Slots   int    `json:"slots"`
+	Version        int    `json:"version"`
+	AgentID        string `json:"agentId"`
+	HostID         string `json:"hostId"`
+	Slots          int    `json:"slots"`
+	SessionBinding bool   `json:"sessionBinding"`
 }
 
 type hostAgentNextRequest struct {
@@ -73,14 +75,15 @@ type hostAgentNextRequest struct {
 }
 
 type hostAgentStatusResponse struct {
-	Version   int    `json:"version"`
-	Kind      string `json:"kind"`
-	AgentID   string `json:"agentId"`
-	HostID    string `json:"hostId"`
-	Slots     int    `json:"slots"`
-	State     string `json:"state"`
-	RunID     string `json:"runId,omitempty"`
-	SessionID string `json:"sessionId,omitempty"`
+	Version        int    `json:"version"`
+	Kind           string `json:"kind"`
+	AgentID        string `json:"agentId"`
+	HostID         string `json:"hostId"`
+	Slots          int    `json:"slots"`
+	State          string `json:"state"`
+	RunID          string `json:"runId,omitempty"`
+	SessionID      string `json:"sessionId,omitempty"`
+	SessionBinding bool   `json:"sessionBinding"`
 }
 
 type hostAgentAssignmentResponse struct {
@@ -98,6 +101,14 @@ type hostAgentLockRequest struct {
 	RunID     string `json:"runId"`
 	LockToken string `json:"lockToken"`
 	SessionID string `json:"sessionId"`
+}
+
+type hostAgentSessionRequest struct {
+	Version       int                   `json:"version"`
+	RunID         string                `json:"runId"`
+	LockToken     string                `json:"lockToken"`
+	SessionID     string                `json:"sessionId"`
+	BrokerSession brokerSessionIdentity `json:"brokerSession"`
 }
 
 type hostAgentCompletionRequest struct {
@@ -119,27 +130,31 @@ type hostAgentFailureRequest struct {
 }
 
 type hostAgentLockRecord struct {
-	Version   int    `json:"version"`
-	RunID     string `json:"runId"`
-	AgentID   string `json:"agentId"`
-	HostID    string `json:"hostId"`
-	LockToken string `json:"lockToken"`
-	State     string `json:"state"`
-	CreatedAt string `json:"createdAt"`
+	Version                int                    `json:"version"`
+	RunID                  string                 `json:"runId"`
+	AgentID                string                 `json:"agentId"`
+	HostID                 string                 `json:"hostId"`
+	LockToken              string                 `json:"lockToken"`
+	State                  string                 `json:"state"`
+	CreatedAt              string                 `json:"createdAt"`
+	SessionBindingRequired bool                   `json:"sessionBindingRequired,omitempty"`
+	BrokerSession          *brokerSessionIdentity `json:"brokerSession,omitempty"`
 }
 
 type hostAgentAssignmentRecord struct {
-	Version        int                    `json:"version"`
-	RunID          string                 `json:"runId"`
-	AgentID        string                 `json:"agentId"`
-	HostID         string                 `json:"hostId"`
-	LockToken      string                 `json:"lockToken"`
-	State          string                 `json:"state"`
-	CreatedAt      string                 `json:"createdAt"`
-	Submission     controlPlaneSubmission `json:"submission"`
-	Terminal       *runCommandJSON        `json:"terminal,omitempty"`
-	TerminalLedger *runLedgerRecord       `json:"terminalLedger,omitempty"`
-	AssignedLedger *runLedgerRecord       `json:"assignedLedger,omitempty"`
+	Version                int                    `json:"version"`
+	RunID                  string                 `json:"runId"`
+	AgentID                string                 `json:"agentId"`
+	HostID                 string                 `json:"hostId"`
+	LockToken              string                 `json:"lockToken"`
+	State                  string                 `json:"state"`
+	CreatedAt              string                 `json:"createdAt"`
+	Submission             controlPlaneSubmission `json:"submission"`
+	SessionBindingRequired bool                   `json:"sessionBindingRequired,omitempty"`
+	BrokerSession          *brokerSessionIdentity `json:"brokerSession,omitempty"`
+	Terminal               *runCommandJSON        `json:"terminal,omitempty"`
+	TerminalLedger         *runLedgerRecord       `json:"terminalLedger,omitempty"`
+	AssignedLedger         *runLedgerRecord       `json:"assignedLedger,omitempty"`
 }
 
 type controlPlaneHostAgent struct {
@@ -246,7 +261,7 @@ func parseHostAgentRunOnceArgs(args []string, workDir string) (hostAgentRunOnceO
 	for index := 0; index < len(args); index++ {
 		flag := args[index]
 		switch flag {
-		case "--control-plane", "--agent-id", "--host", "--work-root", "--credential-env":
+		case "--control-plane", "--agent-id", "--host", "--work-root", "--host-config", "--credential-env":
 			index++
 			if index >= len(args) || args[index] == "" || strings.HasPrefix(args[index], "--") {
 				return hostAgentRunOnceOptions{}, newUsageError("%s needs a value", flag)
@@ -260,6 +275,8 @@ func parseHostAgentRunOnceArgs(args []string, workDir string) (hostAgentRunOnceO
 				options.HostID = args[index]
 			case "--work-root":
 				options.WorkRoot = resolveFromRepo(workDir, args[index])
+			case "--host-config":
+				options.HostConfig = resolveFromRepo(workDir, args[index])
 			case "--credential-env":
 				options.CredentialEnv = args[index]
 			}
@@ -435,7 +452,8 @@ func (handler *controlPlaneHandler) loadHostAgentState() error {
 		if err := readPrivateJSON(filepath.Join(handler.dataDir, "host-locks", entry.Name()), &lock); err != nil {
 			return err
 		}
-		if lock.Version != hostAgentAPIVersion || lock.HostID != hostID || validateRunID(lock.RunID) != nil || lock.LockToken == "" || lock.State != "assigned" && lock.State != "confirmed" && lock.State != "finishing" && lock.State != "quarantined" {
+		validState := lock.State == "assigned" || lock.State == "confirmed" || lock.State == "finishing" || lock.State == "quarantined"
+		if lock.Version != hostAgentAPIVersion || lock.HostID != hostID || validateRunID(lock.RunID) != nil || lock.LockToken == "" || !validState || invalidBrokerSession(lock.BrokerSession) {
 			return fmt.Errorf("invalid durable Host Lock for %s", hostID)
 		}
 		agent := handler.hostAgents[lock.AgentID]
@@ -446,7 +464,7 @@ func (handler *controlPlaneHandler) loadHostAgentState() error {
 		if err := readPrivateJSON(filepath.Join(handler.dataDir, "assignments", lock.RunID+".json"), &assignment); err != nil {
 			return err
 		}
-		if assignment.Version != hostAgentAPIVersion || assignment.RunID != lock.RunID || assignment.AgentID != lock.AgentID || assignment.HostID != lock.HostID || !sameLockToken(assignment.LockToken, lock.LockToken) || assignment.State != lock.State {
+		if assignment.Version != hostAgentAPIVersion || assignment.RunID != lock.RunID || assignment.AgentID != lock.AgentID || assignment.HostID != lock.HostID || !sameLockToken(assignment.LockToken, lock.LockToken) || assignment.State != lock.State || assignment.SessionBindingRequired != lock.SessionBindingRequired || !sameBrokerSession(assignment.BrokerSession, lock.BrokerSession) {
 			return fmt.Errorf("durable assignment for %s does not match its Host Lock", lock.RunID)
 		}
 		if assignment.State == "finishing" {
@@ -781,6 +799,8 @@ func (handler *controlPlaneHandler) serveHostAgentAPI(response http.ResponseWrit
 		handler.serveHostAgentNextAssignment(response, request, parts[2])
 	case len(parts) == 6 && parts[3] == "assignments" && parts[5] == "confirm" && request.Method == http.MethodPost:
 		handler.serveHostAgentConfirm(response, request, parts[2], parts[4])
+	case len(parts) == 6 && parts[3] == "assignments" && parts[5] == "session" && request.Method == http.MethodPost:
+		handler.serveHostAgentSession(response, request, parts[2], parts[4])
 	case len(parts) == 6 && parts[3] == "assignments" && parts[5] == "complete" && request.Method == http.MethodPost:
 		handler.serveHostAgentComplete(response, request, parts[2], parts[4])
 	case len(parts) == 6 && parts[3] == "assignments" && parts[5] == "fail" && request.Method == http.MethodPost:
@@ -981,6 +1001,7 @@ func (handler *controlPlaneHandler) serveHostAgentRegistration(response http.Res
 	}
 	candidate := agent.status
 	candidate.SessionID = sessionID
+	candidate.SessionBinding = registration.SessionBinding
 	if candidate.RunID == "" {
 		candidate.State = "ready"
 	} else {
@@ -1144,6 +1165,49 @@ func (handler *controlPlaneHandler) serveHostAgentConfirm(response http.Response
 		return
 	}
 	_ = handler.persistHostAgentStatus(agent)
+	response.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(response).Encode(agent.status)
+}
+
+func (handler *controlPlaneHandler) serveHostAgentSession(response http.ResponseWriter, request *http.Request, agentID string, runID string) {
+	if validateRunID(runID) != nil {
+		writeControlPlaneError(response, http.StatusBadRequest, "invalid Host Agent Run ID")
+		return
+	}
+	var binding hostAgentSessionRequest
+	if err := decodeHostAgentRequest(request, &binding); err != nil || binding.BrokerSession.BrokerAdapter == "" || binding.BrokerSession.SessionID == "" {
+		writeControlPlaneError(response, http.StatusBadRequest, "invalid Maya UI Session binding")
+		return
+	}
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	assignment := handler.assignments[runID]
+	agent := handler.hostAgents[agentID]
+	if !requestMatchesHostAgentCredential(request, agent) {
+		writeControlPlaneError(response, http.StatusUnauthorized, "Windows Host Agent authentication changed")
+		return
+	}
+	if binding.Version != hostAgentAPIVersion || binding.RunID != runID || assignment == nil || assignment.record.AgentID != agentID || agent == nil || !assignment.record.SessionBindingRequired || !sameLockToken(binding.LockToken, assignment.record.LockToken) || assignment.record.State != "confirmed" || !handler.acceptHostAgentSession(agent, binding.SessionID) {
+		writeControlPlaneError(response, http.StatusConflict, "Host Lock ownership changed")
+		return
+	}
+	if assignment.record.BrokerSession != nil {
+		if *assignment.record.BrokerSession != binding.BrokerSession {
+			writeControlPlaneError(response, http.StatusConflict, "Host Lock Maya UI Session changed")
+			return
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(response).Encode(agent.status)
+		return
+	}
+	previous := assignment.record
+	bound := binding.BrokerSession
+	assignment.record.BrokerSession = &bound
+	if err := handler.ensureHostAgentTransition(assignment.record); err != nil {
+		assignment.record = previous
+		writeControlPlaneError(response, http.StatusInternalServerError, "persist Maya UI Session binding")
+		return
+	}
 	response.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(response).Encode(agent.status)
 }
@@ -1558,7 +1622,7 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 			_ = handler.persistHostAgentStatus(agent)
 			continue
 		}
-		if agent.status.State == "ready" && agent.status.RunID == "" && agent.status.SessionID != "" && agent.status.Slots == 1 {
+		if agent.status.State == "ready" && agent.status.RunID == "" && agent.status.SessionID != "" && agent.status.Slots == 1 && agent.status.SessionBinding {
 			release, locked, err := acquireHostLock(filepath.Join(handler.dataDir, "fake-host"), agent.status.HostID)
 			if err != nil || locked {
 				continue
@@ -1613,7 +1677,8 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 	assignedLedger.Host = selected.status.HostID
 	record := hostAgentAssignmentRecord{
 		Version: hostAgentAPIVersion, RunID: runID, AgentID: selected.status.AgentID, HostID: selected.status.HostID,
-		LockToken: lockToken, State: "assigned", CreatedAt: createdAt, Submission: submission, AssignedLedger: &assignedLedger,
+		LockToken: lockToken, State: "assigned", CreatedAt: createdAt, Submission: submission,
+		SessionBindingRequired: selected.status.SessionBinding, AssignedLedger: &assignedLedger,
 	}
 	targetProfile := record.Submission.TargetProfile
 	if targetProfile == "" {
@@ -1834,7 +1899,7 @@ func (handler *controlPlaneHandler) verifyHostAgentTransition(want hostAgentAssi
 	if err := readPrivateJSON(filepath.Join(handler.dataDir, "assignments", want.RunID+".json"), &assignment); err != nil {
 		return err
 	}
-	if assignment.State != want.State || assignment.AgentID != want.AgentID || assignment.HostID != want.HostID || !sameLockToken(assignment.LockToken, want.LockToken) {
+	if assignment.State != want.State || assignment.AgentID != want.AgentID || assignment.HostID != want.HostID || !sameLockToken(assignment.LockToken, want.LockToken) || assignment.SessionBindingRequired != want.SessionBindingRequired || !sameBrokerSession(assignment.BrokerSession, want.BrokerSession) {
 		return fmt.Errorf("durable Host Agent assignment does not match transition")
 	}
 	if want.State == "completed" {
@@ -1854,7 +1919,7 @@ func (handler *controlPlaneHandler) verifyHostAgentTransition(want hostAgentAssi
 	if err := readPrivateJSON(handler.hostLockPath(want.HostID), &lock); err != nil {
 		return err
 	}
-	if lock.State != want.State || lock.RunID != want.RunID || lock.AgentID != want.AgentID || !sameLockToken(lock.LockToken, want.LockToken) {
+	if lock.State != want.State || lock.RunID != want.RunID || lock.AgentID != want.AgentID || !sameLockToken(lock.LockToken, want.LockToken) || lock.SessionBindingRequired != want.SessionBindingRequired || !sameBrokerSession(lock.BrokerSession, want.BrokerSession) {
 		return fmt.Errorf("durable Host Lock does not match transition")
 	}
 	if want.AssignedLedger == nil {
@@ -1909,7 +1974,19 @@ func (handler *controlPlaneHandler) persistHostLock(assignment hostAgentAssignme
 	return writePrivateJSON(handler.hostLockPath(assignment.HostID), hostAgentLockRecord{
 		Version: hostAgentAPIVersion, RunID: assignment.RunID, AgentID: assignment.AgentID, HostID: assignment.HostID,
 		LockToken: assignment.LockToken, State: state, CreatedAt: assignment.CreatedAt,
+		SessionBindingRequired: assignment.SessionBindingRequired, BrokerSession: assignment.BrokerSession,
 	})
+}
+
+func sameBrokerSession(left *brokerSessionIdentity, right *brokerSessionIdentity) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func invalidBrokerSession(session *brokerSessionIdentity) bool {
+	return session != nil && (session.BrokerAdapter == "" || session.SessionID == "")
 }
 
 func writePrivateJSON(path string, value any) error {
@@ -1962,6 +2039,9 @@ func (handler *controlPlaneHandler) acceptHostAgentCompletion(assignment *contro
 	}
 	if evidence.Bundle.Scenario != assignment.record.Submission.Scenario || evidence.Bundle.TargetProfile != expectedProfile || evidence.Bundle.Host != assignment.record.HostID {
 		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, fmt.Errorf("Windows Host Agent Evidence Bundle changed immutable run identity") //nolint:staticcheck // Product terms start the user-facing diagnostic.
+	}
+	if !validHostAgentCompletionSession(assignment.record.SessionBindingRequired, record.Status, assignment.record.BrokerSession, evidence.Bundle.BrokerSession) {
+		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, fmt.Errorf("Windows Host Agent Evidence Bundle does not match the Host Lock Maya UI Session") //nolint:staticcheck // Product terms start the user-facing diagnostic.
 	}
 	for _, artifact := range evidence.Bundle.VisualEvidence {
 		if artifact.TargetProfile != "" && artifact.TargetProfile != expectedProfile || artifact.Host != "" && artifact.Host != assignment.record.HostID {
@@ -2023,6 +2103,16 @@ func (handler *controlPlaneHandler) acceptHostAgentCompletion(assignment *contro
 	stagedOutcome.StateDir = "/v1/runs/" + assignment.record.RunID + "/status"
 	stagedOutcome.EvidenceDir = "/v1/runs/" + assignment.record.RunID + "/evidence"
 	return stagedOutcome, original, merged, nil
+}
+
+func validHostAgentCompletionSession(required bool, status string, lockSession *brokerSessionIdentity, evidenceSession *brokerSessionIdentity) bool {
+	if !required {
+		return true
+	}
+	if lockSession == nil || evidenceSession == nil {
+		return status == resultStatusFailed && lockSession == nil && evidenceSession == nil
+	}
+	return sameBrokerSession(lockSession, evidenceSession)
 }
 
 func validateHostAgentCompletionIdentity(assignment hostAgentAssignmentRecord, terminal runCommandJSON) error {
@@ -2139,7 +2229,7 @@ func runHostAgentOnce(options hostAgentRunOnceOptions, runtime runRuntime, stdou
 		return err
 	}
 	registration := hostAgentRegistrationRequest{
-		Version: hostAgentAPIVersion, AgentID: options.AgentID, HostID: options.HostID, Slots: 1,
+		Version: hostAgentAPIVersion, AgentID: options.AgentID, HostID: options.HostID, Slots: 1, SessionBinding: true,
 	}
 	var status hostAgentStatusResponse
 	registerPath := "/v1/host-agents/" + options.AgentID + "/register"
@@ -2188,11 +2278,12 @@ func runHostAgentOnce(options hostAgentRunOnceOptions, runtime runRuntime, stdou
 	if err := currentHostAgentHeartbeatError(heartbeatErrors); err != nil {
 		return failConfirmedHostAgentAssignment(options, assignment, runtime, "renewing its process-session fence", err)
 	}
-	hostConfigPath, err := writeHostAgentFakeHostConfig(options, assignment)
+	hostConfigPath, _, err := resolveHostAgentHostConfig(options, assignment)
 	if err != nil {
-		return failConfirmedHostAgentAssignment(options, assignment, runtime, "preparing fake Host config", err)
+		return failConfirmedHostAgentAssignment(options, assignment, runtime, "preparing its Host config", err)
 	}
 	agentRuntime := runtime
+	previousSessionStarted := agentRuntime.SessionStarted
 	agentRuntime.Accepted = nil
 	agentRuntime.AcceptedCheck = nil
 	agentRuntime.ControlPlaneServe = nil
@@ -2201,6 +2292,20 @@ func runHostAgentOnce(options hostAgentRunOnceOptions, runtime runRuntime, stdou
 	agentRuntime.ReadinessHost = nil
 	agentRuntime.ReadinessBroker = nil
 	agentRuntime.Cancel = executionCancel
+	agentRuntime.SessionStarted = func(session brokerSessionIdentity) error {
+		binding := hostAgentSessionRequest{
+			Version: hostAgentAPIVersion, RunID: assignment.RunID, LockToken: assignment.LockToken,
+			SessionID: options.SessionID, BrokerSession: session,
+		}
+		path := "/v1/host-agents/" + options.AgentID + "/assignments/" + assignment.RunID + "/session"
+		if err := postHostAgentSessionBinding(options, path, binding, runtime, &status, executionCancel); err != nil {
+			return err
+		}
+		if previousSessionStarted != nil {
+			return previousSessionStarted(session)
+		}
+		return nil
+	}
 	targetProfile := assignment.Submission.TargetProfile
 	if targetProfile == "" {
 		targetProfile = "default"
@@ -2300,6 +2405,30 @@ func currentHostAgentHeartbeatError(heartbeatErrors <-chan error) error {
 
 func postHostAgentCompletion(options hostAgentRunOnceOptions, path string, completion hostAgentCompletionRequest, runtime runRuntime, terminal *runCommandJSON) error {
 	return postHostAgentMutation(options, path, completion, runtime, terminal)
+}
+
+func postHostAgentSessionBinding(options hostAgentRunOnceOptions, path string, binding hostAgentSessionRequest, runtime runRuntime, target any, executionCancel <-chan error) error {
+	for {
+		requestContext, cancelRequest := context.WithTimeout(context.Background(), hostAgentHeartbeatRequestTimeout)
+		err := postControlPlaneJSONWithLimitContext(requestContext, options.ControlPlane, options.CredentialEnv, path, binding, runtime, http.StatusOK, target, maximumControlPlaneSubmissionBytes)
+		cancelRequest()
+		if err == nil {
+			return nil
+		}
+		var statusErr *controlPlaneHTTPStatusError
+		if errors.As(err, &statusErr) && statusErr.StatusCode >= 400 && statusErr.StatusCode < 500 {
+			return err
+		}
+		retry := time.NewTimer(time.Second)
+		select {
+		case cancelErr := <-executionCancel:
+			if !retry.Stop() {
+				<-retry.C
+			}
+			return errors.Join(err, cancelErr)
+		case <-retry.C:
+		}
+	}
 }
 
 func postHostAgentMutation(options hostAgentRunOnceOptions, path string, body any, runtime runRuntime, target any) error {
@@ -2416,6 +2545,44 @@ func writeHostAgentFakeHostConfig(options hostAgentRunOnceOptions, assignment ho
 		return "", err
 	}
 	return path, nil
+}
+
+func resolveHostAgentHostConfig(options hostAgentRunOnceOptions, assignment hostAgentAssignmentResponse) (string, runtimeMetadata, error) {
+	if options.HostConfig == "" {
+		path, err := writeHostAgentFakeHostConfig(options, assignment)
+		return path, runtimeMetadata{
+			Profile: "fake-local", HostAdapter: "fake", BrokerAdapter: "fake",
+			BrokerConfigSource: "generated Host Agent fake config",
+		}, err
+	}
+	content, err := os.ReadFile(options.HostConfig)
+	if err != nil {
+		return "", runtimeMetadata{}, fmt.Errorf("load Windows Host Agent Host config: %w", err) //nolint:staticcheck // Product term starts the user-facing diagnostic.
+	}
+	snapshotPath := filepath.Join(options.WorkRoot, "runs", assignment.RunID, "host-config.yaml")
+	if err := writeRunLedgerBytes(snapshotPath, content); err != nil {
+		return "", runtimeMetadata{}, fmt.Errorf("snapshot Windows Host Agent Host config: %w", err) //nolint:staticcheck // Product term starts the user-facing diagnostic.
+	}
+	config, err := loadUserHostConfig(snapshotPath)
+	if err != nil {
+		return "", runtimeMetadata{}, fmt.Errorf("load Windows Host Agent Host config snapshot: %w", err) //nolint:staticcheck // Product term starts the user-facing diagnostic.
+	}
+	targetProfile := assignment.Submission.TargetProfile
+	if targetProfile == "" {
+		targetProfile = "default"
+	}
+	hosts, err := hostCandidates(config, targetProfile, assignment.HostID)
+	if err != nil {
+		return "", runtimeMetadata{}, err
+	}
+	resolved, err := resolveRuntimeForHost(hosts[0])
+	if err != nil {
+		return "", runtimeMetadata{}, err
+	}
+	if !resolved.Metadata.LiveProofEligible {
+		return "", runtimeMetadata{}, fmt.Errorf("Windows Host Agent --host-config must select a live-proof-eligible Maya Host; refusing fake fallback") //nolint:staticcheck // Product term starts the user-facing diagnostic.
+	}
+	return snapshotPath, resolved.Metadata, nil
 }
 
 func buildHostAgentResultFiles(repoDir string, runID string) ([]controlPlaneFile, error) {

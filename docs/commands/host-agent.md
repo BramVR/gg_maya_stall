@@ -1,8 +1,11 @@
 # host-agent
 
 `maya-stall host-agent run-once` registers one outbound Windows Host Agent,
-waits for one assignment, completes its fake Scenario, transfers durable state,
-and exits.
+waits for one assignment, completes its Scenario, transfers durable state, and
+exits. Without `--host-config` it preserves the explicit fake development path.
+With `--host-config` it requires the assigned Target Profile and Maya Host to
+resolve to the live `ssh-sessiond` runtime; invalid, mismatched, or fake config
+fails closed.
 
 ```sh
 maya-stall host-agent run-once \
@@ -10,6 +13,7 @@ maya-stall host-agent run-once \
   --agent-id windows-agent-01 \
   --host maya-win-01 \
   --work-root C:/maya-stall/agent \
+  --host-config C:/maya-stall/config/hosts.yaml \
   --credential-env MAYA_STALL_HOST_AGENT_CREDENTIAL
 ```
 
@@ -24,8 +28,11 @@ with full control for the current owner, SYSTEM, and Administrators, then
 verifies that no other identity has an allow rule. Filesystem and share roots
 are rejected before ACL mutation. The Agent creates a clean per-assignment
 workspace there; its repo snapshot and fake Host Lock namespace are
-assignment-scoped. It does not accept Host Credentials, Host Pools, or Maya
-Host paths from Repo Run Config.
+assignment-scoped. Real Host Credentials, Host Pools, Session Broker settings,
+and Maya Host paths come only from the Agent-local `--host-config`; they are not
+accepted from Repo Run Config or transferred through the Control Plane. The
+Agent snapshots the validated config into its private per-run workspace, so a
+later replacement of the operator path cannot change the selected runtime.
 
 Agent and enrolled Host IDs are portable durable-state keys: 1-63 lowercase
 ASCII letters, digits, and interior hyphens, excluding Windows reserved device
@@ -34,7 +41,14 @@ state path on Windows.
 
 This command advertises exactly one slot. It confirms the unique Host Lock token
 and its leased process-session fence before execution, renews that fence while
-working, runs only the assigned Scenario and declared snapshot, and
+working, and binds the shared Host Lock to the exact Session Broker adapter and
+Maya UI Session identity immediately after launch and before payload staging.
+Registration explicitly advertises this binding capability. The Control Plane
+does not assign new work to an older Agent that omits it; an assignment already
+in flight during a rolling upgrade may finish under its original contract.
+That binding is token- and process-session-fenced, durable across Control Plane
+restart, and must match the transferred Evidence Bundle. The Agent runs only
+the assigned Scenario and declared snapshot and
 uploads only the run's bounded ledger and Evidence Bundle. Empty long-poll
 responses are retried until one assignment arrives. The complete per-run Agent
 repo is removed before completion is sent, so it is absent when the Control
@@ -56,5 +70,6 @@ If a process disappears, a replacement can take over its durable assignment
 after the prior session lease expires only before execution confirmation. Loss
 after confirmation quarantines the assignment because shutdown is unverified.
 
-This is the fake-first Agent contract. It does not yet execute real Maya or run
-as a reconnecting background service.
+The Agent can execute one real Maya Scenario through its configured Session
+Broker. It is still a one-assignment command, not a reconnecting background
+service.

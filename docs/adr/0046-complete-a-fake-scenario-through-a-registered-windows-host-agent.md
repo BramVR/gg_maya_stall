@@ -42,8 +42,9 @@ removes the Agent run workspace before completion is accepted.
 
 The command is intentionally `run-once`: this slice proves enrollment,
 assignment, fencing, fake Session Broker execution, Evidence transfer, cleanup,
-and release. Reconnecting background service behavior and real Maya execution
-remain later work.
+and release. Reconnecting background service behavior remains later work. Real
+Maya execution is added by
+[ADR 0047](0047-complete-a-real-scenario-through-the-shared-path.md).
 
 Because `run-once` cannot retain an interactive session, this slice accepts only
 `stop-after always`. Retaining Stop Policies fail before assignment or Host Lock

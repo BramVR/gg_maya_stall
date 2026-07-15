@@ -28,17 +28,18 @@ against a configured real Windows Maya Host. Skipped, missing, or fake-only live
 proof is a failure.
 
 The live gate runs desktop Visual Evidence and desktop control proof first,
-then the older SSH smokes, then the retained run-scoped desktop ops smoke last
+then the older SSH smokes, the retained run-scoped desktop ops smoke, and the
+shared Control Plane/Host Agent real-Maya smoke last
 because stopping a retained `gg_mayasessiond` run can tear down the broker
 session. Live smokes restore the documented interactive sessiond UI scheduled
 task before proof starts and retained-stop smokes restore it again before the
 next proof step:
 
 ```sh
-go test -json ./internal/cli -run '^(TestOptInRealVisualEvidenceSmoke|TestOptInRealDesktopControlModalSmoke|TestOptInRealSSHDoctorSmoke|TestOptInRealPreRunReadinessSmoke|TestOptInRealSSHConsumingRepoSmoke|TestOptInRealSSHRunSmoke|TestOptInRealHostLockContentionAndRecoverySmoke|TestOptInRealRunScopedDesktopOpsSmoke)$' -count=1 -parallel=1 -timeout=20m
+go test -json ./internal/cli -run '^(TestOptInRealVisualEvidenceSmoke|TestOptInRealDesktopControlModalSmoke|TestOptInRealSSHDoctorSmoke|TestOptInRealPreRunReadinessSmoke|TestOptInRealSSHConsumingRepoSmoke|TestOptInRealSSHRunSmoke|TestOptInRealHostLockContentionAndRecoverySmoke|TestOptInRealRunScopedDesktopOpsSmoke|TestOptInRealSharedHostAgentRunSmoke)$' -count=1 -parallel=1 -timeout=20m
 ```
 
-The single Go process compiles and initializes the package once. All eight named
+The single Go process compiles and initializes the package once. All nine named
 tests must report individual passes; skips fail the live gate. `-parallel=1`
 keeps the one interactive Windows desktop serialized, while `-timeout=20m`
 leaves five minutes of the job budget for setup and proof publication.
@@ -61,6 +62,10 @@ proof. The run-scoped desktop ops smoke keeps a failed run locked, proves
 standalone screenshot fails closed while the Host Lock is held, captures a
 run-scoped desktop screenshot, and clears a controlled modal with
 `attach <run-id> control click`.
+The shared Host Agent smoke submits without client Host config, waits for the
+registered Agent to bind the shared Host Lock to the exact real broker session,
+and verifies transferred evidence, inactive broker state, remote and Agent
+workspace removal, and both shared and host-side lock release.
 The Host Lock smoke runs separate controller processes against the same SSH
 Maya Host, proves contention crosses checkout boundaries, leaves one lease
 behind as if its controller crashed, proves the Session Broker is inactive,

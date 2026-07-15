@@ -46,6 +46,9 @@ maya-stall status [--json] [control-plane flags] --run <run-id>
 maya-stall events [--json] [control-plane flags] <run-id>
 maya-stall logs [--json] [control-plane flags] <run-id>
 maya-stall result [--json] [control-plane flags] <run-id>
+maya-stall control-plane serve --data-dir <path> --tls-cert <path> --tls-key <path>
+maya-stall control-plane enroll-agent --control-plane <url> --agent-id <id> --host <id> --credential-env <name>
+maya-stall host-agent run-once --control-plane <url> --agent-id <id> --host <id> --work-root <path> --credential-env <name>
 maya-stall attach <run-id>
 maya-stall attach <run-id> screenshot
 maya-stall attach <run-id> control click --x <pixels> --y <pixels>
@@ -86,6 +89,7 @@ Lock and stop flags:
 See [run](commands/run.md), [history](commands/history.md),
 [status](commands/status.md), [events](commands/events.md),
 [logs](commands/logs.md), [result](commands/result.md),
+[control-plane](commands/control-plane.md), [host-agent](commands/host-agent.md),
 [attach](commands/attach.md), and [stop](commands/stop.md).
 
 An identified Scenario submission receives a Run ID before validation, host
@@ -99,8 +103,10 @@ Scenario, Maya Host, state, and recent-time filters.
 
 `status`, `events`, `logs`, and `result` render the same versioned response
 contracts in Embedded and Configured Control Plane modes. Configured reads use
-the Run ID returned by submission. The first Control Plane implementation runs
-fake Scenarios synchronously and persists its own Run Ledger and Evidence.
+the Run ID returned by submission. The Control Plane persists its own Run
+Ledger and Evidence. When an Agent is enrolled, it routes each fake Scenario
+through one registered outbound Windows Host Agent and a durable shared Host
+Lock; otherwise it retains the in-process fake path.
 
 ### Visual Evidence
 

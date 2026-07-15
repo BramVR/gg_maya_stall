@@ -47,8 +47,9 @@ through host config outside the consuming repo.
 The CLI has two operating modes. Embedded Mode is the default and keeps run
 ownership in the current checkout. Configured Control Plane Mode submits the
 same Scenario contract and declared payload snapshot to an authenticated HTTPS
-service; its first vertical slice is synchronous and fake-only. Mode selection
-uses CLI flags, not Repo Run Config.
+service. It can synchronously complete the fake Scenario through a registered
+outbound Windows Host Agent while keeping Host credentials and scheduling state
+outside Repo Run Config. Mode selection uses CLI flags, not Repo Run Config.
 
 ## A Run, End To End
 
@@ -100,6 +101,10 @@ For a configured fake Control Plane, set
 collect`. Read the returned Run ID with `status`, `events`, `logs`, and
 `result` using the same flag.
 
+To traverse the registered Agent contract, enroll one scoped Agent credential,
+then run [`host-agent run-once`](commands/host-agent.md) on its fixed Host before
+submitting the Scenario.
+
 Publish a completed Evidence Bundle:
 
 ```sh
@@ -127,7 +132,8 @@ Pick whichever matches your intent:
 - **Use the CLI:** [Command reference](commands/README.md),
   [init](commands/init.md), [doctor](commands/doctor.md),
   [plan](commands/plan.md), [run](commands/run.md),
-  [control-plane](commands/control-plane.md), [events](commands/events.md),
+  [control-plane](commands/control-plane.md),
+  [host-agent](commands/host-agent.md), [events](commands/events.md),
   [logs](commands/logs.md), [result](commands/result.md),
   [evidence](commands/evidence.md),
   [screenshot](commands/screenshot.md), [record](commands/record.md),

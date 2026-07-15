@@ -59,6 +59,9 @@ descriptive; code is the source-backed check when behavior claims disagree.
 - Embedded/Configured Control Plane mode selection, authenticated API,
   submission snapshots, durable run reads, and Control Plane server:
   `internal/cli/control_plane.go`, `internal/cli/control_plane_test.go`
+- Windows Host Agent enrollment, outbound assignment polling, durable Host Lock
+  fencing, fake execution, result transfer, and restart recovery:
+  `internal/cli/host_agent.go`, `internal/cli/host_agent_test.go`
 
 ## Doctor
 

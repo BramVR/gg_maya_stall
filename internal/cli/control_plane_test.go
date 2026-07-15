@@ -174,6 +174,48 @@ func TestControlPlaneSanitizerRedactsSharedDataRoot(t *testing.T) {
 	}
 }
 
+func TestControlPlaneSanitizerUsesModeNeutralRunRepositoryLabel(t *testing.T) {
+	repoDir := filepath.Join(t.TempDir(), "embedded-repo")
+
+	sanitized := sanitizeControlPlaneText("failure in "+repoDir, repoDir)
+
+	if strings.Contains(sanitized, repoDir) || !strings.Contains(sanitized, "<run-repository>") || strings.Contains(sanitized, "<control-plane-run>") {
+		t.Fatalf("sanitized run repository path = %q", sanitized)
+	}
+}
+
+func TestControlPlaneEvidenceReadsRejectSymlinkedEvidenceDirectory(t *testing.T) {
+	repoDir := t.TempDir()
+	runID := "20260101T000000.000000000Z"
+	evidenceRelative := filepath.Join("artifacts", "maya-stall", runID)
+	evidenceParent := filepath.Join(repoDir, "artifacts", "maya-stall")
+	if err := os.MkdirAll(evidenceParent, 0o700); err != nil {
+		t.Fatalf("create evidence parent: %v", err)
+	}
+	outside := t.TempDir()
+	bundle, err := json.Marshal(evidenceBundle{RunID: runID, Status: resultStatusPassed})
+	if err != nil {
+		t.Fatalf("marshal outside evidence bundle: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, evidenceBundleFileName), bundle, 0o600); err != nil {
+		t.Fatalf("write outside evidence bundle: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(evidenceParent, runID)); err != nil {
+		t.Fatalf("symlink evidence directory: %v", err)
+	}
+	record := runLedgerRecord{
+		RunID: runID, State: "completed", Status: resultStatusPassed,
+		EvidenceDir: filepath.ToSlash(evidenceRelative),
+	}
+
+	if _, err := readControlPlaneEvidence(repoDir, record); err == nil {
+		t.Fatal("Control Plane evidence read followed a symlinked evidence directory")
+	}
+	if cleanupState := controlPlaneCleanupState(repoDir, record); cleanupState != "unresolved" {
+		t.Fatalf("cleanup state through symlinked evidence directory = %q, want unresolved", cleanupState)
+	}
+}
+
 func TestControlPlaneTerminalSurfacesFinalizationFailureAfterScenarioFailure(t *testing.T) {
 	repoDir := filepath.Join(t.TempDir(), "server-run")
 	outcome := runOutcome{

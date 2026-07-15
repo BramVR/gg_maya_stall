@@ -468,8 +468,8 @@ func (handler *controlPlaneHandler) serveRunRead(response http.ResponseWriter, r
 }
 
 func readControlPlaneEvidence(repoDir string, record runLedgerRecord) (controlPlaneEvidenceResponse, error) {
-	evidenceDir := filepath.Join(repoDir, filepath.FromSlash(record.EvidenceDir))
-	if err := ensureWorkspacePathHasNoSymlinkAncestor(evidenceDir, evidenceBundleFileName); err != nil {
+	evidenceDir, err := safeControlPlaneEvidenceDir(repoDir, record)
+	if err != nil {
 		return controlPlaneEvidenceResponse{}, err
 	}
 	content, err := os.ReadFile(filepath.Join(evidenceDir, evidenceBundleFileName))
@@ -517,11 +517,8 @@ func readControlPlaneResult(repoDir string, record runLedgerRecord) (controlPlan
 			Evidence: "/v1/runs/" + record.RunID + "/evidence",
 		}, nil
 	}
-	evidenceDir := filepath.Join(repoDir, filepath.FromSlash(record.EvidenceDir))
-	if err := ensureOutputPathHasNoSymlinkParent(repoDir, record.EvidenceDir); err != nil {
-		return controlPlaneResultResponse{}, err
-	}
-	if err := ensureWorkspacePathHasNoSymlinkAncestor(evidenceDir, evidenceBundleFileName); err != nil {
+	evidenceDir, err := safeControlPlaneEvidenceDir(repoDir, record)
+	if err != nil {
 		return controlPlaneResultResponse{}, err
 	}
 	content, err := os.ReadFile(filepath.Join(evidenceDir, evidenceBundleFileName))
@@ -611,7 +608,11 @@ func readControlPlaneEvents(repoDir string, record runLedgerRecord) (controlPlan
 func controlPlaneCleanupState(repoDir string, record runLedgerRecord) string {
 	switch record.State {
 	case "completed", "failed":
-		content, err := os.ReadFile(filepath.Join(repoDir, filepath.FromSlash(record.EvidenceDir), evidenceBundleFileName))
+		evidenceDir, err := safeControlPlaneEvidenceDir(repoDir, record)
+		if err != nil {
+			return "unresolved"
+		}
+		content, err := os.ReadFile(filepath.Join(evidenceDir, evidenceBundleFileName))
 		if err != nil {
 			return "unresolved"
 		}
@@ -630,6 +631,17 @@ func controlPlaneCleanupState(repoDir string, record runLedgerRecord) string {
 	default:
 		return "pending"
 	}
+}
+
+func safeControlPlaneEvidenceDir(repoDir string, record runLedgerRecord) (string, error) {
+	if err := ensureOutputPathHasNoSymlinkParent(repoDir, record.EvidenceDir); err != nil {
+		return "", err
+	}
+	evidenceDir := filepath.Join(repoDir, filepath.FromSlash(record.EvidenceDir))
+	if err := ensureWorkspacePathHasNoSymlinkAncestor(evidenceDir, evidenceBundleFileName); err != nil {
+		return "", err
+	}
+	return evidenceDir, nil
 }
 
 func (handler *controlPlaneHandler) reserveRun(scenario string) (string, string, error) {
@@ -1022,7 +1034,7 @@ func sanitizeControlPlaneText(value string, repoDir string) string {
 		path        string
 		replacement string
 	}{
-		{path: repoDir, replacement: "<control-plane-run>"},
+		{path: repoDir, replacement: "<run-repository>"},
 	}
 	runRoot := filepath.Dir(repoDir)
 	runsDir := filepath.Dir(runRoot)

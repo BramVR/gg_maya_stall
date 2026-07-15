@@ -2428,11 +2428,12 @@ func buildHostAgentResultFilesSanitized(repoDir string, runID string, privateRoo
 	var files []controlPlaneFile
 	seen := make(map[string]bool)
 	estimated := int64(4096)
+	sanitizer := newHostAgentTextSanitizer(privateRoots)
 	for _, root := range []string{
 		filepath.ToSlash(filepath.Join(".maya-stall", "state", "ledger", "runs", runID)),
 		filepath.ToSlash(filepath.Join("artifacts", "maya-stall", runID)),
 	} {
-		if err := appendHostAgentResultPath(repoDir, root, privateRoots, &files, seen, &estimated); err != nil {
+		if err := appendHostAgentResultPath(repoDir, root, sanitizer, &files, seen, &estimated); err != nil {
 			return nil, err
 		}
 	}
@@ -2442,7 +2443,7 @@ func buildHostAgentResultFilesSanitized(repoDir string, runID string, privateRoo
 	return files, nil
 }
 
-func appendHostAgentResultPath(repoDir string, relativeRoot string, privateRoots []string, files *[]controlPlaneFile, seen map[string]bool, estimated *int64) error {
+func appendHostAgentResultPath(repoDir string, relativeRoot string, sanitizer hostAgentTextSanitizer, files *[]controlPlaneFile, seen map[string]bool, estimated *int64) error {
 	root := filepath.Join(repoDir, filepath.FromSlash(relativeRoot))
 	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -2484,15 +2485,17 @@ func appendHostAgentResultPath(repoDir string, relativeRoot string, privateRoots
 		if int64(len(content)) != info.Size() {
 			return fmt.Errorf("Windows Host Agent result changed while reading")
 		}
-		if len(privateRoots) > 0 && utf8.Valid(content) && !bytes.ContainsRune(content, '\x00') {
-			content = []byte(sanitizeHostAgentResultText(string(content), privateRoots))
+		if len(sanitizer) > 0 && utf8.Valid(content) && !bytes.ContainsRune(content, '\x00') {
+			content = []byte(sanitizer.sanitize(string(content)))
 		}
 		*files = append(*files, controlPlaneFile{Path: relative, Kind: "file", Content: content})
 		return nil
 	})
 }
 
-func sanitizeHostAgentResultText(value string, privateRoots []string) string {
+type hostAgentTextSanitizer []*regexp.Regexp
+
+func newHostAgentTextSanitizer(privateRoots []string) hostAgentTextSanitizer {
 	variants := make([]string, 0, len(privateRoots)*3)
 	for _, root := range privateRoots {
 		if root == "" {
@@ -2501,19 +2504,32 @@ func sanitizeHostAgentResultText(value string, privateRoots []string) string {
 		variants = append(variants, root, filepath.ToSlash(root), strings.ReplaceAll(root, `\`, `\\`))
 	}
 	sort.SliceStable(variants, func(left int, right int) bool { return len(variants[left]) > len(variants[right]) })
+	sanitizer := make(hostAgentTextSanitizer, 0, len(variants))
 	for _, variant := range variants {
-		value = regexp.MustCompile(`(?i)`+regexp.QuoteMeta(variant)).ReplaceAllStringFunc(value, func(string) string {
+		sanitizer = append(sanitizer, regexp.MustCompile(`(?i)`+regexp.QuoteMeta(variant)))
+	}
+	return sanitizer
+}
+
+func (sanitizer hostAgentTextSanitizer) sanitize(value string) string {
+	for _, pattern := range sanitizer {
+		value = pattern.ReplaceAllStringFunc(value, func(string) string {
 			return "[agent-workspace]"
 		})
 	}
 	return value
 }
 
+func sanitizeHostAgentResultText(value string, privateRoots []string) string {
+	return newHostAgentTextSanitizer(privateRoots).sanitize(value)
+}
+
 func sanitizeHostAgentTerminal(terminal *runCommandJSON, privateRoots []string) {
-	terminal.Diagnostic = sanitizeHostAgentResultText(terminal.Diagnostic, privateRoots)
-	terminal.RemediationHint = sanitizeHostAgentResultText(terminal.RemediationHint, privateRoots)
-	terminal.Error = sanitizeHostAgentResultText(terminal.Error, privateRoots)
+	sanitizer := newHostAgentTextSanitizer(privateRoots)
+	terminal.Diagnostic = sanitizer.sanitize(terminal.Diagnostic)
+	terminal.RemediationHint = sanitizer.sanitize(terminal.RemediationHint)
+	terminal.Error = sanitizer.sanitize(terminal.Error)
 	for index := range terminal.FollowUpCommands {
-		terminal.FollowUpCommands[index] = sanitizeHostAgentResultText(terminal.FollowUpCommands[index], privateRoots)
+		terminal.FollowUpCommands[index] = sanitizer.sanitize(terminal.FollowUpCommands[index])
 	}
 }

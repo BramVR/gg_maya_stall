@@ -582,6 +582,7 @@ hostPools:
 func TestHostAgentCompletionSessionAllowsOnlyCleanPreSessionFailureOrExactBinding(t *testing.T) {
 	session := &brokerSessionIdentity{BrokerAdapter: "gg-mayasessiond", SessionID: "maya-session-01"}
 	other := &brokerSessionIdentity{BrokerAdapter: "gg-mayasessiond", SessionID: "maya-session-02"}
+	partial := &brokerSessionIdentity{BrokerAdapter: "gg-mayasessiond"}
 	tests := []struct {
 		name     string
 		required bool
@@ -592,6 +593,8 @@ func TestHostAgentCompletionSessionAllowsOnlyCleanPreSessionFailureOrExactBindin
 	}{
 		{name: "legacy in-flight assignment", status: resultStatusPassed, evidence: session, want: true},
 		{name: "failed before session", required: true, status: resultStatusFailed, want: true},
+		{name: "failed after unrecorded binding", required: true, status: resultStatusFailed, evidence: session, want: true},
+		{name: "failed with malformed unrecorded binding", required: true, status: resultStatusFailed, evidence: partial, want: false},
 		{name: "passed without session", required: true, status: resultStatusPassed, want: false},
 		{name: "exact bound session", required: true, status: resultStatusPassed, lock: session, evidence: session, want: true},
 		{name: "evidence omitted bound session", required: true, status: resultStatusFailed, lock: session, want: false},

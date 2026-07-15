@@ -2109,8 +2109,11 @@ func validHostAgentCompletionSession(required bool, status string, lockSession *
 	if !required {
 		return true
 	}
-	if lockSession == nil || evidenceSession == nil {
-		return status == resultStatusFailed && lockSession == nil && evidenceSession == nil
+	if lockSession == nil {
+		return status == resultStatusFailed && !invalidBrokerSession(evidenceSession)
+	}
+	if evidenceSession == nil {
+		return false
 	}
 	return sameBrokerSession(lockSession, evidenceSession)
 }

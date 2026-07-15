@@ -12,7 +12,7 @@ import (
 
 func validateHostAgentDirectoryPermissions(path string, _ fs.FileInfo) error {
 	if isHostAgentFilesystemRoot(path) {
-		return fmt.Errorf("Windows Host Agent work root must be a dedicated non-root directory")
+		return fmt.Errorf("Windows Host Agent work root must be a dedicated non-root directory") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	const script = `$ErrorActionPreference = 'Stop'
 $path = $args[0]

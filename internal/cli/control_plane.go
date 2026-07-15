@@ -192,10 +192,12 @@ func runControlPlaneServer(options controlPlaneServeOptions, runtime runRuntime,
 }
 
 type controlPlaneHandler struct {
-	dataDir string
-	token   string
-	runtime runRuntime
-	mu      sync.Mutex
+	dataDir     string
+	token       string
+	runtime     runRuntime
+	mu          sync.Mutex
+	hostAgents  map[string]*controlPlaneHostAgent
+	assignments map[string]*controlPlaneHostAgentAssignment
 }
 
 func newControlPlaneHandler(dataDir string, token string, runtime runRuntime) (http.Handler, error) {
@@ -222,7 +224,19 @@ func newControlPlaneHandler(dataDir string, token string, runtime runRuntime) (h
 	if err := ensurePrivateControlPlaneDirectory(filepath.Join(dataDir, "fake-host")); err != nil {
 		return nil, err
 	}
-	return &controlPlaneHandler{dataDir: dataDir, token: token, runtime: runtime}, nil
+	for _, child := range []string{"host-agents", "host-locks", "assignments", "assignment-transactions", "incoming"} {
+		if err := ensurePrivateControlPlaneDirectory(filepath.Join(dataDir, child)); err != nil {
+			return nil, err
+		}
+	}
+	handler := &controlPlaneHandler{
+		dataDir: dataDir, token: token, runtime: runtime,
+		hostAgents: make(map[string]*controlPlaneHostAgent), assignments: make(map[string]*controlPlaneHostAgentAssignment),
+	}
+	if err := handler.loadHostAgentState(); err != nil {
+		return nil, err
+	}
+	return handler, nil
 }
 
 func ensureControlPlaneRootDirectory(path string) error {
@@ -263,6 +277,9 @@ func ensurePrivateControlPlaneDirectory(path string) error {
 }
 
 func (handler *controlPlaneHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if handler.serveHostAgentAPI(response, request) {
+		return
+	}
 	provided, bearer := strings.CutPrefix(request.Header.Get("Authorization"), "Bearer ")
 	if !bearer || len(provided) != len(handler.token) || subtle.ConstantTimeCompare([]byte(provided), []byte(handler.token)) != 1 {
 		writeControlPlaneError(response, http.StatusUnauthorized, "authentication required")
@@ -372,6 +389,8 @@ func (handler *controlPlaneHandler) ServeHTTP(response http.ResponseWriter, requ
 	var runErr error
 	if submission.SubmissionError != "" {
 		outcome, runErr = failAcceptedSubmission(repoDir, options, serverRuntime, errors.New(submission.SubmissionError))
+	} else if handler.hasHostAgentEnrollments() {
+		outcome, runErr = handler.runScenarioThroughHostAgent(repoDir, submission, options, serverRuntime)
 	} else {
 		outcome, runErr = runScenario(repoDir, options, serverRuntime)
 	}
@@ -414,8 +433,36 @@ func (handler *controlPlaneHandler) serveRunRead(response http.ResponseWriter, r
 		writeControlPlaneError(response, http.StatusBadRequest, "invalid Run ID")
 		return
 	}
+	handler.mu.Lock()
+	assignment := handler.assignments[runID]
+	assignmentActive := assignment != nil && assignment.record.State != "quarantined"
+	var assignedRecord *runLedgerRecord
+	if assignment != nil && assignment.record.State == "quarantined" && assignment.record.TerminalLedger != nil {
+		copy := *assignment.record.TerminalLedger
+		assignedRecord = &copy
+	} else if assignment != nil && assignment.record.State == "finishing" && assignment.record.AssignedLedger != nil {
+		copy := *assignment.record.AssignedLedger
+		copy.State = "finishing"
+		copy.Status = ""
+		copy.CompletedAt = ""
+		assignedRecord = &copy
+	} else if assignmentActive && assignment.record.AssignedLedger != nil {
+		copy := *assignment.record.AssignedLedger
+		assignedRecord = &copy
+	}
+	handler.mu.Unlock()
+	if assignmentActive && parts[3] != "status" {
+		writeControlPlaneError(response, http.StatusConflict, "run assignment is still active")
+		return
+	}
 	repoDir := filepath.Join(handler.dataDir, "runs", runID, "repo")
-	record, err := readRunLedgerRecord(repoDir, runID)
+	var record runLedgerRecord
+	var err error
+	if assignedRecord != nil {
+		record = *assignedRecord
+	} else {
+		record, err = readRunLedgerRecord(repoDir, runID)
+	}
 	if err != nil {
 		var usageErr *usageError
 		if errors.As(err, &usageErr) {

@@ -133,7 +133,31 @@ maya-stall result --control-plane https://maya-stall.example.com <run-id>
 ```
 
 The URL selects Configured Control Plane Mode; Repo Run Config stays unchanged.
-Omit it to keep using Embedded Mode. This initial configured path is fake-only.
+Omit it to keep using Embedded Mode. With no enrolled Agent, the Control Plane
+uses its in-process fake runtime.
+
+To prove the outbound Windows Host Agent boundary, expose one scoped Agent
+credential to the enrollment client and Host, then run:
+
+```sh
+maya-stall control-plane enroll-agent \
+  --control-plane https://maya-stall.example.com \
+  --agent-id windows-agent-01 \
+  --host maya-win-01 \
+  --credential-env MAYA_STALL_HOST_AGENT_CREDENTIAL
+
+maya-stall host-agent run-once \
+  --control-plane https://maya-stall.example.com \
+  --agent-id windows-agent-01 \
+  --host maya-win-01 \
+  --work-root C:/maya-stall/agent \
+  --credential-env MAYA_STALL_HOST_AGENT_CREDENTIAL
+```
+
+Start `run-once` before submitting the Scenario. It waits for one assignment,
+executes that fake Scenario, transfers durable Evidence and Run Ledger state,
+cleans its run workspace, and exits. See [control-plane](commands/control-plane.md)
+and [host-agent](commands/host-agent.md).
 
 ## Step 5. Write A Scenario Result
 

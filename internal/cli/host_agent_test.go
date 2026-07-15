@@ -1,0 +1,1958 @@
+package cli
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+const testHostAgentCredential = "agent-token-0123456789abcdef0123456789abcdef"
+
+type heartbeatCancellableBroker struct {
+	started chan struct{}
+	stopped chan struct{}
+	once    sync.Once
+}
+
+type nonStoppingBroker struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+type hungStopBroker struct {
+	release chan struct{}
+}
+
+func (broker *hungStopBroker) StartFreshSession(runContext, scenarioConfig) (brokerSessionIdentity, error) {
+	return brokerSessionIdentity{}, nil
+}
+
+func (broker *hungStopBroker) RunScenario(runContext, scenarioConfig) (ScenarioResult, error) {
+	return ScenarioResult{}, nil
+}
+
+func (broker *hungStopBroker) StopSession(runContext, brokerSessionIdentity) error {
+	<-broker.release
+	return nil
+}
+
+func (broker *nonStoppingBroker) StartFreshSession(runContext, scenarioConfig) (brokerSessionIdentity, error) {
+	return brokerSessionIdentity{}, nil
+}
+
+func (broker *nonStoppingBroker) RunScenario(runContext, scenarioConfig) (ScenarioResult, error) {
+	close(broker.started)
+	<-broker.release
+	return ScenarioResult{}, errors.New("broker eventually returned")
+}
+
+func (broker *nonStoppingBroker) StopSession(runContext, brokerSessionIdentity) error {
+	return errors.New("broker stop failed")
+}
+
+func (broker *heartbeatCancellableBroker) StartFreshSession(runContext, scenarioConfig) (brokerSessionIdentity, error) {
+	return brokerSessionIdentity{}, nil
+}
+
+func (broker *heartbeatCancellableBroker) RunScenario(runContext, scenarioConfig) (ScenarioResult, error) {
+	close(broker.started)
+	<-broker.stopped
+	return ScenarioResult{}, errors.New("broker stopped")
+}
+
+func (broker *heartbeatCancellableBroker) StopSession(runContext, brokerSessionIdentity) error {
+	broker.once.Do(func() { close(broker.stopped) })
+	return nil
+}
+
+func TestHeartbeatLossStopsActiveHostAgentExecution(t *testing.T) {
+	broker := &heartbeatCancellableBroker{started: make(chan struct{}), stopped: make(chan struct{})}
+	cancel := make(chan error, 1)
+	run := &freshRunLifecycle{runtime: runRuntime{Broker: broker, Cancel: cancel}}
+	done := make(chan error, 1)
+	go func() {
+		_, err := run.runBrokerScenario()
+		done <- err
+	}()
+	<-broker.started
+	cancel <- errors.New("Host Agent session fence lost")
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "session fence lost") {
+			t.Fatalf("canceled Host Agent execution error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Host Agent execution did not stop after heartbeat loss")
+	}
+	if !run.sessionSettled {
+		t.Fatal("Host Agent session was not marked settled after heartbeat loss")
+	}
+}
+
+func TestHeartbeatLossReturnsWhenBrokerDoesNotStop(t *testing.T) {
+	broker := &nonStoppingBroker{started: make(chan struct{}), release: make(chan struct{})}
+	cancel := make(chan error, 1)
+	run := &freshRunLifecycle{runtime: runRuntime{Broker: broker, Cancel: cancel, CancelWait: 20 * time.Millisecond}, cancellationObserved: true}
+	done := make(chan error, 1)
+	go func() {
+		_, err := run.runBrokerScenario()
+		done <- err
+	}()
+	<-broker.started
+	cancel <- errors.New("Host Agent session fence lost")
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "did not stop within") {
+			t.Fatalf("non-stopping broker cancellation error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Host Agent cancellation waited indefinitely for broker")
+	}
+	if !run.sessionStopAttempted || run.sessionSettled {
+		t.Fatalf("timed-out broker stop state: attempted=%t settled=%t", run.sessionStopAttempted, run.sessionSettled)
+	}
+	close(broker.release)
+}
+
+func TestHealthySettlementIsNotLimitedByCancellationWait(t *testing.T) {
+	broker := &hungStopBroker{release: make(chan struct{})}
+	cancel := make(chan error)
+	run := &freshRunLifecycle{runtime: runRuntime{Broker: broker, Cancel: cancel, CancelWait: 10 * time.Millisecond}}
+	go func() {
+		time.Sleep(40 * time.Millisecond)
+		close(broker.release)
+	}()
+	if err := run.stopSessionDuringSettlement(); err != nil {
+		t.Fatalf("healthy settlement stop: %v", err)
+	}
+	if !run.sessionSettled || run.cancellationObserved {
+		t.Fatalf("healthy settlement state: settled=%t cancellation=%t", run.sessionSettled, run.cancellationObserved)
+	}
+}
+
+func TestCancellationBoundsDeferredBrokerStop(t *testing.T) {
+	broker := &hungStopBroker{release: make(chan struct{})}
+	cancel := make(chan error)
+	run := &freshRunLifecycle{runtime: runRuntime{Broker: broker, Cancel: cancel, CancelWait: 20 * time.Millisecond}, cancellationObserved: true}
+	started := time.Now()
+	err := run.stopSessionAfterFailure()
+	if err == nil || !strings.Contains(err.Error(), "did not stop within") || time.Since(started) > time.Second {
+		t.Fatalf("bounded deferred stop error = %v elapsed=%s", err, time.Since(started))
+	}
+	if !run.sessionStopAttempted || run.sessionSettled {
+		t.Fatalf("bounded deferred stop state: attempted=%t settled=%t", run.sessionStopAttempted, run.sessionSettled)
+	}
+	close(broker.release)
+}
+
+func TestRunCompletesFakeScenarioThroughRegisteredWindowsHostAgent(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	dataDir := privateTempDir(t)
+	agentWorkRoot := privateTempDir(t)
+	handler, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "operator-token")
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := RunWithRuntime([]string{
+		"control-plane", "enroll-agent",
+		"--control-plane", server.URL,
+		"--agent-id", "windows-agent-01",
+		"--host", "maya-win-01",
+		"--credential-env", "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL",
+	}, &stdout, &stderr, repoDir, "test-version", runtime)
+	if code != 0 {
+		t.Fatalf("enroll Windows Host Agent exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	enrollmentBytes, err := os.ReadFile(filepath.Join(dataDir, "host-agents", "windows-agent-01", "enrollment.json"))
+	if err != nil {
+		t.Fatalf("read durable Host Agent enrollment: %v", err)
+	}
+	if bytes.Contains(enrollmentBytes, []byte(testHostAgentCredential)) {
+		t.Fatalf("durable Host Agent enrollment stored the plaintext credential: %s", enrollmentBytes)
+	}
+
+	agentDone := make(chan int, 1)
+	var agentStdout bytes.Buffer
+	var agentStderr bytes.Buffer
+	go func() {
+		agentDone <- RunWithRuntime([]string{
+			"host-agent", "run-once",
+			"--control-plane", server.URL,
+			"--agent-id", "windows-agent-01",
+			"--host", "maya-win-01",
+			"--work-root", agentWorkRoot,
+			"--credential-env", "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL",
+		}, &agentStdout, &agentStderr, repoDir, "test-version", runtime)
+	}()
+	waitForHostAgentState(t, server.Client(), server.URL, "windows-agent-01", "ready")
+
+	stdout.Reset()
+	stderr.Reset()
+	runDone := make(chan int, 1)
+	agentFinished := false
+	go func() {
+		runDone <- RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &stdout, &stderr, repoDir, "test-version", runtime)
+	}()
+	select {
+	case code = <-runDone:
+	case agentCode := <-agentDone:
+		if agentCode != 0 {
+			t.Fatalf("Windows Host Agent exited before the run completed with code %d; stdout: %s stderr: %s", agentCode, agentStdout.String(), agentStderr.String())
+		}
+		agentFinished = true
+		select {
+		case code = <-runDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("Control Plane did not return the completed Host Agent Scenario")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Windows Host Agent Scenario did not complete")
+	}
+	if code != 0 {
+		t.Fatalf("Host Agent Scenario exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	results := decodeRunJSONLines(t, stdout.Bytes())
+	if len(results) != 2 || results[0].Kind != "run-accepted" || results[1].Status != resultStatusPassed || results[1].Host != "maya-win-01" || results[1].TargetProfile != "default" {
+		t.Fatalf("Host Agent Scenario output = %+v", results)
+	}
+	runID := results[0].RunID
+	if !agentFinished {
+		select {
+		case agentCode := <-agentDone:
+			if agentCode != 0 {
+				t.Fatalf("Windows Host Agent exit code = %d, want 0", agentCode)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("Windows Host Agent did not finish after Scenario completion")
+		}
+	}
+
+	var result controlPlaneResultResponse
+	if err := getControlPlaneJSON(server.URL, "", "/v1/runs/"+runID+"/result", runtime, &result); err != nil {
+		t.Fatalf("read Host Agent result: %v", err)
+	}
+	if !result.Final || !result.Success || result.CleanupState != "completed" {
+		t.Fatalf("Host Agent result = %+v", result)
+	}
+	serverRepo := filepath.Join(dataDir, "runs", runID, "repo")
+	if _, err := os.Stat(filepath.Join(serverRepo, ".maya-stall", "state", "ledger", "runs", runID, "run.json")); err != nil {
+		t.Fatalf("transferred Run Ledger: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(serverRepo, "artifacts", "maya-stall", runID, evidenceBundleFileName)); err != nil {
+		t.Fatalf("transferred Evidence Bundle: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(agentWorkRoot, "runs", runID)); !os.IsNotExist(err) {
+		t.Fatalf("Host Agent run workspace = %v, want removed", err)
+	}
+	if _, err := os.Stat(filepath.Join(agentWorkRoot, "host")); !os.IsNotExist(err) {
+		t.Fatalf("unused top-level Host Agent workspace = %v, want absent", err)
+	}
+	concrete := handler.(*controlPlaneHandler)
+	concrete.mu.Lock()
+	assignmentCount := len(concrete.assignments)
+	concrete.mu.Unlock()
+	if assignmentCount != 0 {
+		t.Fatalf("completed in-memory assignments = %d, want 0", assignmentCount)
+	}
+	sharedRelease, locked, err := acquireHostLock(filepath.Join(dataDir, "fake-host"), "maya-win-01")
+	if err != nil || locked {
+		t.Fatalf("shared fake Host Lock after completion: locked=%t err=%v", locked, err)
+	}
+	if err := sharedRelease(); err != nil {
+		t.Fatalf("release shared fake Host Lock probe: %v", err)
+	}
+	var completed hostAgentAssignmentRecord
+	if err := readPrivateJSON(filepath.Join(dataDir, "assignments", runID+".json"), &completed); err != nil {
+		t.Fatalf("read completed assignment: %v", err)
+	}
+	var repeated runCommandJSON
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/assignments/"+runID+"/complete", hostAgentCompletionRequest{
+		Version: hostAgentAPIVersion, RunID: runID, LockToken: completed.LockToken, SessionID: "finished-session",
+	}, runtime, http.StatusOK, &repeated); err != nil {
+		t.Fatalf("repeat completed Host Agent upload: %v", err)
+	}
+	if repeated.RunID != runID || repeated.Status != resultStatusPassed {
+		t.Fatalf("repeated completion terminal = %+v", repeated)
+	}
+	waitForHostAgentState(t, server.Client(), server.URL, "windows-agent-01", "offline")
+}
+
+func TestEnsureHostAgentDirectoryDistinguishesFileFromSymlink(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(path, []byte("file"), 0o600); err != nil {
+		t.Fatalf("write regular file: %v", err)
+	}
+	err := ensureHostAgentDirectory(path)
+	if err == nil || !strings.Contains(err.Error(), "must be a directory and not a symlink") {
+		t.Fatalf("regular-file diagnostic = %v", err)
+	}
+}
+
+func TestHostAgentKeepsPollingAfterEmptyAssignmentResponse(t *testing.T) {
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	var polls atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer "+testHostAgentCredential {
+			response.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if polls.Add(1) == 1 {
+			response.WriteHeader(http.StatusNoContent)
+			return
+		}
+		_ = json.NewEncoder(response).Encode(hostAgentAssignmentResponse{
+			Version: hostAgentAPIVersion, Kind: "host-agent-assignment", RunID: "20260715T120000.000000000Z",
+			AgentID: "windows-agent-01", HostID: "maya-win-01", LockToken: strings.Repeat("a", 32),
+		})
+	}))
+	t.Cleanup(server.Close)
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	assignment, err := pollHostAgentAssignment(hostAgentRunOnceOptions{
+		ControlPlane: server.URL, AgentID: "windows-agent-01", CredentialEnv: "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL",
+	}, runtime, nil)
+	if err != nil {
+		t.Fatalf("poll Host Agent assignment: %v", err)
+	}
+	if polls.Load() != 2 || assignment.RunID != "20260715T120000.000000000Z" {
+		t.Fatalf("polls = %d, assignment = %+v", polls.Load(), assignment)
+	}
+}
+
+func TestHostAgentHeartbeatFailureCancelsBlockingAssignmentPoll(t *testing.T) {
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		close(started)
+		<-release
+	}))
+	t.Cleanup(server.Close)
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	heartbeatErrors := make(chan error, 1)
+	finished := make(chan error, 1)
+	go func() {
+		_, err := pollHostAgentAssignment(hostAgentRunOnceOptions{
+			ControlPlane: server.URL, AgentID: "windows-agent-01", CredentialEnv: "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL",
+		}, runtime, heartbeatErrors)
+		finished <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("Host Agent assignment poll did not start")
+	}
+	heartbeatErrors <- errors.New("heartbeat fence lost")
+	select {
+	case err := <-finished:
+		if err == nil || !strings.Contains(err.Error(), "heartbeat fence lost") {
+			t.Fatalf("cancelled Host Agent assignment poll error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat failure did not cancel Host Agent assignment poll")
+	}
+}
+
+func TestHostAgentEnrollmentRejectsShortCredentialAtBothBoundaries(t *testing.T) {
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "too-short")
+	options := controlPlaneEnrollAgentOptions{
+		ControlPlane: "https://control-plane.example.com", AgentID: "windows-agent-01", HostID: "maya-win-01",
+		CredentialEnv: "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", TokenEnv: defaultControlPlaneTokenEnv,
+	}
+	if err := enrollControlPlaneHostAgent(options, defaultRunRuntime(), io.Discard); err == nil || !strings.Contains(err.Error(), "at least 32 bytes") {
+		t.Fatalf("short enrollment credential error = %v", err)
+	}
+
+	handler, err := newControlPlaneHandler(privateTempDir(t), "operator-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	defer server.Close()
+	content, err := json.Marshal(hostAgentEnrollmentRequest{
+		Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Credential: "too-short",
+	})
+	if err != nil {
+		t.Fatalf("marshal short enrollment: %v", err)
+	}
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/v1/host-agents/enroll", bytes.NewReader(content))
+	if err != nil {
+		t.Fatalf("create short enrollment request: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer operator-token")
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatalf("send short enrollment request: %v", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("short server enrollment HTTP = %d, want 400", response.StatusCode)
+	}
+}
+
+func TestSanitizeHostAgentResultTextRemovesAgentLocalPaths(t *testing.T) {
+	privateRoot := `C:\maya-stall\agent\runs\run-01\repo`
+	value := privateRoot + "\n" + strings.ReplaceAll(privateRoot, `\`, `\\`) + "\n/agent/work/run-01/repo"
+	sanitized := sanitizeHostAgentResultText(value, []string{privateRoot, "/agent/work/run-01/repo"})
+	for _, privatePath := range []string{privateRoot, strings.ReplaceAll(privateRoot, `\`, `\\`), "/agent/work/run-01/repo"} {
+		if strings.Contains(sanitized, privatePath) {
+			t.Fatalf("sanitized result contains private path %q: %q", privatePath, sanitized)
+		}
+	}
+	if strings.Count(sanitized, "[agent-workspace]") != 3 {
+		t.Fatalf("sanitized result = %q", sanitized)
+	}
+	caseVariant := sanitizeHostAgentResultText(`c:\MAYA-STALL\Agent\runs`, []string{`C:\maya-stall\agent`})
+	if strings.Contains(strings.ToLower(caseVariant), `c:\maya-stall\agent`) {
+		t.Fatalf("case-variant Windows Agent path was not sanitized: %q", caseVariant)
+	}
+}
+
+func TestSanitizeHostAgentTerminalRemovesAgentLocalPaths(t *testing.T) {
+	privateRoot := `C:\maya-stall\agent`
+	terminal := runCommandJSON{
+		Diagnostic: privateRoot + `\runs\run-01`, RemediationHint: privateRoot + `\host`,
+		Error: privateRoot + `\error`, FollowUpCommands: []string{privateRoot + `\follow-up`},
+	}
+	sanitizeHostAgentTerminal(&terminal, []string{privateRoot})
+	for name, value := range map[string]string{
+		"diagnostic": terminal.Diagnostic, "remediation": terminal.RemediationHint,
+		"error": terminal.Error, "follow-up": terminal.FollowUpCommands[0],
+	} {
+		if strings.Contains(value, privateRoot) || !strings.Contains(value, "[agent-workspace]") {
+			t.Fatalf("sanitized %s = %q", name, value)
+		}
+	}
+}
+
+func TestHostAgentFakeHostWorkspaceIsAssignmentScoped(t *testing.T) {
+	workRoot := privateTempDir(t)
+	runID := "20260715T120000.000000000Z"
+	runRoot := filepath.Join(workRoot, "runs", runID)
+	if err := os.MkdirAll(runRoot, 0o700); err != nil {
+		t.Fatalf("create Agent run root: %v", err)
+	}
+	path, err := writeHostAgentFakeHostConfig(hostAgentRunOnceOptions{WorkRoot: workRoot}, hostAgentAssignmentResponse{
+		RunID: runID, HostID: "maya-win-01", Submission: controlPlaneSubmission{TargetProfile: "default"},
+	})
+	if err != nil {
+		t.Fatalf("write fake Host config: %v", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fake Host config: %v", err)
+	}
+	wantRoot := filepath.Join(runRoot, "host")
+	if !bytes.Contains(content, []byte(wantRoot)) {
+		t.Fatalf("fake Host config = %s, want assignment-scoped work root %s", content, wantRoot)
+	}
+	if path != filepath.Join(workRoot, "host-config.yaml") {
+		t.Fatalf("fake Host config path = %s", path)
+	}
+}
+
+func TestHostAgentFakeHostConfigRejectsSymlink(t *testing.T) {
+	workRoot := privateTempDir(t)
+	runID := "20260715T120000.000000000Z"
+	if err := os.MkdirAll(filepath.Join(workRoot, "runs", runID), 0o700); err != nil {
+		t.Fatalf("create Agent run root: %v", err)
+	}
+	victim := filepath.Join(workRoot, "victim.yaml")
+	if err := os.WriteFile(victim, []byte("unchanged"), 0o600); err != nil {
+		t.Fatalf("write symlink victim: %v", err)
+	}
+	if err := os.Symlink(victim, filepath.Join(workRoot, "host-config.yaml")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	_, err := writeHostAgentFakeHostConfig(hostAgentRunOnceOptions{WorkRoot: workRoot}, hostAgentAssignmentResponse{
+		RunID: runID, HostID: "maya-win-01", Submission: controlPlaneSubmission{TargetProfile: "default"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "must not be a symlink") {
+		t.Fatalf("write through host-config symlink error = %v", err)
+	}
+	content, readErr := os.ReadFile(victim)
+	if readErr != nil || string(content) != "unchanged" {
+		t.Fatalf("symlink victim changed: content=%q error=%v", content, readErr)
+	}
+}
+
+func TestPostSessionOperationIsBoundedAfterCancellation(t *testing.T) {
+	cancel := make(chan error, 1)
+	cancel <- errors.New("cancelled")
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	run := freshRunLifecycle{runtime: runRuntime{Cancel: cancel, CancelWait: 10 * time.Millisecond}}
+	err := run.runPostSessionOperation("artifact collection", func() error {
+		<-release
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "artifact collection did not finish") {
+		t.Fatalf("bounded post-session operation error = %v", err)
+	}
+	if !run.cancellationObserved || !run.sessionOperationUnsettled {
+		t.Fatalf("post-session cancellation state = observed:%t unsettled:%t", run.cancellationObserved, run.sessionOperationUnsettled)
+	}
+}
+
+func TestHostAgentCompletionIdentityRejectsAssignmentChanges(t *testing.T) {
+	assignment := hostAgentAssignmentRecord{
+		RunID: "20260715T120000.000000000Z", HostID: "maya-win-01",
+		Submission: controlPlaneSubmission{Scenario: "smoke", TargetProfile: "default"},
+	}
+	valid := runCommandJSON{
+		Version: controlPlaneAPIVersion, Kind: "run", Accepted: true, RunID: assignment.RunID,
+		Scenario: "smoke", TargetProfile: "default", Host: "maya-win-01", StopPolicy: "stopped",
+	}
+	mutations := map[string]func(*runCommandJSON){
+		"version":   func(value *runCommandJSON) { value.Version++ },
+		"kind":      func(value *runCommandJSON) { value.Kind = "other" },
+		"accepted":  func(value *runCommandJSON) { value.Accepted = false },
+		"run":       func(value *runCommandJSON) { value.RunID = "20260715T120001.000000000Z" },
+		"scenario":  func(value *runCommandJSON) { value.Scenario = "other" },
+		"profile":   func(value *runCommandJSON) { value.TargetProfile = "other" },
+		"host":      func(value *runCommandJSON) { value.Host = "maya-win-02" },
+		"stop":      func(value *runCommandJSON) { value.StopPolicy = "unresolved" },
+		"follow-up": func(value *runCommandJSON) { value.FollowUpCommands = []string{"unsafe"} },
+	}
+	if err := validateHostAgentCompletionIdentity(assignment, valid); err != nil {
+		t.Fatalf("valid completion identity: %v", err)
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			changed := valid
+			mutate(&changed)
+			if err := validateHostAgentCompletionIdentity(assignment, changed); err == nil {
+				t.Fatal("changed completion identity was accepted")
+			}
+		})
+	}
+}
+
+func TestFinishingHostAgentAssignmentRequiresImmutableTerminalIdentity(t *testing.T) {
+	assigned := runLedgerRecord{
+		Version: 1, RunID: "20260715T120000.000000000Z", Scenario: "smoke", TargetProfile: "default",
+		Host: "maya-win-01", State: "assigned", AcceptedAt: "2026-07-15T12:00:00Z",
+	}
+	terminalLedger := assigned
+	terminalLedger.State = "completed"
+	terminalLedger.Status = resultStatusPassed
+	terminal := runCommandJSON{
+		Version: controlPlaneAPIVersion, Kind: "run", Accepted: true, RunID: assigned.RunID,
+		Scenario: assigned.Scenario, TargetProfile: assigned.TargetProfile, Host: assigned.Host,
+		Status: resultStatusPassed, StopPolicy: "stopped",
+	}
+	assignment := hostAgentAssignmentRecord{
+		Version: hostAgentAPIVersion, RunID: assigned.RunID, AgentID: "windows-agent-01", HostID: assigned.Host,
+		LockToken: strings.Repeat("a", 32), State: "finishing",
+		Submission: controlPlaneSubmission{Version: controlPlaneAPIVersion, Scenario: assigned.Scenario, TargetProfile: assigned.TargetProfile, StopAfter: stopAfterAlways},
+		Terminal:   &terminal, TerminalLedger: &terminalLedger, AssignedLedger: &assigned,
+	}
+	if err := validateFinishingHostAgentAssignment(assignment); err != nil {
+		t.Fatalf("valid finishing assignment: %v", err)
+	}
+	invalid := assignment
+	wrongLedger := terminalLedger
+	wrongLedger.RunID = "20260715T120001.000000000Z"
+	invalid.TerminalLedger = &wrongLedger
+	if err := validateFinishingHostAgentAssignment(invalid); err == nil {
+		t.Fatal("finishing assignment accepted another Run Ledger identity")
+	}
+}
+
+func TestRecoveredHostAgentDoesNotStealUnrelatedSharedLock(t *testing.T) {
+	repoDir := privateTempDir(t)
+	release, locked, err := acquireHostLock(repoDir, "maya-win-01")
+	if err != nil || locked {
+		t.Fatalf("acquire shared Host Lock: locked=%t error=%v", locked, err)
+	}
+	defer func() { _ = release() }()
+	firstRun := "20260715T120000.000000000Z"
+	if err := markHostLockActive(repoDir, "maya-win-01", firstRun); err != nil {
+		t.Fatalf("mark first shared Host Lock: %v", err)
+	}
+	if err := reestablishHostAgentSharedLock(repoDir, "maya-win-01", "20260715T120001.000000000Z"); err == nil || !strings.Contains(err.Error(), "another run") {
+		t.Fatalf("unrelated shared Host Lock recovery error = %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(repoDir, ".maya-stall", "state", "locks", "hosts", "maya-win-01.lock"))
+	if err != nil || !bytes.Contains(content, []byte("activeRun: "+firstRun)) {
+		t.Fatalf("unrelated shared Host Lock changed: content=%q error=%v", content, err)
+	}
+}
+
+func TestHostAgentResultFileValidationRejectsHostileUploads(t *testing.T) {
+	runID := "20260715T120000.000000000Z"
+	ledger := filepath.ToSlash(filepath.Join(".maya-stall", "state", "ledger", "runs", runID, "run.json"))
+	evidence := filepath.ToSlash(filepath.Join("artifacts", "maya-stall", runID, evidenceBundleFileName))
+	valid := []controlPlaneFile{{Path: ledger, Kind: "file"}, {Path: evidence, Kind: "file"}}
+	if err := validateHostAgentResultFiles(runID, valid); err != nil {
+		t.Fatalf("valid Host Agent result files: %v", err)
+	}
+	cases := map[string][]controlPlaneFile{
+		"absolute":        {{Path: "/tmp/run.json", Kind: "file"}, {Path: evidence, Kind: "file"}},
+		"traversal":       {{Path: "../run.json", Kind: "file"}, {Path: evidence, Kind: "file"}},
+		"backslash":       {{Path: strings.ReplaceAll(ledger, "/", `\`), Kind: "file"}, {Path: evidence, Kind: "file"}},
+		"duplicate":       {valid[0], valid[0], valid[1]},
+		"missing":         {valid[0]},
+		"directory-bytes": {{Path: ledger, Kind: "directory", Content: []byte("bytes")}, valid[1]},
+		"outside":         {{Path: ledger, Kind: "file"}, {Path: "outside.txt", Kind: "file"}, valid[1]},
+	}
+	for name, files := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := validateHostAgentResultFiles(runID, files); err == nil {
+				t.Fatal("hostile Host Agent upload was accepted")
+			}
+		})
+	}
+}
+
+func TestHostAgentResultTransferSanitizesAgentPaths(t *testing.T) {
+	repoDir := t.TempDir()
+	runID := "20260715T120000.000000000Z"
+	privateRoot := `C:\Maya-Stall\Agent`
+	for path, content := range map[string]string{
+		filepath.Join(".maya-stall", "state", "ledger", "runs", runID, "run.json"):      `{"diagnostic":"c:\\maya-stall\\agent\\host"}`,
+		filepath.Join(".maya-stall", "state", "ledger", "runs", runID, "events.ndjson"): `{"message":"C:\\MAYA-STALL\\AGENT\\runs"}`,
+		filepath.Join("artifacts", "maya-stall", runID, evidenceBundleFileName):         `{"diagnostic":"C:\\maya-stall\\agent\\evidence"}`,
+	} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(repoDir, path)), 0o700); err != nil {
+			t.Fatalf("create result path: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(repoDir, path), []byte(content), 0o600); err != nil {
+			t.Fatalf("write result path: %v", err)
+		}
+	}
+	files, err := buildHostAgentResultFilesSanitized(repoDir, runID, []string{privateRoot})
+	if err != nil {
+		t.Fatalf("build sanitized Host Agent result: %v", err)
+	}
+	for _, file := range files {
+		lowerContent := strings.ToLower(string(file.Content))
+		if strings.Contains(lowerContent, strings.ToLower(privateRoot)) || strings.Contains(lowerContent, strings.ToLower(strings.ReplaceAll(privateRoot, `\`, `\\`))) {
+			t.Fatalf("transferred %s contains Agent path: %s", file.Path, file.Content)
+		}
+	}
+}
+
+func TestQuarantinedHostAgentFailureRetainsWorkspace(t *testing.T) {
+	var got hostAgentFailureRequest
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if err := json.NewDecoder(request.Body).Decode(&got); err != nil {
+			t.Fatalf("decode quarantine request: %v", err)
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(response).Encode(runCommandJSON{Version: 1, Kind: "run", Status: resultStatusFailed})
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	workRoot := privateTempDir(t)
+	runID := "20260715T120000.000000000Z"
+	runRoot := filepath.Join(workRoot, "runs", runID)
+	if err := os.MkdirAll(runRoot, 0o700); err != nil {
+		t.Fatalf("create quarantined Agent workspace: %v", err)
+	}
+	marker := filepath.Join(runRoot, "retained.txt")
+	if err := os.WriteFile(marker, []byte("retained"), 0o600); err != nil {
+		t.Fatalf("write quarantined Agent workspace: %v", err)
+	}
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	err := quarantineConfirmedHostAgentAssignment(hostAgentRunOnceOptions{
+		ControlPlane: server.URL, AgentID: "windows-agent-01", HostID: "maya-win-01", WorkRoot: workRoot,
+		CredentialEnv: "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", SessionID: strings.Repeat("b", 32),
+	}, hostAgentAssignmentResponse{RunID: runID, LockToken: strings.Repeat("a", 32)}, runtime, "stopping Maya", errors.New("stop failed"))
+	if err == nil || !got.Quarantine {
+		t.Fatalf("quarantined Host Agent error = %v request=%+v", err, got)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("quarantined Agent workspace was removed: %v", err)
+	}
+}
+
+func TestQuarantinedAssignmentRetainsBothHostLocksAndRejectsTakeover(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	dataDir := privateTempDir(t)
+	runtime := defaultRunRuntime()
+	handler, err := newControlPlaneHandler(dataDir, "operator-token", runtime)
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "operator-token")
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	runtime.ControlPlaneHTTPClient = server.Client()
+	enrollTestHostAgent(t, repoDir, server.URL, runtime)
+	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1}
+	var status hostAgentStatusResponse
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &status); err != nil {
+		t.Fatalf("register Windows Host Agent: %v", err)
+	}
+	var runStdout bytes.Buffer
+	var runStderr bytes.Buffer
+	runDone := make(chan int, 1)
+	go func() {
+		runDone <- RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &runStdout, &runStderr, repoDir, "test-version", runtime)
+	}()
+	waitForHostAgentState(t, server.Client(), server.URL, "windows-agent-01", "locked")
+	status = readHostAgentStatus(t, server.Client(), server.URL, "windows-agent-01")
+	var assignment hostAgentAssignmentResponse
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/assignments/next", hostAgentNextRequest{
+		Version: hostAgentAPIVersion, SessionID: status.SessionID,
+	}, runtime, http.StatusOK, &assignment); err != nil {
+		t.Fatalf("read Host Agent assignment: %v", err)
+	}
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/assignments/"+assignment.RunID+"/confirm", hostAgentLockRequest{
+		Version: hostAgentAPIVersion, RunID: assignment.RunID, LockToken: assignment.LockToken, SessionID: status.SessionID,
+	}, runtime, http.StatusOK, &status); err != nil {
+		t.Fatalf("confirm Host Agent assignment: %v", err)
+	}
+	var terminal runCommandJSON
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/assignments/"+assignment.RunID+"/fail", hostAgentFailureRequest{
+		Version: hostAgentAPIVersion, RunID: assignment.RunID, LockToken: assignment.LockToken,
+		SessionID: status.SessionID, Diagnostic: "Maya session shutdown is unverified", Quarantine: true,
+	}, runtime, http.StatusOK, &terminal); err != nil {
+		t.Fatalf("quarantine Host Agent assignment: %v", err)
+	}
+	if code := <-runDone; code != 1 {
+		t.Fatalf("quarantined Scenario exit code = %d; stdout: %s stderr: %s", code, runStdout.String(), runStderr.String())
+	}
+	status = readHostAgentStatus(t, server.Client(), server.URL, "windows-agent-01")
+	if status.State != "quarantined" || status.RunID != assignment.RunID || status.SessionID != "" {
+		t.Fatalf("quarantined Host Agent status = %+v", status)
+	}
+	var replacement hostAgentStatusResponse
+	err = postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &replacement)
+	var statusErr *controlPlaneHTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusConflict {
+		t.Fatalf("quarantined Agent takeover error = %v, want HTTP 409", err)
+	}
+	if _, locked, err := acquireHostLock(filepath.Join(dataDir, "fake-host"), "maya-win-01"); err != nil || !locked {
+		t.Fatalf("shared fake Host Lock after quarantine: locked=%t err=%v", locked, err)
+	}
+	var durable hostAgentAssignmentRecord
+	if err := readPrivateJSON(filepath.Join(dataDir, "assignments", assignment.RunID+".json"), &durable); err != nil || durable.State != "quarantined" {
+		t.Fatalf("durable quarantined assignment = %+v err=%v", durable, err)
+	}
+}
+
+func TestHostAgentRejectsRemoteRunIDPathTraversal(t *testing.T) {
+	options := hostAgentRunOnceOptions{AgentID: "windows-agent-01", HostID: "maya-win-01"}
+	for _, runID := range []string{"../../outside", "run/child", `run\\child`} {
+		assignment := hostAgentAssignmentResponse{
+			Version: hostAgentAPIVersion, Kind: "host-agent-assignment", RunID: runID,
+			AgentID: options.AgentID, HostID: options.HostID, LockToken: strings.Repeat("a", 32),
+		}
+		if err := validateHostAgentAssignment(options, assignment); err == nil {
+			t.Fatalf("remote Run ID %q was accepted", runID)
+		}
+	}
+}
+
+func TestHostAgentRejectsDotAgentIDs(t *testing.T) {
+	for _, agentID := range []string{".", "..", "Windows-Agent-01", "agent.", "con"} {
+		_, err := parseControlPlaneEnrollAgentArgs([]string{
+			"--control-plane", "https://maya-stall.example.com", "--agent-id", agentID,
+			"--host", "maya-win-01", "--credential-env", "MAYA_STALL_HOST_AGENT_CREDENTIAL",
+		})
+		if err == nil {
+			t.Fatalf("enrollment accepted dot Agent ID %q", agentID)
+		}
+	}
+	if _, err := parseControlPlaneEnrollAgentArgs([]string{
+		"--control-plane", "https://maya-stall.example.com", "--agent-id", "windows-agent-01",
+		"--host", "Maya-Win-01", "--credential-env", "MAYA_STALL_HOST_AGENT_CREDENTIAL",
+	}); err == nil {
+		t.Fatal("enrollment accepted a case-variant Maya Host state ID")
+	}
+}
+
+func TestHostAgentReportsPostConfirmationSetupFailureAndReleasesLock(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	dataDir := privateTempDir(t)
+	agentWorkRoot := privateTempDir(t)
+	if err := os.Mkdir(filepath.Join(agentWorkRoot, "host-config.yaml"), 0o700); err != nil {
+		t.Fatalf("create blocking Host config directory: %v", err)
+	}
+	handler, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "operator-token")
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	enrollTestHostAgent(t, repoDir, server.URL, runtime)
+
+	agentDone := make(chan int, 1)
+	go func() {
+		agentDone <- RunWithRuntime([]string{
+			"host-agent", "run-once", "--control-plane", server.URL,
+			"--agent-id", "windows-agent-01", "--host", "maya-win-01",
+			"--work-root", agentWorkRoot, "--credential-env", "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL",
+		}, io.Discard, io.Discard, repoDir, "test-version", runtime)
+	}()
+	waitForHostAgentState(t, server.Client(), server.URL, "windows-agent-01", "ready")
+	var runStdout bytes.Buffer
+	var runStderr bytes.Buffer
+	runCode := RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &runStdout, &runStderr, repoDir, "test-version", runtime)
+	if runCode != 1 {
+		t.Fatalf("failed Host Agent Scenario exit code = %d, want 1; stdout: %s stderr: %s", runCode, runStdout.String(), runStderr.String())
+	}
+	results := decodeRunJSONLines(t, runStdout.Bytes())
+	if len(results) != 2 || results[1].Host != "maya-win-01" || results[1].TargetProfile != "default" {
+		t.Fatalf("failed Host Agent Scenario identity = %+v", results)
+	}
+	if agentCode := <-agentDone; agentCode != 1 {
+		t.Fatalf("failed Windows Host Agent exit code = %d, want 1", agentCode)
+	}
+	waitForHostAgentState(t, server.Client(), server.URL, "windows-agent-01", "offline")
+	entries, err := os.ReadDir(filepath.Join(dataDir, "host-locks"))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("Host Locks after reported Agent failure = %+v, err %v", entries, err)
+	}
+	runEntries, err := os.ReadDir(filepath.Join(agentWorkRoot, "runs"))
+	if err != nil || len(runEntries) != 0 {
+		t.Fatalf("Agent run workspaces after reported failure = %+v, err %v", runEntries, err)
+	}
+}
+
+func TestSecondHostAgentProcessRegistrationIsRejected(t *testing.T) {
+	dataDir := privateTempDir(t)
+	handler, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "operator-token")
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	enrollTestHostAgent(t, t.TempDir(), server.URL, runtime)
+	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1}
+	var first hostAgentStatusResponse
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &first); err != nil {
+		t.Fatalf("register first Windows Host Agent process: %v", err)
+	}
+	var second hostAgentStatusResponse
+	err = postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &second)
+	var statusErr *controlPlaneHTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusConflict {
+		t.Fatalf("second Windows Host Agent registration error = %v, want HTTP 409", err)
+	}
+	status := readHostAgentStatus(t, server.Client(), server.URL, "windows-agent-01")
+	if status.SessionID != first.SessionID || status.State != "ready" {
+		t.Fatalf("Host Agent after second process registration = %+v, want first session unchanged", status)
+	}
+}
+
+func TestExpiredHostAgentSessionAllowsReEnrollment(t *testing.T) {
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	runtime := defaultRunRuntime()
+	runtime.Now = func() time.Time { return now }
+	handler, err := newControlPlaneHandler(privateTempDir(t), "operator-token", runtime)
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "operator-token")
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	runtime.ControlPlaneHTTPClient = server.Client()
+	enrollTestHostAgent(t, t.TempDir(), server.URL, runtime)
+	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1}
+	var first hostAgentStatusResponse
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &first); err != nil {
+		t.Fatalf("register Windows Host Agent process: %v", err)
+	}
+	now = now.Add(hostAgentSessionLease)
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "rotated-token-0123456789abcdef0123456789abcdef")
+	enrollTestHostAgent(t, t.TempDir(), server.URL, runtime)
+	status := readHostAgentStatus(t, server.Client(), server.URL, "windows-agent-01")
+	if status.State != "enrolled" || status.SessionID != "" {
+		t.Fatalf("re-enrolled Host Agent status = %+v", status)
+	}
+}
+
+func TestHostAgentMutationRevalidatesRotatedCredential(t *testing.T) {
+	currentCredential := "current-token-0123456789abcdef0123456789abcdef"
+	digest := sha256.Sum256([]byte(currentCredential))
+	handlerValue, err := newControlPlaneHandler(privateTempDir(t), "operator-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	handler := handlerValue.(*controlPlaneHandler)
+	handler.hostAgents["windows-agent-01"] = &controlPlaneHostAgent{
+		enrollment: hostAgentEnrollmentRecord{
+			Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01",
+			CredentialSHA256: fmt.Sprintf("%x", digest),
+		},
+		status: hostAgentStatusResponse{
+			Version: hostAgentAPIVersion, Kind: "host-agent-status", AgentID: "windows-agent-01", HostID: "maya-win-01",
+			Slots: 1, State: "enrolled",
+		},
+		notify: make(chan struct{}),
+	}
+	content, err := json.Marshal(hostAgentRegistrationRequest{
+		Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1,
+	})
+	if err != nil {
+		t.Fatalf("marshal registration: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/host-agents/windows-agent-01/register", bytes.NewReader(content))
+	request.Header.Set("Authorization", "Bearer "+testHostAgentCredential)
+	response := httptest.NewRecorder()
+	handler.serveHostAgentRegistration(response, request, "windows-agent-01")
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("rotated credential registration HTTP = %d, want 401", response.Code)
+	}
+	if handler.hostAgents["windows-agent-01"].status.SessionID != "" {
+		t.Fatal("revoked credential created a process session")
+	}
+}
+
+func TestExpiredHostAgentSessionAllowsFencedProcessTakeover(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	dataDir := privateTempDir(t)
+	agentWorkRoot := privateTempDir(t)
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	runtime := defaultRunRuntime()
+	runtime.Now = func() time.Time { return now }
+	handler, err := newControlPlaneHandler(dataDir, "operator-token", runtime)
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "operator-token")
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	runtime.ControlPlaneHTTPClient = server.Client()
+	enrollTestHostAgent(t, repoDir, server.URL, runtime)
+	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1}
+	var first hostAgentStatusResponse
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &first); err != nil {
+		t.Fatalf("register first Windows Host Agent process: %v", err)
+	}
+	var runStdout bytes.Buffer
+	var runStderr bytes.Buffer
+	runDone := make(chan int, 1)
+	go func() {
+		runDone <- RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &runStdout, &runStderr, repoDir, "test-version", runtime)
+	}()
+	waitForHostAgentState(t, server.Client(), server.URL, "windows-agent-01", "locked")
+	locked := readHostAgentStatus(t, server.Client(), server.URL, "windows-agent-01")
+	staleRepo := filepath.Join(agentWorkRoot, "runs", locked.RunID, "repo")
+	if err := os.MkdirAll(staleRepo, 0o700); err != nil {
+		t.Fatalf("create stale takeover repo: %v", err)
+	}
+	staleRun := newFreshRun(staleRepo, runOptions{
+		ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways, AssignedRunID: locked.RunID,
+	}, runtime).(*freshRunLifecycle)
+	if err := staleRun.accept(); err != nil {
+		t.Fatalf("accept stale takeover run: %v", err)
+	}
+	now = now.Add(hostAgentSessionLease + time.Second)
+	var replacement hostAgentStatusResponse
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &replacement); err != nil {
+		t.Fatalf("take over expired Windows Host Agent session: %v", err)
+	}
+	if replacement.SessionID == "" || replacement.SessionID == first.SessionID || replacement.State != "locked" {
+		t.Fatalf("replacement Windows Host Agent session = %+v, first = %+v", replacement, first)
+	}
+	var assignment hostAgentAssignmentResponse
+	err = postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/assignments/next", hostAgentNextRequest{
+		Version: hostAgentAPIVersion, SessionID: first.SessionID,
+	}, runtime, http.StatusOK, &assignment)
+	var statusErr *controlPlaneHTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusConflict {
+		t.Fatalf("expired Host Agent process poll error = %v, want HTTP 409", err)
+	}
+	now = now.Add(hostAgentSessionLease + time.Second)
+	var agentStdout bytes.Buffer
+	var agentStderr bytes.Buffer
+	agentCode := RunWithRuntime([]string{
+		"host-agent", "run-once", "--control-plane", server.URL,
+		"--agent-id", "windows-agent-01", "--host", "maya-win-01",
+		"--work-root", agentWorkRoot, "--credential-env", "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL",
+	}, &agentStdout, &agentStderr, repoDir, "test-version", runtime)
+	if agentCode != 0 {
+		t.Fatalf("replacement Windows Host Agent exit code = %d; stdout: %s stderr: %s", agentCode, agentStdout.String(), agentStderr.String())
+	}
+	select {
+	case runCode := <-runDone:
+		if runCode != 0 {
+			t.Fatalf("taken-over Scenario exit code = %d; stdout: %s stderr: %s", runCode, runStdout.String(), runStderr.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("taken-over Scenario did not complete")
+	}
+}
+
+func TestExpiredReadyHostAgentIsNotSelected(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	dataDir := privateTempDir(t)
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	runtime := defaultRunRuntime()
+	runtime.Now = func() time.Time { return now }
+	handler, err := newControlPlaneHandler(dataDir, "operator-token", runtime)
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "operator-token")
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	runtime.ControlPlaneHTTPClient = server.Client()
+	enrollTestHostAgent(t, repoDir, server.URL, runtime)
+	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1}
+	var status hostAgentStatusResponse
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &status); err != nil {
+		t.Fatalf("register Windows Host Agent: %v", err)
+	}
+	now = now.Add(hostAgentSessionLease + time.Second)
+	status = readHostAgentStatus(t, server.Client(), server.URL, "windows-agent-01")
+	if status.State != "offline" || status.SessionID != "" {
+		t.Fatalf("expired Host Agent status read = %+v, want offline", status)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &stdout, &stderr, repoDir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("expired Agent Scenario exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	status = readHostAgentStatus(t, server.Client(), server.URL, "windows-agent-01")
+	if status.State != "offline" || status.RunID != "" || status.SessionID != "" {
+		t.Fatalf("expired ready Host Agent = %+v, want offline", status)
+	}
+}
+
+func TestSharedFakeHostLockBlocksAgentAssignment(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	dataDir := privateTempDir(t)
+	handler, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "operator-token")
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	enrollTestHostAgent(t, repoDir, server.URL, runtime)
+	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1}
+	var status hostAgentStatusResponse
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &status); err != nil {
+		t.Fatalf("register Windows Host Agent: %v", err)
+	}
+	release, locked, err := acquireHostLock(filepath.Join(dataDir, "fake-host"), "maya-win-01")
+	if err != nil || locked {
+		t.Fatalf("acquire shared fake Host Lock fixture: locked=%t err=%v", locked, err)
+	}
+	defer func() { _ = release() }()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &stdout, &stderr, repoDir, "test-version", runtime); code != 1 {
+		t.Fatalf("shared-lock Agent Scenario exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	status = readHostAgentStatus(t, server.Client(), server.URL, "windows-agent-01")
+	if status.State != "ready" || status.RunID != "" {
+		t.Fatalf("Host Agent selected despite shared fake Host Lock: %+v", status)
+	}
+}
+
+func TestHostAgentAcceptanceReportingFailureFinalizesRun(t *testing.T) {
+	repoDir := t.TempDir()
+	dataDir := privateTempDir(t)
+	runtime := defaultRunRuntime()
+	handlerValue, err := newControlPlaneHandler(dataDir, "operator-token", runtime)
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	handler := handlerValue.(*controlPlaneHandler)
+	handler.hostAgents["windows-agent-01"] = &controlPlaneHostAgent{
+		enrollment: hostAgentEnrollmentRecord{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01"},
+		status: hostAgentStatusResponse{
+			Version: hostAgentAPIVersion, Kind: "host-agent-status", AgentID: "windows-agent-01", HostID: "maya-win-01",
+			Slots: 1, State: "ready", SessionID: strings.Repeat("a", 32),
+		},
+		notify: make(chan struct{}), sessionExpiresAt: time.Now().Add(time.Minute),
+	}
+	runtime.AcceptedCheck = func() error { return errors.New("acceptance stream failed") }
+	outcome, runErr := handler.runScenarioThroughHostAgent(repoDir, controlPlaneSubmission{
+		Version: controlPlaneAPIVersion, Scenario: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways,
+	}, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime)
+	if runErr == nil || outcome.Result.Status != resultStatusFailed {
+		t.Fatalf("acceptance failure outcome = %+v, error = %v", outcome, runErr)
+	}
+	record, err := readRunLedgerRecord(repoDir, outcome.RunID)
+	if err != nil {
+		t.Fatalf("read acceptance failure ledger: %v", err)
+	}
+	if record.State != "failed" || record.Status != resultStatusFailed {
+		t.Fatalf("acceptance failure ledger = %+v", record)
+	}
+	agent := handler.hostAgents["windows-agent-01"]
+	if agent.status.State != "quarantined" || agent.status.RunID != outcome.RunID || handler.assignments[outcome.RunID] == nil {
+		t.Fatalf("Host Agent after acceptance failure = %+v", agent.status)
+	}
+}
+
+func TestHostAgentLeaseExpiryDuringAcceptanceRejectsAssignment(t *testing.T) {
+	repoDir := t.TempDir()
+	dataDir := privateTempDir(t)
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	runtime := defaultRunRuntime()
+	runtime.Now = func() time.Time { return now }
+	handlerValue, err := newControlPlaneHandler(dataDir, "operator-token", runtime)
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	handler := handlerValue.(*controlPlaneHandler)
+	handler.hostAgents["windows-agent-01"] = &controlPlaneHostAgent{
+		enrollment: hostAgentEnrollmentRecord{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01"},
+		status: hostAgentStatusResponse{
+			Version: hostAgentAPIVersion, Kind: "host-agent-status", AgentID: "windows-agent-01", HostID: "maya-win-01",
+			Slots: 1, State: "ready", SessionID: strings.Repeat("a", 32),
+		},
+		notify: make(chan struct{}), sessionExpiresAt: now.Add(hostAgentSessionLease),
+	}
+	runtime.Accepted = func(runOutcome) { now = now.Add(hostAgentSessionLease) }
+	outcome, runErr := handler.runScenarioThroughHostAgent(repoDir, controlPlaneSubmission{
+		Version: controlPlaneAPIVersion, Scenario: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways,
+	}, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime)
+	if runErr == nil || !strings.Contains(runErr.Error(), "lease expired during acceptance") || outcome.Result.Status != resultStatusFailed {
+		t.Fatalf("expired reservation outcome = %+v, error = %v", outcome, runErr)
+	}
+	agent := handler.hostAgents["windows-agent-01"]
+	if agent.status.State != "quarantined" || agent.status.RunID != outcome.RunID || agent.status.SessionID != "" || len(handler.assignments) != 1 {
+		t.Fatalf("Host Agent after expired reservation = %+v assignments=%d", agent.status, len(handler.assignments))
+	}
+}
+
+func TestPartialHostAgentAssignmentTransitionQuarantinesSlot(t *testing.T) {
+	dataDir := privateTempDir(t)
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	runID := now.Format("20060102T150405.000000000Z")
+	repoDir := filepath.Join(dataDir, "runs", runID, "repo")
+	if err := os.MkdirAll(repoDir, 0o700); err != nil {
+		t.Fatalf("create run repo: %v", err)
+	}
+	runtime := defaultRunRuntime()
+	runtime.Now = func() time.Time { return now }
+	handlerValue, err := newControlPlaneHandler(dataDir, "operator-token", runtime)
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	handler := handlerValue.(*controlPlaneHandler)
+	credentialHash := sha256.Sum256([]byte(testHostAgentCredential))
+	enrollment := hostAgentEnrollmentRecord{
+		Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01",
+		CredentialSHA256: fmt.Sprintf("%x", credentialHash), EnrolledAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if err := writePrivateJSON(filepath.Join(dataDir, "host-agents", enrollment.AgentID, "enrollment.json"), enrollment); err != nil {
+		t.Fatalf("persist enrollment fixture: %v", err)
+	}
+	handler.hostAgents["windows-agent-01"] = &controlPlaneHostAgent{
+		enrollment: enrollment,
+		status: hostAgentStatusResponse{
+			Version: hostAgentAPIVersion, Kind: "host-agent-status", AgentID: "windows-agent-01", HostID: "maya-win-01",
+			Slots: 1, State: "ready", SessionID: strings.Repeat("a", 32),
+		},
+		notify: make(chan struct{}), sessionExpiresAt: now.Add(hostAgentSessionLease),
+	}
+	transactionDir := filepath.Join(dataDir, "assignment-transactions")
+	if err := os.Remove(transactionDir); err != nil {
+		t.Fatalf("remove transaction directory: %v", err)
+	}
+	if err := os.WriteFile(transactionDir, []byte("blocked"), 0o600); err != nil {
+		t.Fatalf("block transaction directory: %v", err)
+	}
+	outcome, runErr := handler.runScenarioThroughHostAgent(repoDir, controlPlaneSubmission{
+		Version: controlPlaneAPIVersion, Scenario: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways,
+	}, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime)
+	if runErr == nil || !strings.Contains(runErr.Error(), "slot quarantined") || outcome.Result.Status != resultStatusFailed {
+		t.Fatalf("partial transition outcome = %+v, error = %v", outcome, runErr)
+	}
+	agent := handler.hostAgents["windows-agent-01"]
+	if agent.status.State != "quarantined" || agent.status.RunID == "" || agent.status.SessionID != "" {
+		t.Fatalf("Host Agent after partial transition = %+v", agent.status)
+	}
+	assignment := handler.assignments[outcome.RunID]
+	if assignment == nil || assignment.record.State != "quarantined" || !assignment.finished {
+		t.Fatalf("partial transition assignment = %+v", assignment)
+	}
+	if err := os.Remove(transactionDir); err != nil {
+		t.Fatalf("remove blocked transaction path: %v", err)
+	}
+	if err := os.Mkdir(transactionDir, 0o700); err != nil {
+		t.Fatalf("restore transaction directory: %v", err)
+	}
+	staleAssigned := assignment.record
+	staleAssigned.State = "assigned"
+	staleAssigned.Terminal = nil
+	staleAssigned.TerminalLedger = nil
+	if err := writePrivateJSON(filepath.Join(transactionDir, outcome.RunID+".json"), staleAssigned); err != nil {
+		t.Fatalf("persist stale assigned transition: %v", err)
+	}
+	restarted, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("restart with quarantine tombstone: %v", err)
+	}
+	restartedAgent := restarted.(*controlPlaneHandler).hostAgents[enrollment.AgentID]
+	if restartedAgent.status.State != "quarantined" || restartedAgent.status.RunID != outcome.RunID {
+		t.Fatalf("restarted quarantine tombstone = %+v", restartedAgent.status)
+	}
+	restartedAssignment := restarted.(*controlPlaneHandler).assignments[outcome.RunID]
+	if restartedAssignment == nil || restartedAssignment.record.State != "quarantined" || restartedAssignment.record.TerminalLedger == nil || restartedAssignment.record.TerminalLedger.Status != resultStatusFailed || restartedAssignment.record.TerminalLedger.Host != enrollment.HostID {
+		t.Fatalf("recovered stale transition = %+v", restartedAssignment)
+	}
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	restartedServer := httptest.NewTLSServer(restarted)
+	t.Cleanup(restartedServer.Close)
+	restartedRuntime := defaultRunRuntime()
+	restartedRuntime.ControlPlaneHTTPClient = restartedServer.Client()
+	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: enrollment.AgentID, HostID: enrollment.HostID, Slots: 1}
+	var restartedStatus hostAgentStatusResponse
+	if err := postControlPlaneJSON(restartedServer.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, restartedRuntime, http.StatusOK, &restartedStatus); err == nil {
+		t.Fatal("restarted quarantined Windows Host Agent registration succeeded")
+	} else if statusErr := new(controlPlaneHTTPStatusError); !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusConflict {
+		t.Fatalf("restarted quarantined registration error = %v", err)
+	}
+}
+
+func TestRegisteredHostAgentRejectsRetainedStopPolicyBeforeAssignment(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	dataDir := privateTempDir(t)
+	handler, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "operator-token")
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	enrollTestHostAgent(t, repoDir, server.URL, runtime)
+	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1}
+	var status hostAgentStatusResponse
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &status); err != nil {
+		t.Fatalf("register Windows Host Agent: %v", err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "--stop-after", "never", "smoke"}, &stdout, &stderr, repoDir, "test-version", runtime)
+	if code != 1 {
+		t.Fatalf("retained Stop Policy exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	status = readHostAgentStatus(t, server.Client(), server.URL, "windows-agent-01")
+	if status.State != "ready" || status.RunID != "" {
+		t.Fatalf("Host Agent after retained Stop Policy = %+v", status)
+	}
+	for _, child := range []string{"assignments", "host-locks"} {
+		entries, err := os.ReadDir(filepath.Join(dataDir, child))
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("%s after retained Stop Policy = %+v, err %v", child, entries, err)
+		}
+	}
+}
+
+func TestControlPlaneRecoversJournaledHostAgentAssignmentTransition(t *testing.T) {
+	dataDir := privateTempDir(t)
+	handler, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Setenv(defaultControlPlaneTokenEnv, "operator-token")
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	enrollTestHostAgent(t, t.TempDir(), server.URL, runtime)
+	server.Close()
+
+	record := hostAgentAssignmentRecord{
+		Version: hostAgentAPIVersion, RunID: "20260715T120000.000000000Z", AgentID: "windows-agent-01", HostID: "maya-win-01",
+		LockToken: strings.Repeat("a", 32), State: "confirmed", CreatedAt: "2026-07-15T12:00:00Z",
+		Submission: controlPlaneSubmission{Version: controlPlaneAPIVersion, Scenario: "smoke", StopAfter: stopAfterAlways},
+	}
+	repoDir := filepath.Join(dataDir, "runs", record.RunID, "repo")
+	if err := os.MkdirAll(repoDir, 0o700); err != nil {
+		t.Fatalf("create recovered run repo: %v", err)
+	}
+	acceptedRun := newFreshRun(repoDir, runOptions{
+		ScenarioName: "smoke", TargetProfile: "agent", StopAfter: stopAfterAlways, AssignedRunID: record.RunID,
+	}, defaultRunRuntime()).(*freshRunLifecycle)
+	if err := acceptedRun.accept(); err != nil {
+		t.Fatalf("accept recovered run fixture: %v", err)
+	}
+	assignedLedger, err := readRunLedgerRecord(repoDir, record.RunID)
+	if err != nil {
+		t.Fatalf("read recovered assigned ledger: %v", err)
+	}
+	assignedLedger.Host = record.HostID
+	record.AssignedLedger = &assignedLedger
+	transactionPath := filepath.Join(dataDir, "assignment-transactions", record.RunID+".json")
+	if err := writePrivateJSON(transactionPath, record); err != nil {
+		t.Fatalf("persist interrupted transition: %v", err)
+	}
+	restarted, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("recover journaled transition: %v", err)
+	}
+	if _, err := os.Stat(transactionPath); !os.IsNotExist(err) {
+		t.Fatalf("recovered transaction still exists: %v", err)
+	}
+	concrete := restarted.(*controlPlaneHandler)
+	assignment := concrete.assignments[record.RunID]
+	if assignment == nil || assignment.record.State != "confirmed" || assignment.record.LockToken != record.LockToken {
+		t.Fatalf("recovered assignment = %+v", assignment)
+	}
+	restartedServer := httptest.NewTLSServer(restarted)
+	t.Cleanup(restartedServer.Close)
+	restartedRuntime := defaultRunRuntime()
+	restartedRuntime.ControlPlaneHTTPClient = restartedServer.Client()
+	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: record.AgentID, HostID: record.HostID, Slots: 1}
+	var status hostAgentStatusResponse
+	if err := postControlPlaneJSON(restartedServer.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, restartedRuntime, http.StatusOK, &status); err == nil {
+		t.Fatal("replacement Windows Host Agent registered during restart grace")
+	} else if statusErr := new(controlPlaneHTTPStatusError); !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusConflict {
+		t.Fatalf("restart-grace registration error = %v", err)
+	}
+	concrete.hostAgents[record.AgentID].takeoverNotBefore = time.Now().Add(-time.Second)
+	if err := postControlPlaneJSON(restartedServer.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, restartedRuntime, http.StatusOK, &status); err == nil {
+		t.Fatal("replacement Windows Host Agent registered after confirmed assignment loss")
+	} else if statusErr := new(controlPlaneHTTPStatusError); !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusConflict {
+		t.Fatalf("expired restart-grace registration error = %v", err)
+	}
+	if assignment.record.State != "quarantined" || !assignment.finished {
+		t.Fatalf("lost recovered assignment = %+v", assignment)
+	}
+	var lock hostAgentLockRecord
+	if err := readPrivateJSON(filepath.Join(dataDir, "host-locks", record.HostID+".json"), &lock); err != nil {
+		t.Fatalf("read quarantined recovered Host Lock: %v", err)
+	}
+	if lock.State != "quarantined" || lock.RunID != record.RunID {
+		t.Fatalf("quarantined recovered Host Lock = %+v", lock)
+	}
+}
+
+func TestControlPlaneRecoversEachPartialHostAgentTransitionWrite(t *testing.T) {
+	for _, stage := range []string{"journal", "ledger", "host-lock", "assignment"} {
+		t.Run("active-"+stage, func(t *testing.T) {
+			dataDir := privateTempDir(t)
+			handler, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime())
+			if err != nil {
+				t.Fatalf("create Control Plane handler: %v", err)
+			}
+			server := httptest.NewTLSServer(handler)
+			t.Setenv(defaultControlPlaneTokenEnv, "operator-token")
+			t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+			runtime := defaultRunRuntime()
+			runtime.ControlPlaneHTTPClient = server.Client()
+			enrollTestHostAgent(t, t.TempDir(), server.URL, runtime)
+			server.Close()
+			record := hostAgentAssignmentRecord{
+				Version: hostAgentAPIVersion, RunID: "20260715T120000.000000000Z", AgentID: "windows-agent-01", HostID: "maya-win-01",
+				LockToken: strings.Repeat("a", 32), State: "confirmed", CreatedAt: "2026-07-15T12:00:00Z",
+				Submission: controlPlaneSubmission{Version: controlPlaneAPIVersion, Scenario: "smoke", StopAfter: stopAfterAlways},
+			}
+			repoDir := filepath.Join(dataDir, "runs", record.RunID, "repo")
+			if err := os.MkdirAll(repoDir, 0o700); err != nil {
+				t.Fatalf("create recovered run repo: %v", err)
+			}
+			accepted := newFreshRun(repoDir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways, AssignedRunID: record.RunID}, defaultRunRuntime()).(*freshRunLifecycle)
+			if err := accepted.accept(); err != nil {
+				t.Fatalf("accept recovered run: %v", err)
+			}
+			assigned, err := readRunLedgerRecord(repoDir, record.RunID)
+			if err != nil {
+				t.Fatalf("read assigned ledger: %v", err)
+			}
+			assigned.Host = record.HostID
+			record.AssignedLedger = &assigned
+			transactionPath := filepath.Join(dataDir, "assignment-transactions", record.RunID+".json")
+			if err := writePrivateJSON(transactionPath, record); err != nil {
+				t.Fatalf("write active transaction: %v", err)
+			}
+			concrete := handler.(*controlPlaneHandler)
+			if stage == "ledger" || stage == "host-lock" || stage == "assignment" {
+				if err := writeRunLedgerRecord(repoDir, assigned); err != nil {
+					t.Fatalf("write partial assigned ledger: %v", err)
+				}
+			}
+			if stage == "host-lock" || stage == "assignment" {
+				if err := concrete.persistHostLock(record, record.State); err != nil {
+					t.Fatalf("write partial Host Lock: %v", err)
+				}
+			}
+			if stage == "assignment" {
+				if err := concrete.persistAssignment(record); err != nil {
+					t.Fatalf("write partial assignment: %v", err)
+				}
+			}
+			if _, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime()); err != nil {
+				t.Fatalf("recover partial active transition: %v", err)
+			}
+			if _, err := os.Stat(transactionPath); !os.IsNotExist(err) {
+				t.Fatalf("active transaction remains: %v", err)
+			}
+			var durable hostAgentAssignmentRecord
+			if err := readPrivateJSON(filepath.Join(dataDir, "assignments", record.RunID+".json"), &durable); err != nil || durable.State != "confirmed" {
+				t.Fatalf("recovered active assignment = %+v err=%v", durable, err)
+			}
+		})
+	}
+
+	for _, stage := range []string{"journal", "assignment", "terminal-ledger", "lock-removal"} {
+		t.Run("completed-"+stage, func(t *testing.T) {
+			dataDir := privateTempDir(t)
+			handler, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime())
+			if err != nil {
+				t.Fatalf("create Control Plane handler: %v", err)
+			}
+			server := httptest.NewTLSServer(handler)
+			t.Setenv(defaultControlPlaneTokenEnv, "operator-token")
+			t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+			runtime := defaultRunRuntime()
+			runtime.ControlPlaneHTTPClient = server.Client()
+			enrollTestHostAgent(t, t.TempDir(), server.URL, runtime)
+			server.Close()
+			record := hostAgentAssignmentRecord{
+				Version: hostAgentAPIVersion, RunID: "20260715T120000.000000000Z", AgentID: "windows-agent-01", HostID: "maya-win-01",
+				LockToken: strings.Repeat("a", 32), State: "confirmed", CreatedAt: "2026-07-15T12:00:00Z",
+				Submission: controlPlaneSubmission{Version: controlPlaneAPIVersion, Scenario: "smoke", StopAfter: stopAfterAlways},
+			}
+			repoDir := filepath.Join(dataDir, "runs", record.RunID, "repo")
+			if err := os.MkdirAll(repoDir, 0o700); err != nil {
+				t.Fatalf("create completed run repo: %v", err)
+			}
+			accepted := newFreshRun(repoDir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways, AssignedRunID: record.RunID}, defaultRunRuntime()).(*freshRunLifecycle)
+			if err := accepted.accept(); err != nil {
+				t.Fatalf("accept completed run: %v", err)
+			}
+			assigned, err := readRunLedgerRecord(repoDir, record.RunID)
+			if err != nil {
+				t.Fatalf("read completed assigned ledger: %v", err)
+			}
+			assigned.Host = record.HostID
+			record.AssignedLedger = &assigned
+			concrete := handler.(*controlPlaneHandler)
+			if err := concrete.applyHostAgentTransition(record); err != nil {
+				t.Fatalf("persist active transition fixture: %v", err)
+			}
+			terminalLedger := assigned
+			terminalLedger.State = "failed"
+			terminalLedger.Status = resultStatusFailed
+			completed := record
+			completed.State = "completed"
+			completed.TerminalLedger = &terminalLedger
+			completed.Terminal = &runCommandJSON{Version: 1, Kind: "run", Accepted: true, RunID: record.RunID, Status: resultStatusFailed}
+			transactionPath := filepath.Join(dataDir, "assignment-transactions", record.RunID+".json")
+			if err := writePrivateJSON(transactionPath, completed); err != nil {
+				t.Fatalf("write completed transaction: %v", err)
+			}
+			if stage == "assignment" || stage == "terminal-ledger" || stage == "lock-removal" {
+				if err := concrete.persistAssignment(completed); err != nil {
+					t.Fatalf("write partial completed assignment: %v", err)
+				}
+			}
+			if stage == "terminal-ledger" || stage == "lock-removal" {
+				if err := writeRunLedgerRecord(repoDir, terminalLedger); err != nil {
+					t.Fatalf("write partial terminal ledger: %v", err)
+				}
+			}
+			if stage == "lock-removal" {
+				if err := os.Remove(concrete.hostLockPath(record.HostID)); err != nil {
+					t.Fatalf("remove partial completed Host Lock: %v", err)
+				}
+			}
+			if _, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime()); err != nil {
+				t.Fatalf("recover partial completed transition: %v", err)
+			}
+			if _, err := os.Stat(transactionPath); !os.IsNotExist(err) {
+				t.Fatalf("completed transaction remains: %v", err)
+			}
+			if _, err := os.Stat(concrete.hostLockPath(record.HostID)); !os.IsNotExist(err) {
+				t.Fatalf("completed Host Lock remains: %v", err)
+			}
+			ledger, err := readRunLedgerRecord(repoDir, record.RunID)
+			if err != nil || ledger.State != "failed" || ledger.Status != resultStatusFailed {
+				t.Fatalf("recovered terminal ledger = %+v err=%v", ledger, err)
+			}
+		})
+	}
+}
+
+func TestUnauthorizedWindowsHostAgentCannotRegisterOrMutateState(t *testing.T) {
+	dataDir := privateTempDir(t)
+	handler, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "operator-token")
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := RunWithRuntime([]string{
+		"control-plane", "enroll-agent", "--control-plane", server.URL,
+		"--agent-id", "windows-agent-01", "--host", "maya-win-01",
+		"--credential-env", "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL",
+	}, &stdout, &stderr, t.TempDir(), "test-version", runtime); code != 0 {
+		t.Fatalf("enroll Windows Host Agent exit code = %d; stderr: %s", code, stderr.String())
+	}
+
+	body, err := json.Marshal(hostAgentRegistrationRequest{
+		Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1,
+	})
+	if err != nil {
+		t.Fatalf("marshal registration: %v", err)
+	}
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/v1/host-agents/windows-agent-01/register", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("create registration request: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer wrong-agent-token")
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatalf("send unauthorized registration: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthorized registration HTTP status = %d, want 401", response.StatusCode)
+	}
+	status := readHostAgentStatus(t, server.Client(), server.URL, "windows-agent-01")
+	if status.State != "enrolled" || status.RunID != "" {
+		t.Fatalf("Host Agent state after unauthorized registration = %+v", status)
+	}
+	for _, child := range []string{"assignments", "host-locks"} {
+		entries, err := os.ReadDir(filepath.Join(dataDir, child))
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("%s after unauthorized registration = %+v, err %v", child, entries, err)
+		}
+	}
+}
+
+func TestStaleHostLockTokenIsRejectedWithoutMutation(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	dataDir := privateTempDir(t)
+	handler, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "operator-token")
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	enrollTestHostAgent(t, repoDir, server.URL, runtime)
+	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1}
+	var status hostAgentStatusResponse
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &status); err != nil {
+		t.Fatalf("register Windows Host Agent: %v", err)
+	}
+
+	var runStdout bytes.Buffer
+	var runStderr bytes.Buffer
+	runDone := make(chan int, 1)
+	go func() {
+		runDone <- RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &runStdout, &runStderr, repoDir, "test-version", runtime)
+	}()
+	waitForHostAgentState(t, server.Client(), server.URL, "windows-agent-01", "locked")
+	var assignment hostAgentAssignmentResponse
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/assignments/next", hostAgentNextRequest{Version: hostAgentAPIVersion, SessionID: status.SessionID}, runtime, http.StatusOK, &assignment); err != nil {
+		t.Fatalf("read Host Agent assignment: %v", err)
+	}
+	assignmentPath := filepath.Join(dataDir, "assignments", assignment.RunID+".json")
+	before, err := os.ReadFile(assignmentPath)
+	if err != nil {
+		t.Fatalf("read assignment before stale confirmation: %v", err)
+	}
+	stale := hostAgentLockRequest{Version: hostAgentAPIVersion, RunID: assignment.RunID, LockToken: strings.Repeat("0", len(assignment.LockToken)), SessionID: status.SessionID}
+	content, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatalf("marshal stale Host Lock confirmation: %v", err)
+	}
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/v1/host-agents/windows-agent-01/assignments/"+assignment.RunID+"/confirm", bytes.NewReader(content))
+	if err != nil {
+		t.Fatalf("create stale Host Lock request: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+testHostAgentCredential)
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatalf("send stale Host Lock confirmation: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("stale Host Lock confirmation HTTP = %d, want 409", response.StatusCode)
+	}
+	after, err := os.ReadFile(assignmentPath)
+	if err != nil {
+		t.Fatalf("read assignment after stale confirmation: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("stale Host Lock confirmation mutated assignment\nbefore: %s\nafter: %s", before, after)
+	}
+	status = readHostAgentStatus(t, server.Client(), server.URL, "windows-agent-01")
+	if status.State != "locked" || status.RunID != assignment.RunID {
+		t.Fatalf("Host Agent state after stale confirmation = %+v", status)
+	}
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/assignments/"+assignment.RunID+"/confirm", hostAgentLockRequest{
+		Version: hostAgentAPIVersion, RunID: assignment.RunID, LockToken: assignment.LockToken, SessionID: status.SessionID,
+	}, runtime, http.StatusOK, &status); err != nil {
+		t.Fatalf("confirm Host Agent assignment after stale token: %v", err)
+	}
+	confirmed, err := os.ReadFile(assignmentPath)
+	if err != nil {
+		t.Fatalf("read confirmed assignment: %v", err)
+	}
+	staleSession := strings.Repeat("9", len(status.SessionID))
+	requests := []struct {
+		name       string
+		path       string
+		body       any
+		credential string
+		want       int
+	}{
+		{"heartbeat-wrong-credential", "/v1/host-agents/windows-agent-01/heartbeat", hostAgentNextRequest{Version: hostAgentAPIVersion, SessionID: status.SessionID}, "wrong", http.StatusUnauthorized},
+		{"heartbeat-stale-session", "/v1/host-agents/windows-agent-01/heartbeat", hostAgentNextRequest{Version: hostAgentAPIVersion, SessionID: staleSession}, testHostAgentCredential, http.StatusConflict},
+		{"next-wrong-credential", "/v1/host-agents/windows-agent-01/assignments/next", hostAgentNextRequest{Version: hostAgentAPIVersion, SessionID: status.SessionID}, "wrong", http.StatusUnauthorized},
+		{"next-stale-session", "/v1/host-agents/windows-agent-01/assignments/next", hostAgentNextRequest{Version: hostAgentAPIVersion, SessionID: staleSession}, testHostAgentCredential, http.StatusConflict},
+		{"fail-wrong-credential", "/v1/host-agents/windows-agent-01/assignments/" + assignment.RunID + "/fail", hostAgentFailureRequest{Version: hostAgentAPIVersion, RunID: assignment.RunID, LockToken: assignment.LockToken, SessionID: status.SessionID, Diagnostic: "rejected"}, "wrong", http.StatusUnauthorized},
+		{"fail-stale-session", "/v1/host-agents/windows-agent-01/assignments/" + assignment.RunID + "/fail", hostAgentFailureRequest{Version: hostAgentAPIVersion, RunID: assignment.RunID, LockToken: assignment.LockToken, SessionID: staleSession, Diagnostic: "rejected"}, testHostAgentCredential, http.StatusConflict},
+		{"complete-wrong-credential", "/v1/host-agents/windows-agent-01/assignments/" + assignment.RunID + "/complete", hostAgentCompletionRequest{Version: hostAgentAPIVersion, RunID: assignment.RunID, LockToken: assignment.LockToken, SessionID: status.SessionID}, "wrong", http.StatusUnauthorized},
+		{"complete-stale-session", "/v1/host-agents/windows-agent-01/assignments/" + assignment.RunID + "/complete", hostAgentCompletionRequest{Version: hostAgentAPIVersion, RunID: assignment.RunID, LockToken: assignment.LockToken, SessionID: staleSession}, testHostAgentCredential, http.StatusConflict},
+	}
+	for _, test := range requests {
+		t.Run(test.name, func(t *testing.T) {
+			content, err := json.Marshal(test.body)
+			if err != nil {
+				t.Fatalf("marshal rejected request: %v", err)
+			}
+			request, err := http.NewRequest(http.MethodPost, server.URL+test.path, bytes.NewReader(content))
+			if err != nil {
+				t.Fatalf("create rejected request: %v", err)
+			}
+			request.Header.Set("Authorization", "Bearer "+test.credential)
+			response, err := server.Client().Do(request)
+			if err != nil {
+				t.Fatalf("send rejected request: %v", err)
+			}
+			_, _ = io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
+			if response.StatusCode != test.want {
+				t.Fatalf("rejected request HTTP = %d, want %d", response.StatusCode, test.want)
+			}
+			after, err := os.ReadFile(assignmentPath)
+			if err != nil || !bytes.Equal(after, confirmed) {
+				t.Fatalf("rejected request mutated assignment: %v\nbefore: %s\nafter: %s", err, confirmed, after)
+			}
+		})
+	}
+	simulateHostAgentProcessExit(t, handler, "windows-agent-01")
+	var replacement hostAgentStatusResponse
+	err = postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &replacement)
+	var registrationErr *controlPlaneHTTPStatusError
+	if !errors.As(err, &registrationErr) || registrationErr.StatusCode != http.StatusConflict {
+		t.Fatalf("confirmed Agent takeover error = %v, want HTTP 409", err)
+	}
+	select {
+	case code := <-runDone:
+		if code != 1 {
+			t.Fatalf("quarantined Scenario exit code = %d; stdout: %s stderr: %s", code, runStdout.String(), runStderr.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Control Plane did not publish quarantined Scenario failure")
+	}
+	status = readHostAgentStatus(t, server.Client(), server.URL, "windows-agent-01")
+	if status.State != "quarantined" {
+		t.Fatalf("automatic quarantine status = %+v", status)
+	}
+	var result controlPlaneResultResponse
+	if err := getControlPlaneJSON(server.URL, "", "/v1/runs/"+assignment.RunID+"/result", runtime, &result); err != nil {
+		t.Fatalf("read quarantined result: %v", err)
+	}
+	if !result.Final || result.Success || result.Status != resultStatusFailed || result.CleanupState != "failed" {
+		t.Fatalf("quarantined durable result = %+v", result)
+	}
+}
+
+func TestSecondAssignmentToSameMayaHostIsRejectedWithoutMutation(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	dataDir := privateTempDir(t)
+	agentWorkRoot := privateTempDir(t)
+	handler, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "operator-token")
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	enrollTestHostAgent(t, repoDir, server.URL, runtime)
+	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1}
+	var registered hostAgentStatusResponse
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &registered); err != nil {
+		t.Fatalf("register Windows Host Agent: %v", err)
+	}
+
+	var firstStdout bytes.Buffer
+	var firstStderr bytes.Buffer
+	firstDone := make(chan int, 1)
+	go func() {
+		firstDone <- RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &firstStdout, &firstStderr, repoDir, "test-version", runtime)
+	}()
+	waitForHostAgentState(t, server.Client(), server.URL, "windows-agent-01", "locked")
+	locked := readHostAgentStatus(t, server.Client(), server.URL, "windows-agent-01")
+	lockPath := filepath.Join(dataDir, "host-locks", "maya-win-01.json")
+	assignmentPath := filepath.Join(dataDir, "assignments", locked.RunID+".json")
+	lockBefore, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("read first Host Lock: %v", err)
+	}
+	assignmentBefore, err := os.ReadFile(assignmentPath)
+	if err != nil {
+		t.Fatalf("read first assignment: %v", err)
+	}
+
+	var secondStdout bytes.Buffer
+	var secondStderr bytes.Buffer
+	secondCode := RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &secondStdout, &secondStderr, repoDir, "test-version", runtime)
+	if secondCode != 1 {
+		t.Fatalf("second assignment exit code = %d, want 1; stdout: %s stderr: %s", secondCode, secondStdout.String(), secondStderr.String())
+	}
+	second := decodeRunJSONLines(t, secondStdout.Bytes())
+	if len(second) != 2 || second[1].FailedLayer != string(failureLayerHostSelection) {
+		t.Fatalf("second assignment result = %+v, want host-selection failure", second)
+	}
+	lockAfter, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("read first Host Lock after contention: %v", err)
+	}
+	assignmentAfter, err := os.ReadFile(assignmentPath)
+	if err != nil {
+		t.Fatalf("read first assignment after contention: %v", err)
+	}
+	if !bytes.Equal(lockBefore, lockAfter) || !bytes.Equal(assignmentBefore, assignmentAfter) {
+		t.Fatalf("second assignment mutated the active Host Lock or assignment")
+	}
+	stillLocked := readHostAgentStatus(t, server.Client(), server.URL, "windows-agent-01")
+	if stillLocked.State != "locked" || stillLocked.RunID != locked.RunID {
+		t.Fatalf("Host Agent after second assignment = %+v, want first lock unchanged", stillLocked)
+	}
+	simulateHostAgentProcessExit(t, handler, "windows-agent-01")
+
+	agentDone := make(chan int, 1)
+	go func() {
+		agentDone <- RunWithRuntime([]string{
+			"host-agent", "run-once", "--control-plane", server.URL,
+			"--agent-id", "windows-agent-01", "--host", "maya-win-01",
+			"--work-root", agentWorkRoot, "--credential-env", "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL",
+		}, io.Discard, io.Discard, repoDir, "test-version", runtime)
+	}()
+	select {
+	case code := <-agentDone:
+		if code != 0 {
+			t.Fatalf("Windows Host Agent cleanup exit code = %d", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Windows Host Agent did not finish first assignment")
+	}
+	select {
+	case code := <-firstDone:
+		if code != 0 {
+			t.Fatalf("first Scenario exit code = %d; stdout: %s stderr: %s", code, firstStdout.String(), firstStderr.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Control Plane did not finish first assignment")
+	}
+}
+
+func TestControlPlaneRestartKeepsDurableHostLockUnavailable(t *testing.T) {
+	dataDir := privateTempDir(t)
+	handler, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Setenv(defaultControlPlaneTokenEnv, "operator-token")
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	enrollTestHostAgent(t, t.TempDir(), server.URL, runtime)
+	server.Close()
+
+	runID := "20260715T120000.000000000Z"
+	token := strings.Repeat("a", 32)
+	createdAt := "2026-07-15T12:00:00Z"
+	assignment := hostAgentAssignmentRecord{
+		Version: hostAgentAPIVersion, RunID: runID, AgentID: "windows-agent-01", HostID: "maya-win-01",
+		LockToken: token, State: "assigned", CreatedAt: createdAt,
+		Submission: controlPlaneSubmission{Version: controlPlaneAPIVersion, Scenario: "smoke", StopAfter: stopAfterAlways},
+	}
+	lock := hostAgentLockRecord{
+		Version: hostAgentAPIVersion, RunID: runID, AgentID: "windows-agent-01", HostID: "maya-win-01",
+		LockToken: token, State: "assigned", CreatedAt: createdAt,
+	}
+	if err := writePrivateJSON(filepath.Join(dataDir, "assignments", runID+".json"), assignment); err != nil {
+		t.Fatalf("persist assignment fixture: %v", err)
+	}
+	if err := writePrivateJSON(filepath.Join(dataDir, "host-locks", "maya-win-01.json"), lock); err != nil {
+		t.Fatalf("persist Host Lock fixture: %v", err)
+	}
+
+	restartStartedAt := time.Now()
+	restartedHandler, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("restart Control Plane handler: %v", err)
+	}
+	sharedLock, err := os.ReadFile(filepath.Join(dataDir, "fake-host", ".maya-stall", "state", "locks", "hosts", "maya-win-01.lock"))
+	if err != nil {
+		t.Fatalf("read re-established shared Host Lock: %v", err)
+	}
+	if !bytes.Contains(sharedLock, []byte(fmt.Sprintf("pid: %d", os.Getpid()))) || !bytes.Contains(sharedLock, []byte("activeRun: "+runID)) {
+		t.Fatalf("re-established shared Host Lock = %q", sharedLock)
+	}
+	restartedAgent := restartedHandler.(*controlPlaneHandler).hostAgents["windows-agent-01"]
+	minimumGrace := hostAgentHeartbeatInterval + hostAgentHeartbeatRequestTimeout + defaultBrokerCancellationWait
+	if restartedAgent.takeoverNotBefore.Before(restartStartedAt.Add(minimumGrace)) {
+		t.Fatalf("restart takeover grace ends at %s, want at least %s", restartedAgent.takeoverNotBefore, restartStartedAt.Add(minimumGrace))
+	}
+	restartedAgent.takeoverNotBefore = time.Time{}
+	restarted := httptest.NewTLSServer(restartedHandler)
+	t.Cleanup(restarted.Close)
+	restartedRuntime := defaultRunRuntime()
+	restartedRuntime.ControlPlaneHTTPClient = restarted.Client()
+	status := readHostAgentStatus(t, restarted.Client(), restarted.URL, "windows-agent-01")
+	if status.State != "offline" || status.RunID != runID {
+		t.Fatalf("restarted Host Agent status = %+v, want offline with durable Run ID", status)
+	}
+	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1}
+	if err := postControlPlaneJSON(restarted.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, restartedRuntime, http.StatusOK, &status); err != nil {
+		t.Fatalf("register restarted Windows Host Agent: %v", err)
+	}
+	if status.State != "locked" || status.RunID != runID {
+		t.Fatalf("restarted registered Host Agent status = %+v, want durable lock", status)
+	}
+	var next hostAgentAssignmentResponse
+	if err := postControlPlaneJSON(restarted.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/assignments/next", hostAgentNextRequest{Version: hostAgentAPIVersion, SessionID: status.SessionID}, restartedRuntime, http.StatusOK, &next); err != nil {
+		t.Fatalf("read restarted assignment: %v", err)
+	}
+	if next.RunID != runID || next.LockToken != token || next.HostID != "maya-win-01" {
+		t.Fatalf("restarted assignment = %+v", next)
+	}
+}
+
+func enrollTestHostAgent(t *testing.T, workDir string, serverURL string, runtime runRuntime) {
+	t.Helper()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := RunWithRuntime([]string{
+		"control-plane", "enroll-agent", "--control-plane", serverURL,
+		"--agent-id", "windows-agent-01", "--host", "maya-win-01",
+		"--credential-env", "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL",
+	}, &stdout, &stderr, workDir, "test-version", runtime); code != 0 {
+		t.Fatalf("enroll Windows Host Agent exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+}
+
+func simulateHostAgentProcessExit(t *testing.T, handler http.Handler, agentID string) {
+	t.Helper()
+	concrete, ok := handler.(*controlPlaneHandler)
+	if !ok {
+		t.Fatal("Control Plane test handler has unexpected type")
+	}
+	concrete.mu.Lock()
+	defer concrete.mu.Unlock()
+	agent := concrete.hostAgents[agentID]
+	if agent == nil {
+		t.Fatalf("Windows Host Agent %s not found", agentID)
+	}
+	agent.status.SessionID = ""
+}
+
+func waitForHostAgentState(t *testing.T, client *http.Client, serverURL string, agentID string, want string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		request, err := http.NewRequest(http.MethodGet, serverURL+"/v1/host-agents/"+agentID+"/status", nil)
+		if err != nil {
+			t.Fatalf("create Host Agent status request: %v", err)
+		}
+		request.Header.Set("Authorization", "Bearer operator-token")
+		response, err := client.Do(request)
+		if err == nil && response.StatusCode == http.StatusOK {
+			var status struct {
+				State string `json:"state"`
+			}
+			decodeErr := json.NewDecoder(response.Body).Decode(&status)
+			_ = response.Body.Close()
+			if decodeErr == nil && status.State == want {
+				return
+			}
+		} else if response != nil {
+			_ = response.Body.Close()
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Host Agent %s did not reach state %s", agentID, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func readHostAgentStatus(t *testing.T, client *http.Client, serverURL string, agentID string) hostAgentStatusResponse {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, serverURL+"/v1/host-agents/"+agentID+"/status", nil)
+	if err != nil {
+		t.Fatalf("create Host Agent status request: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer operator-token")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("read Host Agent status: %v", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("Host Agent status HTTP = %d, want 200", response.StatusCode)
+	}
+	var status hostAgentStatusResponse
+	if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+		t.Fatalf("decode Host Agent status: %v", err)
+	}
+	return status
+}

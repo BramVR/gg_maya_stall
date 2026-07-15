@@ -18,6 +18,8 @@ import (
 	"time"
 )
 
+const defaultBrokerCancellationWait = 10 * time.Second
+
 const resultStatusPassed = "passed"
 const resultStatusFailed = "failed"
 const scenarioResultEnvVar = "MAYA_STALL_SCENARIO_RESULT"
@@ -38,6 +40,8 @@ type runRuntime struct {
 	AcceptedCheck          func() error
 	ControlPlaneHTTPClient *http.Client
 	ControlPlaneServe      func(controlPlaneServeOptions, http.Handler) error
+	Cancel                 <-chan error
+	CancelWait             time.Duration
 }
 
 type runHost interface {

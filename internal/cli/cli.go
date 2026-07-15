@@ -222,17 +222,48 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 		printDesktopControlOutcome(stdout, outcome)
 		return 0
 	case "control-plane":
-		if len(args) < 2 || args[1] != "serve" {
-			_, _ = fmt.Fprintln(stderr, "maya-stall control-plane: expected serve")
+		if len(args) < 2 {
+			_, _ = fmt.Fprintln(stderr, "maya-stall control-plane: expected serve or enroll-agent")
 			return 2
 		}
-		options, err := parseControlPlaneServeArgs(args[2:], workDir)
+		switch args[1] {
+		case "serve":
+			options, err := parseControlPlaneServeArgs(args[2:], workDir)
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "maya-stall control-plane serve: %v\n", err)
+				return 2
+			}
+			if err := runControlPlaneServer(options, runtime, stdout); err != nil {
+				_, _ = fmt.Fprintf(stderr, "maya-stall control-plane serve: %v\n", err)
+				return 1
+			}
+		case "enroll-agent":
+			options, err := parseControlPlaneEnrollAgentArgs(args[2:])
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "maya-stall control-plane enroll-agent: %v\n", err)
+				return 2
+			}
+			if err := enrollControlPlaneHostAgent(options, runtime, stdout); err != nil {
+				_, _ = fmt.Fprintf(stderr, "maya-stall control-plane enroll-agent: %v\n", err)
+				return 1
+			}
+		default:
+			_, _ = fmt.Fprintln(stderr, "maya-stall control-plane: expected serve or enroll-agent")
+			return 2
+		}
+		return 0
+	case "host-agent":
+		if len(args) < 2 || args[1] != "run-once" {
+			_, _ = fmt.Fprintln(stderr, "maya-stall host-agent: expected run-once")
+			return 2
+		}
+		options, err := parseHostAgentRunOnceArgs(args[2:], workDir)
 		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "maya-stall control-plane serve: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "maya-stall host-agent run-once: %v\n", err)
 			return 2
 		}
-		if err := runControlPlaneServer(options, runtime, stdout); err != nil {
-			_, _ = fmt.Fprintf(stderr, "maya-stall control-plane serve: %v\n", err)
+		if err := runHostAgentOnce(options, runtime, stdout); err != nil {
+			_, _ = fmt.Fprintf(stderr, "maya-stall host-agent run-once: %v\n", err)
 			return 1
 		}
 		return 0
@@ -545,6 +576,8 @@ Usage:
   maya-stall logs [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] <run-id>
   maya-stall result [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] <run-id>
   maya-stall control-plane serve --data-dir <path> --tls-cert <path> --tls-key <path> [--listen <host:port>] [--token-env <name>]
+  maya-stall control-plane enroll-agent --control-plane <https-url> --agent-id <id> --host <id> --credential-env <name> [--token-env <name>]
+  maya-stall host-agent run-once --control-plane <https-url> --agent-id <id> --host <id> --work-root <path> --credential-env <name>
   maya-stall screenshot [--host-config <path>] [--target-profile <name>] [--host <id>]
   maya-stall record [--host-config <path>] [--target-profile <name>] [--host <id>]
   maya-stall control click --x <pixels> --y <pixels> [--host-config <path>] [--target-profile <name>] [--host <id>] [--dry-run]
@@ -561,6 +594,7 @@ Commands:
   attach   observe a run or perform run-scoped screenshot/control
   control click   send an explicit desktop click through the Session Broker
   control-plane serve   run the authenticated HTTPS Control Plane
+  control-plane enroll-agent   enroll one scoped Windows Host Agent credential
   doctor   check local config, Target Profile, and Host Health layers
   evidence collect   run a Scenario and write a complete Evidence Bundle
   evidence publish   copy an Evidence Bundle to a filesystem Evidence Store
@@ -568,6 +602,7 @@ Commands:
   init      write a repo-only sample .maya-stall.yaml
   logs      read bounded retained logs for one run
   history   list durable embedded run history
+  host-agent run-once   execute one fake assignment through outbound HTTPS
   plan      inspect a normalized Scenario and optional host compatibility without host contact
   record   capture a Session Broker recording artifact
   review-comment   create or update a GitHub PR or GitLab MR Review Comment
@@ -793,7 +828,8 @@ func newUsageError(format string, args ...any) error {
 
 func defaultRunRuntime() runRuntime {
 	return runRuntime{
-		Now: time.Now,
+		Now:        time.Now,
+		CancelWait: defaultBrokerCancellationWait,
 	}
 }
 

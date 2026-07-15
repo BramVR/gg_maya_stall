@@ -31,6 +31,9 @@ type freshRunLifecycle struct {
 	session                       brokerSessionIdentity
 	sessionStarted                bool
 	sessionSettled                bool
+	sessionStopAttempted          bool
+	cancellationObserved          bool
+	sessionOperationUnsettled     bool
 	sessionRetained               bool
 	brokerResult                  ScenarioResult
 	result                        ScenarioResult
@@ -101,14 +104,39 @@ func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 				err = errors.Join(err, evidenceErr)
 			}
 		}
-		cleanupIncomplete := run.failure != nil && run.failure.CleanupState == "pending" && !run.releaseHostLock
-		if run.sessionStarted && !run.sessionSettled {
-			if stopErr := run.runtime.Broker.StopSession(run.context, run.session); stopErr != nil {
+		cleanupIncomplete := run.sessionStartAttempted && run.failure != nil && run.failure.CleanupState == "pending" && !run.releaseHostLock
+		if run.sessionOperationUnsettled {
+			run.releaseHostLock = false
+			cleanupIncomplete = true
+		}
+		if run.sessionOperationUnsettled && run.sessionStarted && !run.sessionStopAttempted {
+			if stopErr := run.stopSessionDuringSettlement(); stopErr != nil {
+				err = errors.Join(err, fmt.Errorf("stop Maya UI Session for %s after unsettled host operation: %w", run.manifest.RunID, stopErr))
+			}
+		}
+		if run.sessionStarted && run.sessionSettled && run.sessionStopAttempted && run.releaseHostLock && !run.sessionOperationUnsettled {
+			syncErr := run.syncEvidenceEvents()
+			if syncErr != nil {
+				err = errors.Join(err, syncErr)
+				cleanupIncomplete = true
+				if preserveErr := run.preserveStoppedRunForCleanup(); preserveErr != nil {
+					err = errors.Join(err, preserveErr)
+				}
+			} else if cleanupErr := run.finishStoppedRunCleanup(); cleanupErr != nil {
+				err = errors.Join(err, cleanupErr)
+				cleanupIncomplete = true
+			}
+		}
+		if run.sessionStarted && !run.sessionSettled && run.sessionStopAttempted && run.sessionOperationUnsettled {
+			run.releaseHostLock = false
+			cleanupIncomplete = true
+		}
+		if run.sessionStarted && !run.sessionSettled && !run.sessionOperationUnsettled {
+			if stopErr := run.stopSessionDuringSettlement(); stopErr != nil {
 				err = errors.Join(err, fmt.Errorf("stop Maya UI Session for %s after run failure: %w", run.manifest.RunID, stopErr))
 				run.releaseHostLock = false
 				cleanupIncomplete = true
 			} else {
-				run.sessionSettled = true
 				syncErr := run.syncEvidenceEvents()
 				if syncErr != nil {
 					err = errors.Join(err, syncErr)
@@ -181,6 +209,9 @@ func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 		}
 		return run.finishFailedRun(err)
 	}
+	if err := run.cancellationError(); err != nil {
+		return run.finishFailedRun(err)
+	}
 	if err := run.hostLockHeartbeatError(); err != nil {
 		return run.finishFailedRun(err)
 	}
@@ -190,8 +221,118 @@ func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 	if err := run.hostLockHeartbeatError(); err != nil {
 		return run.finishFailedRun(err)
 	}
+	if err := run.cancellationError(); err != nil {
+		return run.finishFailedRun(err)
+	}
 	outcome, err = run.settle()
 	return outcome, err
+}
+
+func (run *freshRunLifecycle) cancellationError() error {
+	if run.runtime.Cancel == nil {
+		return nil
+	}
+	select {
+	case err := <-run.runtime.Cancel:
+		run.cancellationObserved = true
+		return err
+	default:
+		return nil
+	}
+}
+
+func (run *freshRunLifecycle) runPostSessionOperation(name string, operation func() error) error {
+	if run.runtime.Cancel == nil {
+		return operation()
+	}
+	finished := make(chan error, 1)
+	go func() { finished <- operation() }()
+	select {
+	case err := <-finished:
+		return err
+	case cancelErr := <-run.runtime.Cancel:
+		run.cancellationObserved = true
+		wait := run.runtime.CancelWait
+		if wait <= 0 {
+			wait = defaultBrokerCancellationWait
+		}
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case operationErr := <-finished:
+			return errors.Join(cancelErr, operationErr)
+		case <-timer.C:
+			run.sessionOperationUnsettled = true
+			return errors.Join(cancelErr, fmt.Errorf("%s did not finish within %s after cancellation", name, wait))
+		}
+	}
+}
+
+func (run *freshRunLifecycle) stopSessionAfterFailure() error {
+	run.sessionStopAttempted = true
+	if !run.cancellationObserved {
+		err := run.runtime.Broker.StopSession(run.context, run.session)
+		if err == nil {
+			run.sessionSettled = true
+		}
+		return err
+	}
+	wait := run.runtime.CancelWait
+	if wait <= 0 {
+		wait = defaultBrokerCancellationWait
+	}
+	run.sessionStopAttempted = true
+	stopped := make(chan error, 1)
+	go func() { stopped <- run.runtime.Broker.StopSession(run.context, run.session) }()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case err := <-stopped:
+		if err == nil {
+			run.sessionSettled = true
+		}
+		return err
+	case <-timer.C:
+		run.sessionOperationUnsettled = true
+		return fmt.Errorf("Session Broker did not stop within %s after cancellation", wait)
+	}
+}
+
+func (run *freshRunLifecycle) stopSessionDuringSettlement() error {
+	run.sessionStopAttempted = true
+	if run.cancellationObserved {
+		return run.stopSessionAfterFailure()
+	}
+	if run.runtime.Cancel == nil {
+		return run.stopSessionAfterFailure()
+	}
+	stopped := make(chan error, 1)
+	go func() { stopped <- run.runtime.Broker.StopSession(run.context, run.session) }()
+	select {
+	case err := <-stopped:
+		if err == nil {
+			run.sessionSettled = true
+		}
+		return err
+	case cancelErr := <-run.runtime.Cancel:
+		run.cancellationObserved = true
+		wait := run.runtime.CancelWait
+		if wait <= 0 {
+			wait = defaultBrokerCancellationWait
+		}
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case stopErr := <-stopped:
+			if stopErr == nil {
+				run.sessionSettled = true
+			}
+			return errors.Join(cancelErr, stopErr)
+		case <-timer.C:
+			run.sessionOperationUnsettled = true
+			return errors.Join(cancelErr, fmt.Errorf("Session Broker did not stop within %s after cancellation", wait))
+		}
+	}
 }
 
 func (run *freshRunLifecycle) cleanupUnacceptedOwnership() error {
@@ -213,6 +354,9 @@ func (run *freshRunLifecycle) cleanupUnacceptedOwnership() error {
 
 func (run *freshRunLifecycle) setup() error {
 	if err := run.accept(); err != nil {
+		return err
+	}
+	if err := run.cancellationError(); err != nil {
 		return err
 	}
 	run.failedLayer = failureLayerRepoConfig
@@ -316,6 +460,9 @@ func (run *freshRunLifecycle) setup() error {
 	if run.runtime.ReadinessBroker != nil {
 		readinessBroker = run.runtime.ReadinessBroker
 	}
+	if err := run.cancellationError(); err != nil {
+		return err
+	}
 	if err := probeHostReadiness(readinessHost, readinessBroker, host.HostID, preRunProbeLayerTimeout); err != nil {
 		return err
 	}
@@ -330,6 +477,9 @@ func (run *freshRunLifecycle) setup() error {
 	}
 	run.failedLayer = failureLayerRemoteCheck
 	if err := ensureTrustedPluginArtifactSnapshotAllowlistedForRun(run.context, host.Config, scenario); err != nil {
+		return err
+	}
+	if err := run.cancellationError(); err != nil {
 		return err
 	}
 
@@ -347,10 +497,16 @@ func (run *freshRunLifecycle) setup() error {
 	if err := run.startFreshSession(); err != nil {
 		return err
 	}
+	if err := run.cancellationError(); err != nil {
+		return err
+	}
 	if err := run.renewHostLockNow(); err != nil {
 		return err
 	}
-	return run.runtime.Host.StagePayload(run.context, scenario.Payload)
+	if err := run.stagePayloadWithCancellation(scenario.Payload); err != nil {
+		return err
+	}
+	return run.cancellationError()
 }
 
 func (run *freshRunLifecycle) accept() error {
@@ -765,7 +921,7 @@ func (run *freshRunLifecycle) startFreshSession() error {
 		return err
 	}
 	run.sessionStartAttempted = true
-	session, err := run.runtime.Broker.StartFreshSession(run.context, run.scenario.Config)
+	session, err := run.startSessionWithCancellation()
 	if err == nil && (session.BrokerAdapter == "" || session.SessionID == "") {
 		run.releaseHostLock = false
 		err = fmt.Errorf("session broker started without an owned session identity")
@@ -809,11 +965,73 @@ func (run *freshRunLifecycle) startFreshSession() error {
 	return nil
 }
 
+func (run *freshRunLifecycle) startSessionWithCancellation() (brokerSessionIdentity, error) {
+	if run.runtime.Cancel == nil {
+		return run.runtime.Broker.StartFreshSession(run.context, run.scenario.Config)
+	}
+	type result struct {
+		session brokerSessionIdentity
+		err     error
+	}
+	finished := make(chan result, 1)
+	go func() {
+		session, err := run.runtime.Broker.StartFreshSession(run.context, run.scenario.Config)
+		finished <- result{session: session, err: err}
+	}()
+	select {
+	case outcome := <-finished:
+		return outcome.session, outcome.err
+	case cancelErr := <-run.runtime.Cancel:
+		run.cancellationObserved = true
+		wait := run.runtime.CancelWait
+		if wait <= 0 {
+			wait = defaultBrokerCancellationWait
+		}
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case outcome := <-finished:
+			return outcome.session, errors.Join(cancelErr, outcome.err)
+		case <-timer.C:
+			run.sessionOperationUnsettled = true
+			run.releaseHostLock = false
+			return brokerSessionIdentity{}, errors.Join(cancelErr, fmt.Errorf("Session Broker did not finish startup within %s after cancellation", wait))
+		}
+	}
+}
+
+func (run *freshRunLifecycle) stagePayloadWithCancellation(payload []manifestPayload) error {
+	if run.runtime.Cancel == nil {
+		return run.runtime.Host.StagePayload(run.context, payload)
+	}
+	finished := make(chan error, 1)
+	go func() { finished <- run.runtime.Host.StagePayload(run.context, payload) }()
+	select {
+	case err := <-finished:
+		return err
+	case cancelErr := <-run.runtime.Cancel:
+		run.cancellationObserved = true
+		wait := run.runtime.CancelWait
+		if wait <= 0 {
+			wait = defaultBrokerCancellationWait
+		}
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case err := <-finished:
+			return errors.Join(cancelErr, err)
+		case <-timer.C:
+			run.sessionOperationUnsettled = true
+			return errors.Join(cancelErr, fmt.Errorf("Host payload staging did not finish within %s after cancellation", wait))
+		}
+	}
+}
+
 func (run *freshRunLifecycle) execute() error {
 	if err := run.renewHostLockNow(); err != nil {
 		return err
 	}
-	result, err := run.runtime.Broker.RunScenario(run.context, run.scenario.Config)
+	result, err := run.runBrokerScenario()
 	if lockErr := run.renewHostLockNow(); lockErr != nil {
 		return errors.Join(err, lockErr)
 	}
@@ -839,6 +1057,55 @@ func (run *freshRunLifecycle) execute() error {
 	return nil
 }
 
+func (run *freshRunLifecycle) runBrokerScenario() (ScenarioResult, error) {
+	if run.runtime.Cancel == nil {
+		return run.runtime.Broker.RunScenario(run.context, run.scenario.Config)
+	}
+	type brokerRun struct {
+		result ScenarioResult
+		err    error
+	}
+	finished := make(chan brokerRun, 1)
+	go func() {
+		result, err := run.runtime.Broker.RunScenario(run.context, run.scenario.Config)
+		finished <- brokerRun{result: result, err: err}
+	}()
+	select {
+	case outcome := <-finished:
+		return outcome.result, outcome.err
+	case cancelErr := <-run.runtime.Cancel:
+		run.cancellationObserved = true
+		wait := run.runtime.CancelWait
+		if wait <= 0 {
+			wait = defaultBrokerCancellationWait
+		}
+		stopped := make(chan error, 1)
+		run.sessionStopAttempted = true
+		go func() { stopped <- run.runtime.Broker.StopSession(run.context, run.session) }()
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		var outcome brokerRun
+		var stopErr error
+		brokerDone := false
+		stopDone := false
+		for !brokerDone || !stopDone {
+			select {
+			case outcome = <-finished:
+				brokerDone = true
+			case stopErr = <-stopped:
+				stopDone = true
+			case <-timer.C:
+				run.sessionOperationUnsettled = true
+				return ScenarioResult{}, errors.Join(cancelErr, stopErr, fmt.Errorf("Session Broker did not stop within %s after cancellation", wait))
+			}
+		}
+		if stopErr == nil {
+			run.sessionSettled = true
+		}
+		return outcome.result, errors.Join(cancelErr, stopErr, outcome.err)
+	}
+}
+
 func (run *freshRunLifecycle) collectBrokerFailureArtifacts(runErr error) error {
 	if err := ensureFailureLog(run.context, runErr); err != nil {
 		return err
@@ -848,7 +1115,9 @@ func (run *freshRunLifecycle) collectBrokerFailureArtifacts(runErr error) error 
 		return err
 	}
 	if collector, ok := run.runtime.Host.(failureArtifactCollector); ok {
-		if err := collector.CollectFailureArtifacts(run.context, run.scenario); err != nil {
+		if err := run.runPostSessionOperation("Host failure artifact collection", func() error {
+			return collector.CollectFailureArtifacts(run.context, run.scenario)
+		}); err != nil {
 			if eventErr := appendEvent(run.context.EventsPath, "run.failed-before-result-collection.artifact-collection-failed", err.Error()); eventErr != nil {
 				return eventErr
 			}
@@ -856,7 +1125,9 @@ func (run *freshRunLifecycle) collectBrokerFailureArtifacts(runErr error) error 
 			return err
 		}
 	} else if collector, ok := run.runtime.Host.(artifactCollector); ok {
-		if err := collector.CollectArtifacts(run.context, run.scenario); err != nil {
+		if err := run.runPostSessionOperation("Host artifact collection", func() error {
+			return collector.CollectArtifacts(run.context, run.scenario)
+		}); err != nil {
 			if eventErr := appendEvent(run.context.EventsPath, "run.failed-before-result-collection.artifact-collection-failed", err.Error()); eventErr != nil {
 				return eventErr
 			}
@@ -978,6 +1249,9 @@ func appendFile(path string, content string) error {
 }
 
 func (run *freshRunLifecycle) settle() (runOutcome, error) {
+	if err := run.cancellationError(); err != nil {
+		return runOutcome{}, err
+	}
 	if err := run.renewHostLockNow(); err != nil {
 		return runOutcome{}, err
 	}
@@ -985,10 +1259,15 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 		if err := run.renewHostLockNow(); err != nil {
 			return runOutcome{}, err
 		}
-		if err := collector.CollectArtifacts(run.context, run.scenario); err != nil {
+		if err := run.runPostSessionOperation("Host artifact collection", func() error {
+			return collector.CollectArtifacts(run.context, run.scenario)
+		}); err != nil {
 			return runOutcome{}, err
 		}
 		if err := run.hostLockHeartbeatError(); err != nil {
+			return runOutcome{}, err
+		}
+		if err := run.cancellationError(); err != nil {
 			return runOutcome{}, err
 		}
 	}
@@ -1017,11 +1296,22 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 		if err := run.renewHostLockNow(); err != nil {
 			return runOutcome{}, err
 		}
-		run.visualEvidence, err = collectScenarioVisualEvidence(run.runtime.Broker, run.context, run.scenario.Name, run.scenario.Config.Evidence)
+		var visualEvidence []visualEvidenceArtifact
+		err = run.runPostSessionOperation("visual evidence collection", func() error {
+			var collectionErr error
+			visualEvidence, collectionErr = collectScenarioVisualEvidence(run.runtime.Broker, run.context, run.scenario.Name, run.scenario.Config.Evidence)
+			return collectionErr
+		})
+		if !run.sessionOperationUnsettled {
+			run.visualEvidence = visualEvidence
+		}
 		if err != nil {
 			return runOutcome{}, err
 		}
 		run.visualEvidenceCaptureComplete = true
+		if err := run.cancellationError(); err != nil {
+			return runOutcome{}, err
+		}
 	}
 	annotateVisualEvidenceTarget(run.visualEvidence, run.manifest.TargetProfile, run.manifest.Host)
 	runScopedVisualEvidence, err := readRunScopedVisualEvidence(run.context)
@@ -1062,13 +1352,20 @@ func (run *freshRunLifecycle) settle() (runOutcome, error) {
 		return runOutcome{}, err
 	}
 	if run.stopPolicy == "stopped" {
+		if err := run.cancellationError(); err != nil {
+			return runOutcome{}, err
+		}
 		if err := run.renewHostLockNow(); err != nil {
 			return runOutcome{}, err
 		}
-		if err := run.runtime.Broker.StopSession(run.context, run.session); err != nil {
-			return runOutcome{}, fmt.Errorf("stop Maya UI Session for %s: %w", run.manifest.RunID, err)
+		if !run.sessionSettled {
+			if err := run.stopSessionDuringSettlement(); err != nil {
+				return runOutcome{}, fmt.Errorf("stop Maya UI Session for %s: %w", run.manifest.RunID, err)
+			}
 		}
-		run.sessionSettled = true
+		if err := run.cancellationError(); err != nil {
+			return runOutcome{}, err
+		}
 		syncErr := run.syncEvidenceEvents()
 		if syncErr != nil {
 			preserveErr := run.preserveStoppedRunForCleanup()

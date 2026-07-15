@@ -177,6 +177,7 @@ func TestOptInRealSSHRunSmoke(t *testing.T) {
 		t.Fatalf("real SSH retention stop missing run id:\n%s", stopStdout.String())
 	}
 	restoreLiveSessionBrokerFixture(t, host)
+	t.Run("shared Host Agent path", runOptInRealSharedHostAgentRunSmoke)
 }
 
 func TestOptInRealHostLockContentionAndRecoverySmoke(t *testing.T) {

@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func TestOptInRealSharedHostAgentRunSmoke(t *testing.T) {
+func runOptInRealSharedHostAgentRunSmoke(t *testing.T) {
 	options, ok := realSSHSmokeOptionsFromEnv(t)
 	if !ok {
 		return

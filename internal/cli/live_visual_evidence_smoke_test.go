@@ -354,12 +354,11 @@ func TestLiveVisualEvidenceProofWorkflowRequiresSmokePass(t *testing.T) {
 		"TestOptInRealSSHRunSmoke",
 		"TestOptInRealHostLockContentionAndRecoverySmoke",
 		"TestOptInRealRunScopedDesktopOpsSmoke",
-		"TestOptInRealSharedHostAgentRunSmoke",
 		"-count=1 -parallel=1 -timeout=20m",
 		"MAYA_STALL_LIVE_PROOF_ARTIFACT_ENABLED",
 		"live-visual-evidence-proof",
 		"assert-public-artifact-confidentiality.mjs",
-		"all nine individual live smoke tests must pass without skips",
+		"all eight individual live smoke tests must pass without skips",
 		"failed_missing_visual_evidence_proof_artifact",
 		"failed_visual_evidence_proof_confidentiality",
 		"failed_visual_evidence_proof_upload",
@@ -374,6 +373,13 @@ func TestLiveVisualEvidenceProofWorkflowRequiresSmokePass(t *testing.T) {
 	}
 	if got := strings.Count(text, "go test -json ./internal/cli -run"); got != 1 {
 		t.Fatalf("live smoke Go test process count = %d, want 1", got)
+	}
+	sshSmoke, err := os.ReadFile("live_ssh_smoke_test.go")
+	if err != nil {
+		t.Fatalf("read live SSH smoke: %v", err)
+	}
+	if !strings.Contains(string(sshSmoke), `t.Run("shared Host Agent path", runOptInRealSharedHostAgentRunSmoke)`) {
+		t.Fatal("protected live SSH smoke does not require the shared Host Agent path")
 	}
 }
 

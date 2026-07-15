@@ -265,6 +265,9 @@ func TestRunCompletesFakeScenarioThroughRegisteredWindowsHostAgent(t *testing.T)
 	if _, err := os.Stat(filepath.Join(agentWorkRoot, "runs", runID)); !os.IsNotExist(err) {
 		t.Fatalf("Host Agent run workspace = %v, want removed", err)
 	}
+	if _, err := os.Stat(filepath.Join(agentWorkRoot, "host")); !os.IsNotExist(err) {
+		t.Fatalf("unused top-level Host Agent workspace = %v, want absent", err)
+	}
 	concrete := handler.(*controlPlaneHandler)
 	concrete.mu.Lock()
 	assignmentCount := len(concrete.assignments)
@@ -293,6 +296,17 @@ func TestRunCompletesFakeScenarioThroughRegisteredWindowsHostAgent(t *testing.T)
 		t.Fatalf("repeated completion terminal = %+v", repeated)
 	}
 	waitForHostAgentState(t, server.Client(), server.URL, "windows-agent-01", "offline")
+}
+
+func TestEnsureHostAgentDirectoryDistinguishesFileFromSymlink(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(path, []byte("file"), 0o600); err != nil {
+		t.Fatalf("write regular file: %v", err)
+	}
+	err := ensureHostAgentDirectory(path)
+	if err == nil || !strings.Contains(err.Error(), "must be a directory and not a symlink") {
+		t.Fatalf("regular-file diagnostic = %v", err)
+	}
 }
 
 func TestHostAgentKeepsPollingAfterEmptyAssignmentResponse(t *testing.T) {

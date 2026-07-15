@@ -363,7 +363,7 @@ func ensureHostAgentDirectory(path string) error {
 		return err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return fmt.Errorf("Windows Host Agent directory %s must be a directory, not a symlink", path) //nolint:staticcheck // Product term starts the user-facing diagnostic.
+		return fmt.Errorf("Windows Host Agent directory %s must be a directory and not a symlink", path) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	return validateHostAgentDirectoryPermissions(path, info)
 }
@@ -2135,10 +2135,8 @@ func runHostAgentOnce(options hostAgentRunOnceOptions, runtime runRuntime, stdou
 	if err := ensureHostAgentDirectory(options.WorkRoot); err != nil {
 		return err
 	}
-	for _, child := range []string{"runs", "host"} {
-		if err := ensureHostAgentDirectory(filepath.Join(options.WorkRoot, child)); err != nil {
-			return err
-		}
+	if err := ensureHostAgentDirectory(filepath.Join(options.WorkRoot, "runs")); err != nil {
+		return err
 	}
 	registration := hostAgentRegistrationRequest{
 		Version: hostAgentAPIVersion, AgentID: options.AgentID, HostID: options.HostID, Slots: 1,

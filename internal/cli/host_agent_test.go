@@ -2069,7 +2069,32 @@ func simulateHostAgentProcessExit(t *testing.T, handler http.Handler, agentID st
 	agent.status.SessionID = ""
 }
 
+func TestHostAgentStatusHelpersUseProvidedOperatorToken(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer distinct-operator-token" {
+			http.Error(writer, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		requests.Add(1)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"version":1,"kind":"host-agent-status","agentId":"windows-agent-01","hostId":"maya-win-01","slots":1,"state":"ready"}`)
+	}))
+	t.Cleanup(server.Close)
+
+	waitForHostAgentStateWithToken(t, server.Client(), server.URL, "distinct-operator-token", "windows-agent-01", "ready")
+	status := readHostAgentStatusWithToken(t, server.Client(), server.URL, "distinct-operator-token", "windows-agent-01")
+	if status.State != "ready" || requests.Load() != 2 {
+		t.Fatalf("status = %+v, authenticated requests = %d", status, requests.Load())
+	}
+}
+
 func waitForHostAgentState(t *testing.T, client *http.Client, serverURL string, agentID string, want string) {
+	t.Helper()
+	waitForHostAgentStateWithToken(t, client, serverURL, "operator-token", agentID, want)
+}
+
+func waitForHostAgentStateWithToken(t *testing.T, client *http.Client, serverURL string, operatorToken string, agentID string, want string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -2077,7 +2102,7 @@ func waitForHostAgentState(t *testing.T, client *http.Client, serverURL string, 
 		if err != nil {
 			t.Fatalf("create Host Agent status request: %v", err)
 		}
-		request.Header.Set("Authorization", "Bearer operator-token")
+		request.Header.Set("Authorization", "Bearer "+operatorToken)
 		response, err := client.Do(request)
 		if err == nil && response.StatusCode == http.StatusOK {
 			var status struct {
@@ -2100,11 +2125,16 @@ func waitForHostAgentState(t *testing.T, client *http.Client, serverURL string, 
 
 func readHostAgentStatus(t *testing.T, client *http.Client, serverURL string, agentID string) hostAgentStatusResponse {
 	t.Helper()
+	return readHostAgentStatusWithToken(t, client, serverURL, "operator-token", agentID)
+}
+
+func readHostAgentStatusWithToken(t *testing.T, client *http.Client, serverURL string, operatorToken string, agentID string) hostAgentStatusResponse {
+	t.Helper()
 	request, err := http.NewRequest(http.MethodGet, serverURL+"/v1/host-agents/"+agentID+"/status", nil)
 	if err != nil {
 		t.Fatalf("create Host Agent status request: %v", err)
 	}
-	request.Header.Set("Authorization", "Bearer operator-token")
+	request.Header.Set("Authorization", "Bearer "+operatorToken)
 	response, err := client.Do(request)
 	if err != nil {
 		t.Fatalf("read Host Agent status: %v", err)

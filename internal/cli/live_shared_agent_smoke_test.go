@@ -66,7 +66,7 @@ func runOptInRealSharedHostAgentRunSmoke(t *testing.T) {
 			"--credential-env", "TEST_MAYA_STALL_LIVE_HOST_AGENT_CREDENTIAL",
 		}, &agentStdout, &agentStderr, repoDir, "test-version", runtime)
 	}()
-	waitForHostAgentState(t, server.Client(), server.URL, "windows-agent-live", "ready")
+	waitForHostAgentStateWithToken(t, server.Client(), server.URL, "shared-live-operator-token", "windows-agent-live", "ready")
 
 	runDone := make(chan int, 1)
 	var runStdout, runStderr bytes.Buffer
@@ -83,7 +83,7 @@ func runOptInRealSharedHostAgentRunSmoke(t *testing.T) {
 	case <-time.After(5 * time.Minute):
 		t.Fatalf("live shared run did not bind a Maya UI Session; agent stdout: %s stderr: %s", agentStdout.String(), agentStderr.String())
 	}
-	status := readHostAgentStatus(t, server.Client(), server.URL, "windows-agent-live")
+	status := readHostAgentStatusWithToken(t, server.Client(), server.URL, "shared-live-operator-token", "windows-agent-live")
 	if status.State != "running" || status.RunID == "" {
 		t.Fatalf("live Host Agent status at session binding = %+v", status)
 	}
@@ -154,7 +154,7 @@ func runOptInRealSharedHostAgentRunSmoke(t *testing.T) {
 	if completed.State != "completed" || !sameBrokerSession(completed.BrokerSession, bundle.BrokerSession) {
 		t.Fatalf("completed live assignment = %+v", completed)
 	}
-	waitForHostAgentState(t, server.Client(), server.URL, "windows-agent-live", "offline")
+	waitForHostAgentStateWithToken(t, server.Client(), server.URL, "shared-live-operator-token", "windows-agent-live", "offline")
 	t.Log("Control Plane assigned the registered Agent; shared Host Lock bound the exact broker session; real Maya evidence transferred; broker inactive; Agent and remote workspaces removed before lock release")
 }
 

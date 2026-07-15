@@ -1022,7 +1022,7 @@ func (run *freshRunLifecycle) stagePayloadWithCancellation(payload []manifestPay
 			return errors.Join(cancelErr, err)
 		case <-timer.C:
 			run.sessionOperationUnsettled = true
-			return errors.Join(cancelErr, fmt.Errorf("Host payload staging did not finish within %s after cancellation", wait))
+			return errors.Join(cancelErr, fmt.Errorf("host payload staging did not finish within %s after cancellation", wait))
 		}
 	}
 }

@@ -288,10 +288,10 @@ func parseHostAgentRunOnceArgs(args []string, workDir string) (hostAgentRunOnceO
 func enrollControlPlaneHostAgent(options controlPlaneEnrollAgentOptions, runtime runRuntime, stdout io.Writer) error {
 	credential, ok := os.LookupEnv(options.CredentialEnv)
 	if !ok || len(credential) < minimumHostAgentCredentialBytes {
-		return fmt.Errorf("Windows Host Agent credential environment variable %s must contain at least %d bytes", options.CredentialEnv, minimumHostAgentCredentialBytes)
+		return fmt.Errorf("Windows Host Agent credential environment variable %s must contain at least %d bytes", options.CredentialEnv, minimumHostAgentCredentialBytes) //nolint:staticcheck // Product name starts the user-facing diagnostic.
 	}
 	if len(credential) > maximumHostAgentCredentialBytes {
-		return fmt.Errorf("Windows Host Agent credential exceeds size limit")
+		return fmt.Errorf("Windows Host Agent credential exceeds size limit") //nolint:staticcheck // Product name starts the user-facing diagnostic.
 	}
 	request := hostAgentEnrollmentRequest{
 		Version: hostAgentAPIVersion, AgentID: options.AgentID, HostID: options.HostID, Credential: credential,

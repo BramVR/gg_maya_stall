@@ -57,11 +57,12 @@ descriptive; code is the source-backed check when behavior claims disagree.
   `internal/cli/run_scoped_ops.go`
 - Crabbox-inspired defaults: `internal/cli/crabbox_defaults.go`
 - Embedded/Configured Control Plane mode selection, authenticated API,
-  submission snapshots, durable run reads, and Control Plane server:
+  detached submissions, sequenced bounded event streams, durable run reads,
+  and Control Plane server:
   `internal/cli/control_plane.go`, `internal/cli/control_plane_test.go`
-- Windows Host Agent enrollment, outbound assignment polling, durable Host Lock
-  and Maya UI Session fencing, fake/real execution, result transfer, and
-  restart recovery:
+- Windows Host Agent enrollment, outbound assignment polling, bounded active
+  Run Ledger checkpoints, durable Host Lock and Maya UI Session fencing,
+  fake/real execution, result transfer, and restart recovery:
   `internal/cli/host_agent.go`, `internal/cli/host_agent_test.go`
 - Protected shared-path real Maya proof:
   `internal/cli/live_shared_agent_smoke_test.go`

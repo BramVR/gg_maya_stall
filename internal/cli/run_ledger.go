@@ -66,16 +66,24 @@ type runLedgerRecord struct {
 }
 
 type runHistoryResponse struct {
-	Version int               `json:"version"`
-	Runs    []runLedgerRecord `json:"runs"`
+	Version            int               `json:"version"`
+	Kind               string            `json:"kind,omitempty"`
+	Runs               []runLedgerRecord `json:"runs"`
+	RunsOmitted        int               `json:"runsOmitted,omitempty"`
+	RunsOmittedAtLeast int               `json:"runsOmittedAtLeast,omitempty"`
+	RunsTruncated      bool              `json:"runsTruncated,omitempty"`
+	NextBeforeRunID    string            `json:"nextBeforeRunId,omitempty"`
 }
 
 type historyOptions struct {
-	JSON     bool
-	Scenario string
-	Host     string
-	State    string
-	Since    string
+	JSON                 bool
+	Scenario             string
+	Host                 string
+	State                string
+	Since                string
+	BeforeRunID          string
+	ControlPlane         string
+	ControlPlaneTokenEnv string
 }
 
 func parseHistoryArgs(args []string) (historyOptions, error) {
@@ -85,7 +93,7 @@ func parseHistoryArgs(args []string) (historyOptions, error) {
 		switch arg {
 		case "--json":
 			options.JSON = true
-		case "--scenario", "--host", "--state", "--since":
+		case "--scenario", "--host", "--state", "--since", "--before-run", "--control-plane", "--control-plane-token-env":
 			index++
 			if index >= len(args) || args[index] == "" || len(args[index]) >= 2 && args[index][:2] == "--" {
 				return historyOptions{}, newUsageError("%s needs a value", arg)
@@ -99,6 +107,15 @@ func parseHistoryArgs(args []string) (historyOptions, error) {
 				options.State = args[index]
 			case "--since":
 				options.Since = args[index]
+			case "--before-run":
+				if err := validateRunID(args[index]); err != nil {
+					return historyOptions{}, newUsageError("--before-run needs a valid Run ID")
+				}
+				options.BeforeRunID = args[index]
+			case "--control-plane":
+				options.ControlPlane = args[index]
+			case "--control-plane-token-env":
+				options.ControlPlaneTokenEnv = args[index]
 			}
 		default:
 			return historyOptions{}, newUsageError("unknown history option %q", arg)
@@ -1096,6 +1113,11 @@ func listRunLedgerRecordsUnlocked(repoDir string, skipInvalid ...bool) ([]runLed
 		}
 		records = append(records, record)
 	}
+	sortRunLedgerRecordsNewest(records)
+	return records, nil
+}
+
+func sortRunLedgerRecordsNewest(records []runLedgerRecord) {
 	sort.Slice(records, func(i int, j int) bool {
 		left, _ := time.Parse(time.RFC3339Nano, records[i].AcceptedAt)
 		right, _ := time.Parse(time.RFC3339Nano, records[j].AcceptedAt)
@@ -1109,7 +1131,20 @@ func listRunLedgerRecordsUnlocked(repoDir string, skipInvalid ...bool) ([]runLed
 		}
 		return left.After(right)
 	})
-	return records, nil
+}
+
+func runMatchesHistoryOptions(record runLedgerRecord, options historyOptions, cutoff time.Time) (bool, error) {
+	if options.Scenario != "" && record.Scenario != options.Scenario || options.Host != "" && record.Host != options.Host || options.State != "" && record.State != options.State {
+		return false, nil
+	}
+	if cutoff.IsZero() {
+		return true, nil
+	}
+	acceptedAt, err := time.Parse(time.RFC3339Nano, record.AcceptedAt)
+	if err != nil {
+		return false, fmt.Errorf("parse run acceptedAt for %s: %w", record.RunID, err)
+	}
+	return !acceptedAt.Before(cutoff), nil
 }
 
 func runIDCollisionOrdinal(runID string) int {

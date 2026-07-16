@@ -1,6 +1,7 @@
 # history
 
-`maya-stall history` lists accepted runs from the durable embedded Run Ledger.
+`maya-stall history` lists accepted runs from the durable embedded Run Ledger
+or a Configured Control Plane.
 
 ```sh
 maya-stall history
@@ -9,6 +10,8 @@ maya-stall history --scenario smoke
 maya-stall history --host maya-win-01 --state failed
 maya-stall history --since 24h
 maya-stall history --since 2026-07-14T08:00:00Z
+maya-stall history --control-plane https://maya-stall.example.com --json
+maya-stall history --control-plane https://maya-stall.example.com --before-run <nextBeforeRunId> --json
 ```
 
 History remains available after transient Run State is cleaned. Records are
@@ -19,6 +22,14 @@ or acceptance time. States are `submitted`, `completed`, `failed`, `kept`, and
 `--json` returns one versioned object with a `runs` array. Each run identifies
 its retained event and log paths. Ordered JSONL events carry `sequence`,
 `timestamp`, `phase`, `type`, `stream`, and structured `details` fields.
+
+Configured history uses the same bearer-token options as other Control Plane
+reads. Each request scans at most 1,000 indexed Run IDs, applies filters inside
+that bounded window, and returns at most 1,000 records. A partial response sets
+`runsTruncated`, `runsOmittedAtLeast`, and `nextBeforeRunId`; pass that cursor to
+`--before-run` to continue. The index is rebuilt once when the Control Plane
+starts and updated as runs are accepted, so request work remains bounded as
+history grows.
 
 The embedded log and event stream are bounded by count and bytes. If a limit is
 exceeded, Maya Stall inserts an explicit truncation marker and preserves the

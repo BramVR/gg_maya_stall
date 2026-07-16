@@ -9,6 +9,7 @@ the requested active or kept run owns the Host Lock.
 
 ```sh
 maya-stall attach <run-id>
+maya-stall attach <run-id> --control-plane https://maya-stall.example.com --from-sequence 1
 maya-stall attach <run-id> screenshot
 maya-stall attach <run-id> control click --x 960 --y 540
 ```
@@ -16,12 +17,21 @@ maya-stall attach <run-id> control click --x 960 --y 540
 Plain attach is read-only. It does not reuse the Maya UI Session for execution
 and it does not open an interactive desktop viewer.
 
+With `--control-plane`, plain attach authenticates and follows the active Run
+Ledger from the inclusive `--from-sequence` cursor. It prints each durable event
+once in increasing sequence order. An `events-truncated` record reports a gap
+before retained history. A bounded `stream-truncated` record prints the next
+cursor and exits cleanly so the caller can reconnect. At `stream-end`, attach
+reads retained logs and the result, including final Evidence and cleanup state.
+The default token environment is `MAYA_STALL_CONTROL_PLANE_TOKEN`;
+`--control-plane-token-env` selects another name.
+
 Use it when a kept run failed and you need the event stream before deciding
 whether to collect more evidence or stop the session.
 
-For completed, failed, or durable-only cleanup-failed runs, plain attach reads
-bounded events and logs from the embedded Run Ledger even after transient Run
-State is gone. A cleanup-failed run that still owns a live session uses its
+For completed, failed, or durable-only cleanup-failed embedded runs, plain
+attach reads bounded events and logs from the Run Ledger even after transient
+Run State is gone. A cleanup-failed run that still owns a live session uses its
 transient Run State and Session Broker instead. Retained logs and events contain
 explicit markers when configured limits truncate older content. The original
 Evidence Bundle remains independent.

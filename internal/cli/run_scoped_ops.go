@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,10 +16,13 @@ const runScopedScreenshotName = "run-scoped-screenshot.png"
 const runScopedVisualEvidenceStateName = "run-scoped-visual-evidence.json"
 
 type attachOptions struct {
-	RunID  string
-	Action string
-	X      int
-	Y      int
+	RunID                string
+	Action               string
+	X                    int
+	Y                    int
+	ControlPlane         string
+	ControlPlaneTokenEnv string
+	FromSequence         int
 }
 
 func parseAttachArgs(args []string) (attachOptions, error) {
@@ -28,9 +32,40 @@ func parseAttachArgs(args []string) (attachOptions, error) {
 	if err := validateRunID(args[0]); err != nil {
 		return attachOptions{}, err
 	}
-	options := attachOptions{RunID: args[0], X: -1, Y: -1}
+	options := attachOptions{RunID: args[0], X: -1, Y: -1, FromSequence: 1}
 	if len(args) == 1 {
 		options.Action = "observe"
+		return options, nil
+	}
+	if strings.HasPrefix(args[1], "--") {
+		options.Action = "observe"
+		for index := 1; index < len(args); index++ {
+			flag := args[index]
+			switch flag {
+			case "--control-plane", "--control-plane-token-env", "--from-sequence":
+				index++
+				if index >= len(args) || args[index] == "" || strings.HasPrefix(args[index], "--") {
+					return attachOptions{}, newUsageError("%s needs a value", flag)
+				}
+				switch flag {
+				case "--control-plane":
+					options.ControlPlane = args[index]
+				case "--control-plane-token-env":
+					options.ControlPlaneTokenEnv = args[index]
+				case "--from-sequence":
+					sequence, err := strconv.Atoi(args[index])
+					if err != nil || sequence < 1 {
+						return attachOptions{}, newUsageError("--from-sequence needs a positive integer")
+					}
+					options.FromSequence = sequence
+				}
+			default:
+				return attachOptions{}, newUsageError("unknown attach option %q", flag)
+			}
+		}
+		if options.ControlPlane == "" {
+			return attachOptions{}, newUsageError("configured attach needs --control-plane")
+		}
 		return options, nil
 	}
 	switch args[1] {
@@ -87,9 +122,12 @@ func parseAttachControlArgs(options attachOptions, args []string) (attachOptions
 	return options, nil
 }
 
-func runAttachAction(repoDir string, options attachOptions, stdout io.Writer) error {
+func runAttachAction(repoDir string, options attachOptions, stdout io.Writer, runtime runRuntime) error {
 	switch options.Action {
 	case "observe":
+		if options.ControlPlane != "" {
+			return attachControlPlaneRun(options, stdout, runtime)
+		}
 		return attachRun(repoDir, options.RunID, stdout)
 	case "screenshot":
 		outcome, artifact, err := captureRunScopedScreenshot(repoDir, options.RunID)
@@ -109,6 +147,91 @@ func runAttachAction(repoDir string, options attachOptions, stdout io.Writer) er
 	default:
 		return newUsageError("unknown attach action %q", options.Action)
 	}
+}
+
+func attachControlPlaneRun(options attachOptions, stdout io.Writer, runtime runRuntime) error {
+	endpoint, err := parseControlPlaneURL(options.ControlPlane)
+	if err != nil {
+		return err
+	}
+	tokenEnv := options.ControlPlaneTokenEnv
+	if tokenEnv == "" {
+		tokenEnv = defaultControlPlaneTokenEnv
+	}
+	token, ok := os.LookupEnv(tokenEnv)
+	if !ok || token == "" {
+		return fmt.Errorf("control plane token environment variable %s is not set", tokenEnv)
+	}
+	path := fmt.Sprintf("/v1/runs/%s/events?fromSequence=%d&follow=true", options.RunID, options.FromSequence)
+	request, err := http.NewRequest(http.MethodGet, strings.TrimRight(endpoint.String(), "/")+path, nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := controlPlaneHTTPClient(runtime.ControlPlaneHTTPClient).Do(request)
+	if err != nil {
+		return fmt.Errorf("attach to Control Plane: %w", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("control plane attach failed with HTTP %d", response.StatusCode)
+	}
+	if contentType := response.Header.Get("Content-Type"); contentType != "application/x-ndjson" {
+		return fmt.Errorf("control plane attach returned unexpected Content-Type %q", contentType)
+	}
+	decoder := json.NewDecoder(io.LimitReader(response.Body, int64(maximumControlPlaneLedgerResponseBytes)+1))
+	lastSequence := options.FromSequence - 1
+	for {
+		var record controlPlaneEventStreamRecord
+		if err := decoder.Decode(&record); err != nil {
+			return fmt.Errorf("read Control Plane event stream: %w", err)
+		}
+		if record.Version != controlPlaneAPIVersion || record.RunID != options.RunID {
+			return fmt.Errorf("control plane returned an unsupported event stream response")
+		}
+		switch record.Kind {
+		case "event":
+			if record.Sequence <= lastSequence || ledgerEventSequence(record.Event) != record.Sequence {
+				return fmt.Errorf("control plane event stream reordered or duplicated sequence %d", record.Sequence)
+			}
+			content, err := json.Marshal(record.Event)
+			if err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(stdout, string(content)); err != nil {
+				return err
+			}
+			lastSequence = record.Sequence
+		case "events-truncated":
+			if _, err := fmt.Fprintf(stdout, "eventsTruncated: true\neventsOmitted: %d\nnextSequence: %d\n", record.EventsOmitted, record.NextSequence); err != nil {
+				return err
+			}
+		case "stream-end":
+			goto terminal
+		case "stream-truncated":
+			_, err := fmt.Fprintf(stdout, "streamTruncated: true\nnextSequence: %d\n", record.NextSequence)
+			return err
+		default:
+			return fmt.Errorf("control plane returned unsupported event stream kind %q", record.Kind)
+		}
+	}
+
+terminal:
+	var logs controlPlaneLogsResponse
+	if err := getControlPlaneJSON(options.ControlPlane, options.ControlPlaneTokenEnv, "/v1/runs/"+options.RunID+"/logs", runtime, &logs); err != nil {
+		return err
+	}
+	var result controlPlaneResultResponse
+	if err := getControlPlaneJSON(options.ControlPlane, options.ControlPlaneTokenEnv, "/v1/runs/"+options.RunID+"/result", runtime, &result); err != nil {
+		return err
+	}
+	logContent := logs.Content
+	if logContent != "" && !strings.HasSuffix(logContent, "\n") {
+		logContent += "\n"
+	}
+	_, err = fmt.Fprintf(stdout, "logs:\n%sstate: %s\nstatus: %s\ncleanupState: %s\nfinal: %t\nsuccess: %t\nevidence: %s\n",
+		logContent, result.State, result.Status, result.CleanupState, result.Final, result.Success, result.Evidence)
+	return err
 }
 
 func captureRunScopedScreenshot(repoDir string, runID string) (runOutcome, visualEvidenceArtifact, error) {

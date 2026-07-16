@@ -33,13 +33,12 @@ line or in Repo Run Config. Configured mode owns Maya Host selection and rejects
 client host, host-config, pin, and lock flags instead of falling back to local
 ownership.
 
-This first Control Plane path executes fake Scenarios synchronously. It does
-not register a Windows Host Agent, schedule a real Maya Host, or provide
-reconnectable live streaming.
-
-Configured kept runs remain readable and non-final, but this first slice does
-not expose remote attach or stop mutations and does not print embedded-only
-follow-up commands.
+The submitting command remains attached for acceptance and terminal output when
+its connection stays open. Once accepted, however, the Control Plane owns the
+run independently of that connection. A later authenticated client can attach
+by Run ID and inclusive event sequence while an in-process fake or registered
+Windows Host Agent Scenario is running. Configured stop and run-scoped desktop
+mutations are not exposed.
 
 ## Behavior
 
@@ -56,6 +55,11 @@ execution. Embedded Mode stores it in the checkout; Configured Control Plane
 Mode stores it in the server-owned run workspace. The record survives transient Run State cleanup and
 is updated to `completed`, `failed`, `kept`, or `cleanup-failed` with bounded
 ordered events and retained logs.
+
+Live and historical configured reads use the same durable event sequence as
+identity. Events, logs, history, and each streaming connection are bounded and
+report explicit truncation metadata. Completed Run IDs remain queryable for
+history, events, logs, result, Evidence metadata, and cleanup state.
 
 Use `--json` for stable newline-delimited JSON. Accepted submissions emit an
 immediate `run-accepted` record and a terminal `run` record. A usage error emits

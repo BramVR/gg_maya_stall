@@ -41,15 +41,15 @@ See [version](commands/version.md), [init](commands/init.md),
 
 ```text
 maya-stall run [--json] [control-plane flags] [host flags] [lock flags] [stop flags] <scenario>
-maya-stall history [--json] [--scenario <name>] [--host <id>] [--state <state>] [--since <duration-or-rfc3339>]
+maya-stall history [--json] [control-plane flags] [--before-run <run-id>] [--scenario <name>] [--host <id>] [--state <state>] [--since <duration-or-rfc3339>]
 maya-stall status [--json] [control-plane flags] --run <run-id>
-maya-stall events [--json] [control-plane flags] <run-id>
+maya-stall events [--json] [control-plane flags] [--from-sequence <number>] <run-id>
 maya-stall logs [--json] [control-plane flags] <run-id>
 maya-stall result [--json] [control-plane flags] <run-id>
 maya-stall control-plane serve --data-dir <path> --tls-cert <path> --tls-key <path>
 maya-stall control-plane enroll-agent --control-plane <url> --agent-id <id> --host <id> --credential-env <name>
 maya-stall host-agent run-once --control-plane <url> --agent-id <id> --host <id> --work-root <path> [--host-config <path>] --credential-env <name>
-maya-stall attach <run-id>
+maya-stall attach <run-id> [control-plane flags] [--from-sequence <number>]
 maya-stall attach <run-id> screenshot
 maya-stall attach <run-id> control click --x <pixels> --y <pixels>
 maya-stall stop <run-id>
@@ -97,8 +97,8 @@ selection, or remote checks. `--json` emits newline-delimited acceptance and
 terminal records; syntax that never identifies a Scenario emits one usage-error
 record and creates no run.
 
-Accepted runs are retained in the embedded Run Ledger after transient state
-cleanup. `history --json` returns a stable versioned object and supports exact
+Accepted runs are retained in the embedded or Control Plane Run Ledger after
+transient state cleanup. `history --json` returns a stable versioned object and supports exact
 Scenario, Maya Host, state, and recent-time filters.
 
 `status`, `events`, `logs`, and `result` render the same versioned response
@@ -109,6 +109,11 @@ one registered outbound Windows Host Agent and a durable shared Host Lock. An
 Agent-local `--host-config` selects real Maya execution; omitting it selects the
 explicit fake development path. Without an enrollment the Control Plane retains
 the in-process fake path.
+
+After acceptance, a configured run survives submitter disconnect. Configured
+`attach` follows from an inclusive durable sequence cursor; live and historical
+reads preserve identical event identities and report retention or per-stream
+truncation explicitly.
 
 ### Visual Evidence
 

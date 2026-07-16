@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -27,6 +28,11 @@ const minimumHostAgentCredentialBytes = 32
 const hostAgentSessionLease = time.Minute
 const hostAgentHeartbeatInterval = 15 * time.Second
 const hostAgentHeartbeatRequestTimeout = 10 * time.Second
+const hostAgentProgressInterval = time.Second
+const maximumHostAgentProgressEventBytes = 4 * 1024 * 1024
+const maximumHostAgentProgressLogBytes = 4 * 1024 * 1024
+const maximumHostAgentProgressEvents = 10000
+const maximumConsecutiveHostAgentProgressSnapshotFailures = 3
 
 type controlPlaneEnrollAgentOptions struct {
 	ControlPlane  string
@@ -111,6 +117,17 @@ type hostAgentSessionRequest struct {
 	BrokerSession brokerSessionIdentity `json:"brokerSession"`
 }
 
+type hostAgentProgressRequest struct {
+	Version    int             `json:"version"`
+	RunID      string          `json:"runId"`
+	LockToken  string          `json:"lockToken"`
+	SessionID  string          `json:"sessionId"`
+	Checkpoint int64           `json:"checkpoint"`
+	Ledger     runLedgerRecord `json:"ledger"`
+	Events     []byte          `json:"events"`
+	Log        []byte          `json:"log"`
+}
+
 type hostAgentCompletionRequest struct {
 	Version   int                `json:"version"`
 	RunID     string             `json:"runId"`
@@ -155,6 +172,8 @@ type hostAgentAssignmentRecord struct {
 	Terminal               *runCommandJSON        `json:"terminal,omitempty"`
 	TerminalLedger         *runLedgerRecord       `json:"terminalLedger,omitempty"`
 	AssignedLedger         *runLedgerRecord       `json:"assignedLedger,omitempty"`
+	ProgressSequence       int64                  `json:"progressSequence,omitempty"`
+	ProgressDigest         string                 `json:"progressDigest,omitempty"`
 }
 
 type controlPlaneHostAgent struct {
@@ -166,6 +185,7 @@ type controlPlaneHostAgent struct {
 }
 
 type controlPlaneHostAgentAssignment struct {
+	checkpointMu          sync.Mutex
 	record                hostAgentAssignmentRecord
 	repoDir               string
 	done                  chan struct{}
@@ -801,6 +821,8 @@ func (handler *controlPlaneHandler) serveHostAgentAPI(response http.ResponseWrit
 		handler.serveHostAgentConfirm(response, request, parts[2], parts[4])
 	case len(parts) == 6 && parts[3] == "assignments" && parts[5] == "session" && request.Method == http.MethodPost:
 		handler.serveHostAgentSession(response, request, parts[2], parts[4])
+	case len(parts) == 6 && parts[3] == "assignments" && parts[5] == "progress" && request.Method == http.MethodPost:
+		handler.serveHostAgentProgress(response, request, parts[2], parts[4])
 	case len(parts) == 6 && parts[3] == "assignments" && parts[5] == "complete" && request.Method == http.MethodPost:
 		handler.serveHostAgentComplete(response, request, parts[2], parts[4])
 	case len(parts) == 6 && parts[3] == "assignments" && parts[5] == "fail" && request.Method == http.MethodPost:
@@ -916,11 +938,12 @@ func (handler *controlPlaneHandler) serveHostAgentStatus(response http.ResponseW
 	if agent.status.SessionID != "" && !handler.runtime.Now().Before(agent.sessionExpiresAt) {
 		assignment := handler.assignments[agent.status.RunID]
 		if assignment != nil && assignment.record.State == "confirmed" && !assignment.finishing {
+			handler.mu.Unlock()
 			if _, _, err := handler.quarantineHostAgentAssignment(assignment, agent, "Windows Host Agent process-session lease expired before Maya shutdown was verified"); err != nil {
-				handler.mu.Unlock()
 				writeControlPlaneError(response, http.StatusInternalServerError, "persist expired Windows Host Agent quarantine")
 				return
 			}
+			handler.mu.Lock()
 		} else {
 			agent.status.SessionID = ""
 			agent.sessionExpiresAt = time.Time{}
@@ -977,10 +1000,13 @@ func (handler *controlPlaneHandler) serveHostAgentRegistration(response http.Res
 			sessionExpired := agent.status.SessionID != "" && !now.Before(agent.sessionExpiresAt)
 			restartGraceExpired := agent.status.SessionID == "" && !now.Before(agent.takeoverNotBefore)
 			if assignment.record.State == "confirmed" && !assignment.finishing && (sessionExpired || restartGraceExpired) {
+				handler.mu.Unlock()
 				if _, _, err := handler.quarantineHostAgentAssignment(assignment, agent, "Windows Host Agent process disappeared before Maya session shutdown was verified"); err != nil {
+					handler.mu.Lock()
 					writeControlPlaneError(response, http.StatusInternalServerError, "persist quarantined Windows Host Agent assignment")
 					return
 				}
+				handler.mu.Lock()
 				writeControlPlaneError(response, http.StatusConflict, "confirmed Windows Host Agent assignment quarantined after process loss")
 				return
 			}
@@ -1144,9 +1170,25 @@ func (handler *controlPlaneHandler) serveHostAgentConfirm(response http.Response
 		return
 	}
 	handler.mu.Lock()
+	checkpointAssignment := handler.assignments[runID]
+	agent := handler.hostAgents[agentID]
+	if !requestMatchesHostAgentCredential(request, agent) {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusUnauthorized, "Windows Host Agent authentication changed")
+		return
+	}
+	if checkpointAssignment == nil {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusConflict, "Host Lock ownership changed")
+		return
+	}
+	handler.mu.Unlock()
+	checkpointAssignment.checkpointMu.Lock()
+	defer checkpointAssignment.checkpointMu.Unlock()
+	handler.mu.Lock()
 	defer handler.mu.Unlock()
 	assignment := handler.assignments[runID]
-	agent := handler.hostAgents[agentID]
+	agent = handler.hostAgents[agentID]
 	if !requestMatchesHostAgentCredential(request, agent) {
 		writeControlPlaneError(response, http.StatusUnauthorized, "Windows Host Agent authentication changed")
 		return
@@ -1180,9 +1222,25 @@ func (handler *controlPlaneHandler) serveHostAgentSession(response http.Response
 		return
 	}
 	handler.mu.Lock()
+	checkpointAssignment := handler.assignments[runID]
+	agent := handler.hostAgents[agentID]
+	if !requestMatchesHostAgentCredential(request, agent) {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusUnauthorized, "Windows Host Agent authentication changed")
+		return
+	}
+	if checkpointAssignment == nil {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusConflict, "Host Lock ownership changed")
+		return
+	}
+	handler.mu.Unlock()
+	checkpointAssignment.checkpointMu.Lock()
+	defer checkpointAssignment.checkpointMu.Unlock()
+	handler.mu.Lock()
 	defer handler.mu.Unlock()
 	assignment := handler.assignments[runID]
-	agent := handler.hostAgents[agentID]
+	agent = handler.hostAgents[agentID]
 	if !requestMatchesHostAgentCredential(request, agent) {
 		writeControlPlaneError(response, http.StatusUnauthorized, "Windows Host Agent authentication changed")
 		return
@@ -1210,6 +1268,383 @@ func (handler *controlPlaneHandler) serveHostAgentSession(response http.Response
 	}
 	response.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(response).Encode(agent.status)
+}
+
+func (handler *controlPlaneHandler) serveHostAgentProgress(response http.ResponseWriter, request *http.Request, agentID string, runID string) {
+	if validateRunID(runID) != nil {
+		writeControlPlaneError(response, http.StatusBadRequest, "invalid Host Agent Run ID")
+		return
+	}
+	var progress hostAgentProgressRequest
+	if err := decodeHostAgentRequest(request, &progress); err != nil || len(progress.Events) > maximumHostAgentProgressEventBytes || len(progress.Log) > maximumHostAgentProgressLogBytes || runLedgerEventLineCount(progress.Events) > maximumHostAgentProgressEvents {
+		writeControlPlaneError(response, http.StatusBadRequest, "invalid Windows Host Agent progress")
+		return
+	}
+	handler.mu.Lock()
+	checkpointAssignment := handler.assignments[runID]
+	agent := handler.hostAgents[agentID]
+	if !requestMatchesHostAgentCredential(request, agent) {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusUnauthorized, "Windows Host Agent authentication changed")
+		return
+	}
+	if checkpointAssignment == nil {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusConflict, "Host Lock ownership changed")
+		return
+	}
+	handler.mu.Unlock()
+
+	// Serialize checkpoints for one assignment without blocking unrelated Control Plane reads.
+	checkpointAssignment.checkpointMu.Lock()
+	defer checkpointAssignment.checkpointMu.Unlock()
+	handler.mu.Lock()
+	assignment := handler.assignments[runID]
+	agent = handler.hostAgents[agentID]
+	if !requestMatchesHostAgentCredential(request, agent) {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusUnauthorized, "Windows Host Agent authentication changed")
+		return
+	}
+	if progress.Version != hostAgentAPIVersion || progress.RunID != runID || progress.Checkpoint < 1 || !hostAgentAssignmentAcceptsProgress(assignment) || assignment.record.AgentID != agentID || agent == nil || !sameLockToken(progress.LockToken, assignment.record.LockToken) || !handler.acceptHostAgentSession(agent, progress.SessionID) {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusConflict, "Host Lock ownership changed")
+		return
+	}
+	expectedProfile := assignment.record.Submission.TargetProfile
+	if expectedProfile == "" {
+		expectedProfile = "default"
+	}
+	if progress.Ledger.RunID != runID || progress.Ledger.Scenario != assignment.record.Submission.Scenario || progress.Ledger.TargetProfile != expectedProfile || progress.Ledger.Host != assignment.record.HostID || progress.Ledger.State != "submitted" {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusConflict, "Windows Host Agent progress changed run identity")
+		return
+	}
+	fingerprint := hostAgentProgressFingerprint(progress)
+	digest := hex.EncodeToString(fingerprint[:])
+	if progress.Checkpoint == assignment.record.ProgressSequence {
+		if digest != assignment.record.ProgressDigest {
+			handler.mu.Unlock()
+			writeControlPlaneError(response, http.StatusConflict, "Windows Host Agent checkpoint identity changed")
+			return
+		}
+		status := agent.status
+		handler.mu.Unlock()
+		response.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(response).Encode(status)
+		return
+	}
+	if progress.Checkpoint != assignment.record.ProgressSequence+1 {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusConflict, "Windows Host Agent checkpoint is stale or skipped")
+		return
+	}
+	previousAssignment := assignment.record
+	repoDir := assignment.repoDir
+	handler.mu.Unlock()
+
+	updatedAssignment := previousAssignment
+	var identityErr error
+	persistErr := withRunLedgerLock(repoDir, runID, func() error {
+		current, err := readRunLedgerRecord(repoDir, runID)
+		if err != nil {
+			return err
+		}
+		ledgerDir := runLedgerDir(repoDir, runID)
+		currentEvents, err := readRunLedgerBytes(filepath.Join(ledgerDir, filepath.FromSlash(current.Events)))
+		if err != nil {
+			return err
+		}
+		mergedEvents, err := mergeHostAgentProgressEvents(currentEvents, progress.Events)
+		if err != nil {
+			identityErr = err
+			return err
+		}
+		if err := writeRunLedgerBytes(filepath.Join(ledgerDir, filepath.FromSlash(current.Events)), mergedEvents); err != nil {
+			return err
+		}
+		if err := writeRunLedgerBytes(filepath.Join(ledgerDir, filepath.FromSlash(current.Log)), progress.Log); err != nil {
+			return err
+		}
+		eventCount, eventsOmitted, eventsTruncated, eventBytes, err := readRetainedRunLedgerEventMetadata(filepath.Join(ledgerDir, filepath.FromSlash(current.Events)))
+		if err != nil {
+			return err
+		}
+		current.EventCount = eventCount
+		current.EventsOmitted = eventsOmitted
+		current.EventsTruncated = eventsTruncated
+		current.EventBytes = eventBytes
+		current.LogBytes = len(progress.Log)
+		current.LogTruncated = progress.Ledger.LogTruncated
+		current.Host = previousAssignment.HostID
+		current.UpdatedAt = handler.runtime.Now().UTC().Format(time.RFC3339Nano)
+		if err := writeRunLedgerRecord(repoDir, current); err != nil {
+			return err
+		}
+		copy := current
+		updatedAssignment.AssignedLedger = &copy
+		updatedAssignment.ProgressSequence = progress.Checkpoint
+		updatedAssignment.ProgressDigest = digest
+		return handler.persistAssignment(updatedAssignment)
+	})
+	// The per-run lock is released before taking handler.mu; quarantine may wait
+	// on the ledger while fenced by handler.mu without creating a lock cycle.
+	if identityErr != nil {
+		writeControlPlaneError(response, http.StatusConflict, "Windows Host Agent progress changed event identity")
+		return
+	}
+	if persistErr != nil {
+		writeControlPlaneError(response, http.StatusInternalServerError, "persist active Run Ledger checkpoint")
+		return
+	}
+	handler.mu.Lock()
+	assignment = handler.assignments[runID]
+	agent = handler.hostAgents[agentID]
+	if assignment != checkpointAssignment || !hostAgentAssignmentAcceptsProgress(assignment) || assignment.record.ProgressSequence != previousAssignment.ProgressSequence || !sameBrokerSession(assignment.record.BrokerSession, previousAssignment.BrokerSession) || agent == nil || !requestMatchesHostAgentCredential(request, agent) || !sameLockToken(progress.LockToken, assignment.record.LockToken) || !sameLockToken(progress.SessionID, agent.status.SessionID) {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusConflict, "Host Lock ownership changed")
+		return
+	}
+	assignment.record = updatedAssignment
+	status := agent.status
+	handler.mu.Unlock()
+	response.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(response).Encode(status)
+}
+
+func hostAgentAssignmentAcceptsProgress(assignment *controlPlaneHostAgentAssignment) bool {
+	return assignment != nil && assignment.record.State == "confirmed" && !assignment.finishing
+}
+
+func runLedgerEventLineCount(content []byte) int {
+	trimmed := bytes.TrimSpace(content)
+	if len(trimmed) == 0 {
+		return 0
+	}
+	return bytes.Count(trimmed, []byte{'\n'}) + 1
+}
+
+func mergeHostAgentProgressEvents(current []byte, incoming []byte) ([]byte, error) {
+	currentLines := bytes.Split(bytes.TrimSpace(current), []byte{'\n'})
+	incomingLines := bytes.Split(bytes.TrimSpace(incoming), []byte{'\n'})
+	if len(currentLines) == 0 || len(incomingLines) == 0 {
+		return nil, fmt.Errorf("active event stream is empty")
+	}
+	type parsedEvent struct {
+		sequence  int
+		eventType string
+		encoded   []byte
+	}
+	parse := func(line []byte) (parsedEvent, error) {
+		var identity struct {
+			Sequence json.Number `json:"sequence"`
+			Type     string      `json:"type"`
+		}
+		if err := json.Unmarshal(line, &identity); err != nil {
+			return parsedEvent{}, err
+		}
+		sequence64, err := identity.Sequence.Int64()
+		if err != nil || sequence64 < 1 || int64(int(sequence64)) != sequence64 || identity.Type == "" {
+			return parsedEvent{}, fmt.Errorf("invalid event identity")
+		}
+		var event map[string]any
+		if err := json.Unmarshal(line, &event); err != nil {
+			return parsedEvent{}, err
+		}
+		encoded, err := json.Marshal(event)
+		return parsedEvent{sequence: int(sequence64), eventType: identity.Type, encoded: encoded}, err
+	}
+	parseOrdered := func(label string, lines [][]byte) ([]parsedEvent, error) {
+		parsed := make([]parsedEvent, 0, len(lines))
+		expectedSequence := 1
+		gapSeen := false
+		for _, line := range lines {
+			event, err := parse(line)
+			if err != nil || event.sequence != expectedSequence {
+				return nil, fmt.Errorf("invalid %s event order", label)
+			}
+			parsed = append(parsed, event)
+			if event.eventType == "run-ledger.events.truncated" {
+				gapLast, ok := validHostAgentEventGap(event.encoded, event.sequence)
+				if gapSeen || !ok {
+					return nil, fmt.Errorf("invalid %s event gap", label)
+				}
+				gapSeen = true
+				expectedSequence = gapLast + 1
+			} else {
+				expectedSequence++
+			}
+		}
+		if parsed[0].sequence != 1 {
+			return nil, fmt.Errorf("invalid %s first event", label)
+		}
+		return parsed, nil
+	}
+	currentEvents, err := parseOrdered("current", currentLines)
+	if err != nil {
+		return nil, err
+	}
+	incomingEvents, err := parseOrdered("incoming", incomingLines)
+	if err != nil {
+		return nil, err
+	}
+	lastActualSequence := func(events []parsedEvent) int {
+		last := 0
+		for _, event := range events {
+			if event.eventType != "run-ledger.events.truncated" {
+				last = event.sequence
+			}
+		}
+		return last
+	}
+	if lastActualSequence(incomingEvents) < lastActualSequence(currentEvents) {
+		return nil, fmt.Errorf("incoming event snapshot is stale")
+	}
+	gapRange := func(events []parsedEvent) (int, int) {
+		for _, event := range events {
+			if event.eventType == "run-ledger.events.truncated" {
+				if omitted, ok := runLedgerOmittedEventCount(event.encoded); ok && omitted > 0 {
+					return event.sequence, event.sequence + omitted - 1
+				}
+			}
+		}
+		return 0, 0
+	}
+	currentGapFirst, currentGapLast := gapRange(currentEvents)
+	incomingGapFirst, incomingGapLast := gapRange(incomingEvents)
+	incomingActual := make(map[int]struct{}, len(incomingEvents))
+	for _, event := range incomingEvents {
+		if event.eventType != "run-ledger.events.truncated" {
+			incomingActual[event.sequence] = struct{}{}
+			if event.sequence >= currentGapFirst && event.sequence <= currentGapLast && currentGapFirst > 0 {
+				return nil, fmt.Errorf("incoming snapshot restored an unverifiable event sequence")
+			}
+		}
+	}
+	for _, event := range currentEvents {
+		if event.sequence == 1 || event.eventType == "run-ledger.events.truncated" {
+			continue
+		}
+		insideIncomingGap := incomingGapFirst > 0 && event.sequence >= incomingGapFirst && event.sequence <= incomingGapLast
+		if _, ok := incomingActual[event.sequence]; !ok && !insideIncomingGap {
+			return nil, fmt.Errorf("incoming snapshot dropped an acknowledged event sequence")
+		}
+	}
+	existing := make(map[int][]byte)
+	for _, event := range currentEvents {
+		if event.eventType != "run-ledger.events.truncated" {
+			existing[event.sequence] = event.encoded
+		}
+	}
+	merged := make([][]byte, 0, len(incomingLines))
+	merged = append(merged, currentLines[0])
+	for _, event := range incomingEvents {
+		if event.sequence == 1 {
+			continue
+		}
+		if prior, ok := existing[event.sequence]; ok && event.eventType != "run-ledger.events.truncated" && !bytes.Equal(prior, event.encoded) {
+			return nil, fmt.Errorf("event sequence %d changed", event.sequence)
+		}
+		merged = append(merged, event.encoded)
+	}
+	return append(bytes.Join(merged, []byte{'\n'}), '\n'), nil
+}
+
+func validHostAgentEventGap(encoded []byte, sequence int) (int, bool) {
+	omitted, ok := runLedgerOmittedEventCount(encoded)
+	if !ok || omitted < 1 {
+		return 0, false
+	}
+	var event map[string]any
+	if err := json.Unmarshal(encoded, &event); err != nil {
+		return 0, false
+	}
+	details, ok := event["details"].(map[string]any)
+	if !ok {
+		return 0, false
+	}
+	first, firstOK := numberValue(details["firstOmittedSequence"])
+	last, lastOK := numberValue(details["lastOmittedSequence"])
+	wantLast := sequence + omitted - 1
+	if !firstOK || !lastOK || first != float64(sequence) || last != float64(wantLast) {
+		return 0, false
+	}
+	return wantLast, true
+}
+
+func mergeHostAgentTerminalEvents(current []byte, incoming []byte) ([]byte, error) {
+	currentLines := bytes.Split(bytes.TrimSpace(current), []byte{'\n'})
+	incomingLines := bytes.Split(bytes.TrimSpace(incoming), []byte{'\n'})
+	if len(currentLines) == 0 || len(incomingLines) == 0 {
+		return nil, fmt.Errorf("terminal event stream is empty")
+	}
+	gap := func(label string, lines [][]byte) (int, []byte, error) {
+		last := 0
+		var marker []byte
+		for _, line := range lines {
+			var identity struct {
+				Sequence json.Number `json:"sequence"`
+				Type     string      `json:"type"`
+			}
+			if err := json.Unmarshal(line, &identity); err != nil {
+				return 0, nil, fmt.Errorf("invalid %s event identity", label)
+			}
+			if identity.Type != "run-ledger.events.truncated" {
+				continue
+			}
+			if marker != nil {
+				return 0, nil, fmt.Errorf("multiple %s event gaps", label)
+			}
+			sequence, err := identity.Sequence.Int64()
+			gapLast, ok := validHostAgentEventGap(line, int(sequence))
+			if err != nil || sequence != 2 || !ok {
+				return 0, nil, fmt.Errorf("invalid %s event gap", label)
+			}
+			last = gapLast
+			marker = line
+		}
+		return last, marker, nil
+	}
+	currentGapLast, currentMarker, err := gap("current", currentLines)
+	if err != nil {
+		return nil, err
+	}
+	incomingGapLast, incomingMarker, err := gap("incoming", incomingLines)
+	if err != nil {
+		return nil, err
+	}
+	gapLast := currentGapLast
+	marker := currentMarker
+	if incomingGapLast > gapLast {
+		gapLast = incomingGapLast
+		marker = incomingMarker
+	}
+	if gapLast == 0 {
+		return mergeHostAgentProgressEvents(current, incoming)
+	}
+
+	// Once live clients receive a gap marker, terminal history must never restore
+	// those unverifiable identities. Keep the widest gap and the configured tail.
+	sanitized := make([][]byte, 0, len(incomingLines)+1)
+	sanitized = append(sanitized, incomingLines[0], marker)
+	for _, line := range incomingLines[1:] {
+		var identity struct {
+			Sequence json.Number `json:"sequence"`
+			Type     string      `json:"type"`
+		}
+		if err := json.Unmarshal(line, &identity); err != nil {
+			return nil, fmt.Errorf("invalid incoming event identity")
+		}
+		sequence, err := identity.Sequence.Int64()
+		if err != nil {
+			return nil, fmt.Errorf("invalid incoming event identity")
+		}
+		if identity.Type == "run-ledger.events.truncated" || sequence >= 2 && sequence <= int64(gapLast) {
+			continue
+		}
+		sanitized = append(sanitized, line)
+	}
+	return mergeHostAgentProgressEvents(current, append(bytes.Join(sanitized, []byte{'\n'}), '\n'))
 }
 
 func (handler *controlPlaneHandler) serveHostAgentComplete(response http.ResponseWriter, request *http.Request, agentID string, runID string) {
@@ -1263,6 +1698,17 @@ func (handler *controlPlaneHandler) serveHostAgentComplete(response http.Respons
 		writeControlPlaneError(response, http.StatusConflict, "Host Lock ownership changed")
 		return
 	}
+	handler.mu.Unlock()
+	assignment.checkpointMu.Lock()
+	defer assignment.checkpointMu.Unlock()
+	handler.mu.Lock()
+	assignment = handler.assignments[runID]
+	agent = handler.hostAgents[agentID]
+	if completion.Version != hostAgentAPIVersion || completion.RunID != runID || assignment == nil || assignment.record.AgentID != agentID || agent == nil || !requestMatchesHostAgentCredential(request, agent) || !sameLockToken(completion.LockToken, assignment.record.LockToken) || assignment.record.State != "confirmed" || assignment.finishing || !handler.acceptHostAgentSession(agent, completion.SessionID) {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusConflict, "Host Lock ownership changed")
+		return
+	}
 	assignment.finishing = true
 	handler.mu.Unlock()
 
@@ -1311,15 +1757,25 @@ func (handler *controlPlaneHandler) serveHostAgentFail(response http.ResponseWri
 		return
 	}
 	if failure.Quarantine {
+		handler.mu.Unlock()
 		outcome, runErr, err := handler.quarantineHostAgentAssignment(assignment, agent, failure.Diagnostic)
 		if err != nil {
-			handler.mu.Unlock()
 			writeControlPlaneError(response, http.StatusInternalServerError, "persist quarantined Windows Host Agent assignment")
 			return
 		}
-		handler.mu.Unlock()
 		response.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(response).Encode(controlPlaneTerminalResponse(outcome, runErr, assignment.repoDir))
+		return
+	}
+	handler.mu.Unlock()
+	assignment.checkpointMu.Lock()
+	defer assignment.checkpointMu.Unlock()
+	handler.mu.Lock()
+	assignment = handler.assignments[runID]
+	agent = handler.hostAgents[agentID]
+	if assignment == nil || assignment.record.AgentID != agentID || agent == nil || !requestMatchesHostAgentCredential(request, agent) || !sameLockToken(failure.LockToken, assignment.record.LockToken) || assignment.record.State != "confirmed" || assignment.finishing || !handler.acceptHostAgentSession(agent, failure.SessionID) {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusConflict, "Host Lock ownership changed")
 		return
 	}
 	assignment.finishing = true
@@ -1345,6 +1801,18 @@ func (handler *controlPlaneHandler) serveHostAgentFail(response http.ResponseWri
 		writeControlPlaneError(response, http.StatusInternalServerError, "read durable Windows Host Agent run")
 		return
 	}
+	acknowledgedEvents, err := readRunLedgerBytes(filepath.Join(runLedgerDir(run.repoDir, run.manifest.RunID), filepath.FromSlash(originalLedger.Events)))
+	if err != nil {
+		_ = handler.resetHostAgentFinishing(assignment)
+		writeControlPlaneError(response, http.StatusInternalServerError, "read acknowledged Host Agent events")
+		return
+	}
+	acknowledgedLog, err := readRunLedgerBytes(filepath.Join(runLedgerDir(run.repoDir, run.manifest.RunID), filepath.FromSlash(originalLedger.Log)))
+	if err != nil {
+		_ = handler.resetHostAgentFinishing(assignment)
+		writeControlPlaneError(response, http.StatusInternalServerError, "read acknowledged Host Agent log")
+		return
+	}
 	targetProfile := assignment.record.Submission.TargetProfile
 	if targetProfile == "" {
 		targetProfile = "default"
@@ -1355,11 +1823,13 @@ func (handler *controlPlaneHandler) serveHostAgentFail(response http.ResponseWri
 	run.manifest.TargetProfile = targetProfile
 	run.failedLayer = failureLayerRunState
 	outcome, finishErr := run.finishEarlyFailure(runErr)
-	ledgerErr := finalizeRunLedger(run.repoDir, outcome, run.manifest, run.ledgerPolicy, run.runtime.Now())
-	runErr = errors.Join(finishErr, ledgerErr)
-	terminalLedger, terminalErr := readRunLedgerRecord(run.repoDir, run.manifest.RunID)
-	restoreErr := writeRunLedgerRecord(run.repoDir, originalLedger)
-	if terminalErr != nil || restoreErr != nil {
+	terminalEvents, terminalEventsErr := readRunLedgerBytes(run.context.EventsPath)
+	terminalLedger, transactionErr := finalizeAcknowledgedHostAgentFailure(
+		run.repoDir, outcome, run.manifest, run.ledgerPolicy, run.runtime.Now(),
+		acknowledgedEvents, terminalEvents, acknowledgedLog, failure.Diagnostic, &originalLedger,
+	)
+	runErr = errors.Join(finishErr, terminalEventsErr, transactionErr)
+	if transactionErr != nil {
 		_ = handler.resetHostAgentFinishing(assignment)
 		writeControlPlaneError(response, http.StatusInternalServerError, "stage Windows Host Agent failure")
 		return
@@ -1376,40 +1846,81 @@ func (handler *controlPlaneHandler) serveHostAgentFail(response http.ResponseWri
 }
 
 func (handler *controlPlaneHandler) quarantineHostAgentAssignment(assignment *controlPlaneHostAgentAssignment, agent *controlPlaneHostAgent, diagnostic string) (runOutcome, error, error) {
+	assignment.checkpointMu.Lock()
+	defer assignment.checkpointMu.Unlock()
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	if handler.assignments[assignment.record.RunID] != assignment || handler.hostAgents[assignment.record.AgentID] != agent || assignment.finishing {
+		ownershipErr := errors.New("Host Lock ownership changed") //nolint:staticcheck // Host Lock is a product term.
+		return runOutcome{}, ownershipErr, ownershipErr
+	}
+	if assignment.record.State == "quarantined" && assignment.finished {
+		return assignment.outcome, assignment.err, nil
+	}
+	if assignment.record.State != "confirmed" && assignment.record.State != "quarantined" {
+		ownershipErr := errors.New("Host Lock ownership changed") //nolint:staticcheck // Host Lock is a product term.
+		return runOutcome{}, ownershipErr, ownershipErr
+	}
+	return handler.quarantineHostAgentAssignmentLocked(assignment, agent, diagnostic)
+}
+
+// quarantineHostAgentAssignmentLocked runs with checkpointMu and handler.mu held.
+func (handler *controlPlaneHandler) quarantineHostAgentAssignmentLocked(assignment *controlPlaneHostAgentAssignment, agent *controlPlaneHostAgent, diagnostic string) (runOutcome, error, error) {
 	runErr := errors.New(diagnostic)
-	run := assignment.run
-	if run == nil {
-		var err error
-		run, err = loadAcceptedHostAgentRun(assignment.repoDir, assignment.record, handler.runtime)
-		if err != nil {
-			return runOutcome{}, runErr, err
+	var outcome runOutcome
+	var terminalLedger runLedgerRecord
+	transactionErr := withRunLedgerLock(assignment.repoDir, assignment.record.RunID, func() error {
+		run := assignment.run
+		if run == nil {
+			var err error
+			run, err = loadAcceptedHostAgentRun(assignment.repoDir, assignment.record, handler.runtime)
+			if err != nil {
+				return err
+			}
+			assignment.run = run
 		}
-		assignment.run = run
-	}
-	targetProfile := assignment.record.Submission.TargetProfile
-	if targetProfile == "" {
-		targetProfile = "default"
-	}
-	run.host.HostID = assignment.record.HostID
-	run.host.TargetProfile = targetProfile
-	run.manifest.Host = assignment.record.HostID
-	run.manifest.TargetProfile = targetProfile
-	run.stopPolicy = "unresolved"
-	if err := run.ensureAcceptedFailureEvidence(runErr); err != nil {
-		return runOutcome{}, runErr, err
-	}
-	run.failure.CleanupState = "failed"
-	run.failure.RemediationHint = "Verify and stop the retained Maya session; this version keeps the quarantined Host Lock fail-closed."
-	if err := run.updateTerminalFailureEvidence(); err != nil {
-		return runOutcome{}, runErr, err
-	}
-	outcome := run.currentOutcome()
-	if err := finalizeRunLedger(run.repoDir, outcome, run.manifest, run.ledgerPolicy, run.runtime.Now()); err != nil {
-		return runOutcome{}, runErr, err
-	}
-	terminalLedger, err := readRunLedgerRecord(run.repoDir, assignment.record.RunID)
-	if err != nil {
-		return runOutcome{}, runErr, err
+		currentLedger, err := readRunLedgerRecord(run.repoDir, assignment.record.RunID)
+		if err != nil {
+			return err
+		}
+		acknowledgedEvents, err := readRunLedgerBytes(filepath.Join(runLedgerDir(run.repoDir, assignment.record.RunID), filepath.FromSlash(currentLedger.Events)))
+		if err != nil {
+			return err
+		}
+		acknowledgedLog, err := readRunLedgerBytes(filepath.Join(runLedgerDir(run.repoDir, assignment.record.RunID), filepath.FromSlash(currentLedger.Log)))
+		if err != nil {
+			return err
+		}
+		targetProfile := assignment.record.Submission.TargetProfile
+		if targetProfile == "" {
+			targetProfile = "default"
+		}
+		run.host.HostID = assignment.record.HostID
+		run.host.TargetProfile = targetProfile
+		run.manifest.Host = assignment.record.HostID
+		run.manifest.TargetProfile = targetProfile
+		run.stopPolicy = "unresolved"
+		if err := run.ensureAcceptedFailureEvidence(runErr); err != nil {
+			return err
+		}
+		run.failure.CleanupState = "failed"
+		run.failure.RemediationHint = "Verify and stop the retained Maya session; this version keeps the quarantined Host Lock fail-closed."
+		if err := run.updateTerminalFailureEvidence(); err != nil {
+			return err
+		}
+		terminalEvents, err := readRunLedgerBytes(run.context.EventsPath)
+		if err != nil {
+			return err
+		}
+		outcome = run.currentOutcome()
+		terminalLedger, err = finalizeAcknowledgedHostAgentFailureUnlocked(
+			run.repoDir, outcome, run.manifest, run.ledgerPolicy, run.runtime.Now(),
+			acknowledgedEvents, terminalEvents, acknowledgedLog, diagnostic, nil,
+		)
+		return err
+	})
+	if transactionErr != nil {
+		return runOutcome{}, runErr, transactionErr
 	}
 	quarantined := assignment.record
 	quarantined.State = "quarantined"
@@ -1434,6 +1945,115 @@ func (handler *controlPlaneHandler) quarantineHostAgentAssignment(assignment *co
 	_ = handler.persistHostAgentStatus(agent)
 	handler.signalHostAgent(agent)
 	return outcome, runErr, nil
+}
+
+func preserveAcknowledgedHostAgentFailure(repoDir string, runID string, acknowledged []byte, terminal []byte, acknowledgedLog []byte, diagnostic string, policy runLedgerPolicy) error {
+	return withRunLedgerLock(repoDir, runID, func() error {
+		return preserveAcknowledgedHostAgentFailureUnlocked(repoDir, runID, acknowledged, terminal, acknowledgedLog, diagnostic, policy)
+	})
+}
+
+func finalizeAcknowledgedHostAgentFailure(repoDir string, outcome runOutcome, manifest runManifest, policy runLedgerPolicy, now time.Time, acknowledged []byte, terminal []byte, acknowledgedLog []byte, diagnostic string, restore *runLedgerRecord) (runLedgerRecord, error) {
+	var terminalLedger runLedgerRecord
+	err := withRunLedgerLock(repoDir, manifest.RunID, func() error {
+		var err error
+		terminalLedger, err = finalizeAcknowledgedHostAgentFailureUnlocked(repoDir, outcome, manifest, policy, now, acknowledged, terminal, acknowledgedLog, diagnostic, restore)
+		return err
+	})
+	return terminalLedger, err
+}
+
+func finalizeAcknowledgedHostAgentFailureUnlocked(repoDir string, outcome runOutcome, manifest runManifest, policy runLedgerPolicy, now time.Time, acknowledged []byte, terminal []byte, acknowledgedLog []byte, diagnostic string, restore *runLedgerRecord) (runLedgerRecord, error) {
+	ledgerErr := finalizeRunLedgerUnlocked(repoDir, outcome, manifest, policy, now)
+	var preserveErr error
+	if ledgerErr == nil {
+		preserveErr = preserveAcknowledgedHostAgentFailureUnlocked(repoDir, manifest.RunID, acknowledged, terminal, acknowledgedLog, diagnostic, policy)
+	}
+	var terminalLedger runLedgerRecord
+	var terminalErr error
+	if ledgerErr == nil && preserveErr == nil {
+		terminalLedger, terminalErr = readRunLedgerRecord(repoDir, manifest.RunID)
+	}
+	var restoreErr error
+	if restore != nil {
+		restoreErr = writeRunLedgerRecord(repoDir, *restore)
+	}
+	return terminalLedger, errors.Join(ledgerErr, preserveErr, terminalErr, restoreErr)
+}
+
+func preserveAcknowledgedHostAgentFailureUnlocked(repoDir string, runID string, acknowledged []byte, terminal []byte, acknowledgedLog []byte, diagnostic string, policy runLedgerPolicy) error {
+	record, err := readRunLedgerRecord(repoDir, runID)
+	if err != nil {
+		return err
+	}
+	lines := bytes.Split(bytes.TrimSpace(acknowledged), []byte{'\n'})
+	maxSequence := 0
+	hasFailure := false
+	for _, line := range lines {
+		var event map[string]any
+		if err := json.Unmarshal(line, &event); err != nil {
+			return err
+		}
+		sequence := ledgerEventSequence(event)
+		if event["type"] == "run-ledger.events.truncated" {
+			gapLast, ok := validHostAgentEventGap(line, sequence)
+			if !ok {
+				return fmt.Errorf("invalid acknowledged Host Agent event gap")
+			}
+			sequence = gapLast
+		}
+		if sequence > maxSequence {
+			maxSequence = sequence
+		}
+		hasFailure = hasFailure || fmt.Sprint(event["type"]) == "run.failed"
+	}
+	if !hasFailure {
+		var failureEvent map[string]any
+		for _, line := range bytes.Split(bytes.TrimSpace(terminal), []byte{'\n'}) {
+			var event map[string]any
+			if json.Unmarshal(line, &event) == nil && fmt.Sprint(event["type"]) == "run.failed" {
+				failureEvent = event
+				break
+			}
+		}
+		if failureEvent == nil {
+			failureEvent = map[string]any{"event": "run.failed", "type": "run.failed", "timestamp": record.UpdatedAt, "details": map[string]any{"message": diagnostic}}
+		}
+		failureEvent = normalizeRunLedgerEvent(failureEvent, maxSequence+1, record.UpdatedAt)
+		encoded, err := json.Marshal(failureEvent)
+		if err != nil {
+			return err
+		}
+		lines = append(lines, encoded)
+	}
+	temporaryDir, err := os.MkdirTemp(repoDir, ".host-agent-failure-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(temporaryDir) }()
+	eventsSource := filepath.Join(temporaryDir, runLedgerEventsFileName)
+	if err := writeRunLedgerBytes(eventsSource, append(bytes.Join(lines, []byte{'\n'}), '\n')); err != nil {
+		return err
+	}
+	eventsPath := filepath.Join(runLedgerDir(repoDir, runID), filepath.FromSlash(record.Events))
+	record.EventCount, record.EventsOmitted, record.EventsTruncated, record.EventBytes, err = copyBoundedLedgerEvents(eventsSource, eventsPath, policy.MaxEvents, policy.MaxEventBytes, record.AcceptedAt)
+	if err != nil {
+		return err
+	}
+	combinedLog := append([]byte(nil), acknowledgedLog...)
+	if len(combinedLog) > 0 && combinedLog[len(combinedLog)-1] != '\n' {
+		combinedLog = append(combinedLog, '\n')
+	}
+	combinedLog = append(combinedLog, []byte("Host Agent failure: "+diagnostic+"\n")...)
+	logSource := filepath.Join(temporaryDir, "failure.log")
+	if err := writeRunLedgerBytes(logSource, combinedLog); err != nil {
+		return err
+	}
+	record.LogBytes, record.LogTruncated, err = copyBoundedLedgerLog(logSource, filepath.Join(runLedgerDir(repoDir, runID), filepath.FromSlash(record.Log)), policy.MaxLogBytes)
+	if err != nil {
+		return err
+	}
+	return writeRunLedgerRecord(repoDir, record)
 }
 
 func (handler *controlPlaneHandler) resetHostAgentFinishing(assignment *controlPlaneHostAgentAssignment) error {
@@ -1796,7 +2416,9 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 		sessionExpired := agent != nil && agent.status.SessionID != "" && !now.Before(agent.sessionExpiresAt)
 		restartGraceExpired := agent != nil && agent.status.SessionID == "" && !now.Before(agent.takeoverNotBefore)
 		if assignment.record.State == "confirmed" && !assignment.finishing && (sessionExpired || restartGraceExpired) {
+			handler.mu.Unlock()
 			_, _, _ = handler.quarantineHostAgentAssignment(assignment, agent, "Windows Host Agent process-session lease expired before Maya shutdown was verified")
+			handler.mu.Lock()
 		}
 		done := assignment.done
 		handler.mu.Unlock()
@@ -2089,6 +2711,26 @@ func (handler *controlPlaneHandler) acceptHostAgentCompletion(assignment *contro
 	if err := syncRunLedgerArtifacts(stagingRoot, &merged, policy); err != nil {
 		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, err
 	}
+	currentEvents, err := readRunLedgerBytes(filepath.Join(runLedgerDir(assignment.repoDir, original.RunID), filepath.FromSlash(original.Events)))
+	if err != nil {
+		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, err
+	}
+	stagedEventsPath := filepath.Join(runLedgerDir(stagingRoot, merged.RunID), filepath.FromSlash(merged.Events))
+	stagedEvents, err := readRunLedgerBytes(stagedEventsPath)
+	if err != nil {
+		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, err
+	}
+	identityPreservingEvents, err := mergeHostAgentTerminalEvents(currentEvents, stagedEvents)
+	if err != nil {
+		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, fmt.Errorf("Windows Host Agent terminal events changed acknowledged identity: %w", err) //nolint:staticcheck // Product term starts the user-facing diagnostic.
+	}
+	if err := writeRunLedgerBytes(stagedEventsPath, identityPreservingEvents); err != nil {
+		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, err
+	}
+	merged.EventCount, merged.EventsOmitted, merged.EventsTruncated, merged.EventBytes, err = readRetainedRunLedgerEventMetadata(stagedEventsPath)
+	if err != nil {
+		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, err
+	}
 	stagedFiles, err := buildHostAgentResultFiles(stagingRoot, assignment.record.RunID)
 	if err != nil {
 		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, err
@@ -2313,16 +2955,22 @@ func runHostAgentOnce(options hostAgentRunOnceOptions, runtime runRuntime, stdou
 	if targetProfile == "" {
 		targetProfile = "default"
 	}
+	stopProgress := startHostAgentProgress(options, assignment, repoDir, runtime)
 	outcome, runErr := runScenario(repoDir, runOptions{
 		ScenarioName: assignment.Submission.Scenario, TargetProfile: targetProfile, HostPin: assignment.HostID,
 		HostConfig: hostConfigPath, StopAfter: assignment.Submission.StopAfter, AssignedRunID: assignment.RunID,
 	}, agentRuntime)
+	progressErr := stopProgress()
+	operationalErr := errors.Join(runErr, progressErr)
 	heartbeatErr := currentHostAgentHeartbeatError(heartbeatErrors)
 	if outcome.StopPolicy == "unresolved" || outcome.Failure != nil && outcome.Failure.CleanupState == "failed" {
-		return quarantineConfirmedHostAgentAssignment(options, assignment, runtime, "stopping its Maya UI Session", errors.Join(runErr, heartbeatErr))
+		return quarantineConfirmedHostAgentAssignment(options, assignment, runtime, "stopping its Maya UI Session", errors.Join(operationalErr, heartbeatErr))
 	}
 	if heartbeatErr != nil {
-		return failConfirmedHostAgentAssignment(options, assignment, runtime, "renewing its process-session fence", errors.Join(runErr, heartbeatErr))
+		return failConfirmedHostAgentAssignment(options, assignment, runtime, "renewing its process-session fence", errors.Join(operationalErr, heartbeatErr))
+	}
+	if progressErr != nil {
+		return failConfirmedHostAgentAssignment(options, assignment, runtime, "checkpointing its active Run Ledger", operationalErr)
 	}
 	if outcome.Host != assignment.HostID || outcome.Scenario != assignment.Submission.Scenario || outcome.TargetProfile != targetProfile {
 		identityErr := fmt.Errorf("Windows Host Agent run did not reach the assigned Host identity") //nolint:staticcheck // Product term starts the user-facing diagnostic.
@@ -2354,6 +3002,221 @@ func runHostAgentOnce(options hostAgentRunOnceOptions, runtime runRuntime, stdou
 	}
 	_, _ = fmt.Fprintf(stdout, "agent: %s\nhost: %s\nrun: %s\nstatus: %s\n", options.AgentID, options.HostID, assignment.RunID, responseTerminal.Status)
 	return runErr
+}
+
+func startHostAgentProgress(options hostAgentRunOnceOptions, assignment hostAgentAssignmentResponse, repoDir string, runtime runRuntime) func() error {
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	errorsOut := make(chan error, 1)
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(hostAgentProgressInterval)
+		defer ticker.Stop()
+		var acknowledgedFingerprint [sha256.Size]byte
+		hasAcknowledgedProgress := false
+		progressSnapshotFailures := 0
+		nextCheckpoint := int64(1)
+		var pending *hostAgentProgressRequest
+		var pendingFingerprint [sha256.Size]byte
+		for {
+			select {
+			case <-ticker.C:
+				if pending == nil {
+					progress, err := buildHostAgentProgress(repoDir, assignment, options)
+					if errors.Is(err, os.ErrNotExist) {
+						continue
+					}
+					if err != nil {
+						if terminalErr := terminalHostAgentProgressSnapshotError(&progressSnapshotFailures, err); terminalErr != nil {
+							errorsOut <- terminalErr
+							return
+						}
+						continue
+					}
+					progressSnapshotFailures = 0
+					fingerprint := hostAgentProgressFingerprint(progress)
+					if hasAcknowledgedProgress && fingerprint == acknowledgedFingerprint {
+						continue
+					}
+					progress.Checkpoint = nextCheckpoint
+					pending = &progress
+					pendingFingerprint = fingerprint
+				}
+				path := "/v1/host-agents/" + options.AgentID + "/assignments/" + assignment.RunID + "/progress"
+				var status hostAgentStatusResponse
+				requestContext, cancelRequest := context.WithTimeout(context.Background(), hostAgentHeartbeatRequestTimeout)
+				err := postControlPlaneJSONWithLimitContext(requestContext, options.ControlPlane, options.CredentialEnv, path, *pending, runtime, http.StatusOK, &status, maximumControlPlaneSubmissionBytes)
+				cancelRequest()
+				if err != nil {
+					var statusErr *controlPlaneHTTPStatusError
+					if errors.As(err, &statusErr) && statusErr.StatusCode >= 400 && statusErr.StatusCode < 500 {
+						errorsOut <- err
+						return
+					}
+					// Heartbeats own Agent liveness; retry transient checkpoint failures on the next bounded tick.
+					continue
+				}
+				acknowledgedFingerprint = pendingFingerprint
+				hasAcknowledgedProgress = true
+				nextCheckpoint++
+				pending = nil
+			case <-done:
+				return
+			}
+		}
+	}()
+	return func() error {
+		close(done)
+		<-stopped
+		select {
+		case err := <-errorsOut:
+			return fmt.Errorf("checkpoint active Run Ledger: %w", err)
+		default:
+			return nil
+		}
+	}
+}
+
+func terminalHostAgentProgressSnapshotError(failures *int, snapshotErr error) error {
+	*failures++
+	if *failures < maximumConsecutiveHostAgentProgressSnapshotFailures {
+		return nil
+	}
+	return snapshotErr
+}
+
+func hostAgentProgressFingerprint(progress hostAgentProgressRequest) [sha256.Size]byte {
+	digest := sha256.New()
+	_, _ = digest.Write(progress.Events)
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write(progress.Log)
+	var fingerprint [sha256.Size]byte
+	copy(fingerprint[:], digest.Sum(nil))
+	return fingerprint
+}
+
+type boundedHostAgentProgressArtifacts struct {
+	Events          []byte
+	Log             []byte
+	EventCount      int
+	EventsOmitted   int
+	EventsTruncated bool
+	EventBytes      int
+	LogBytes        int
+	LogTruncated    bool
+}
+
+func boundSanitizedHostAgentProgressArtifacts(temporaryDir string, events []byte, logContent []byte, policy runLedgerPolicy, acceptedAt string, sanitizer hostAgentTextSanitizer) (boundedHostAgentProgressArtifacts, error) {
+	eventsSource := filepath.Join(temporaryDir, "sanitized-events-source.jsonl")
+	eventsPath := filepath.Join(temporaryDir, "sanitized-events.jsonl")
+	if err := writeRunLedgerBytes(eventsSource, []byte(sanitizer.sanitize(string(events)))); err != nil {
+		return boundedHostAgentProgressArtifacts{}, err
+	}
+	eventCount, eventsOmitted, eventsTruncated, eventBytes, err := copyBoundedLedgerEvents(eventsSource, eventsPath, policy.MaxEvents, policy.MaxEventBytes, acceptedAt)
+	if err != nil {
+		return boundedHostAgentProgressArtifacts{}, err
+	}
+	boundedEvents, err := os.ReadFile(eventsPath)
+	if err != nil {
+		return boundedHostAgentProgressArtifacts{}, err
+	}
+	logSource := filepath.Join(temporaryDir, "sanitized-log-source.txt")
+	logPath := filepath.Join(temporaryDir, "sanitized-log.txt")
+	if err := writeRunLedgerBytes(logSource, []byte(sanitizer.sanitize(string(logContent)))); err != nil {
+		return boundedHostAgentProgressArtifacts{}, err
+	}
+	logBytes, logTruncated, err := copyBoundedLedgerLog(logSource, logPath, policy.MaxLogBytes)
+	if err != nil {
+		return boundedHostAgentProgressArtifacts{}, err
+	}
+	boundedLog, err := os.ReadFile(logPath)
+	if err != nil {
+		return boundedHostAgentProgressArtifacts{}, err
+	}
+	return boundedHostAgentProgressArtifacts{
+		Events: boundedEvents, Log: boundedLog, EventCount: eventCount, EventsOmitted: eventsOmitted,
+		EventsTruncated: eventsTruncated, EventBytes: eventBytes, LogBytes: logBytes, LogTruncated: logTruncated,
+	}, nil
+}
+
+func buildHostAgentProgress(repoDir string, assignment hostAgentAssignmentResponse, options hostAgentRunOnceOptions) (hostAgentProgressRequest, error) {
+	record, err := readRunLedgerRecord(repoDir, assignment.RunID)
+	if err != nil {
+		return hostAgentProgressRequest{}, err
+	}
+	temporaryDir, err := os.MkdirTemp(options.WorkRoot, ".progress-*")
+	if err != nil {
+		return hostAgentProgressRequest{}, err
+	}
+	defer func() { _ = os.RemoveAll(temporaryDir) }()
+	policy := hostAgentProgressLedgerPolicy(repoDir)
+	eventsPath := filepath.Join(temporaryDir, runLedgerEventsFileName)
+	_, _, _, _, err = copyBoundedLedgerEvents(
+		filepath.Join(repoDir, ".maya-stall", "state", "runs", assignment.RunID, "events.jsonl"),
+		eventsPath, policy.MaxEvents, policy.MaxEventBytes, record.AcceptedAt,
+	)
+	if err != nil {
+		return hostAgentProgressRequest{}, err
+	}
+	events, err := os.ReadFile(eventsPath)
+	if err != nil {
+		return hostAgentProgressRequest{}, err
+	}
+	logPath := filepath.Join(temporaryDir, "session.log")
+	logSource := filepath.Join(repoDir, ".maya-stall", "state", "runs", assignment.RunID, filepath.FromSlash(evidenceLogPath))
+	_, _, err = copyBoundedLedgerLog(logSource, logPath, policy.MaxLogBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := writeRunLedgerBytes(logPath, nil); err != nil {
+			return hostAgentProgressRequest{}, err
+		}
+	} else if err != nil {
+		return hostAgentProgressRequest{}, err
+	}
+	logContent, err := os.ReadFile(logPath)
+	if err != nil {
+		return hostAgentProgressRequest{}, err
+	}
+	sanitizer := newHostAgentTextSanitizer([]string{repoDir, options.WorkRoot})
+	bounded, err := boundSanitizedHostAgentProgressArtifacts(temporaryDir, events, logContent, policy, record.AcceptedAt, sanitizer)
+	if err != nil {
+		return hostAgentProgressRequest{}, err
+	}
+	targetProfile := assignment.Submission.TargetProfile
+	if targetProfile == "" {
+		targetProfile = "default"
+	}
+	record.TargetProfile = targetProfile
+	record.Host = assignment.HostID
+	record.State = "submitted"
+	record.Status = ""
+	record.CompletedAt = ""
+	record.EventCount = bounded.EventCount
+	record.EventsOmitted = bounded.EventsOmitted
+	record.EventsTruncated = bounded.EventsTruncated
+	record.EventBytes = bounded.EventBytes
+	record.LogBytes = bounded.LogBytes
+	record.LogTruncated = bounded.LogTruncated
+	return hostAgentProgressRequest{
+		Version: hostAgentAPIVersion, RunID: assignment.RunID, LockToken: assignment.LockToken, SessionID: options.SessionID,
+		Ledger: record, Events: bounded.Events, Log: bounded.Log,
+	}, nil
+}
+
+func hostAgentProgressLedgerPolicy(repoDir string) runLedgerPolicy {
+	policy := defaultRunLedgerPolicy()
+	if configured, available := availableRunLedgerPolicy(repoDir); available {
+		policy = configured
+	}
+	if policy.MaxEvents > maximumHostAgentProgressEvents {
+		policy.MaxEvents = maximumHostAgentProgressEvents
+	}
+	if policy.MaxEventBytes > maximumHostAgentProgressEventBytes {
+		policy.MaxEventBytes = maximumHostAgentProgressEventBytes
+	}
+	if policy.MaxLogBytes > maximumHostAgentProgressLogBytes {
+		policy.MaxLogBytes = maximumHostAgentProgressLogBytes
+	}
+	return policy
 }
 
 func startHostAgentHeartbeat(options hostAgentRunOnceOptions, runtime runRuntime) (func(), <-chan error, <-chan error) {

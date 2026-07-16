@@ -102,6 +102,8 @@ token in `MAYA_STALL_CONTROL_PLANE_TOKEN` and pass an origin-only HTTPS URL:
 maya-stall run --control-plane https://maya-stall.example.com smoke
 maya-stall status --control-plane https://maya-stall.example.com --json --run <run-id>
 maya-stall events --control-plane https://maya-stall.example.com <run-id>
+maya-stall attach <run-id> --control-plane https://maya-stall.example.com --from-sequence 1
+maya-stall history --control-plane https://maya-stall.example.com --json
 maya-stall logs --control-plane https://maya-stall.example.com <run-id>
 maya-stall result --control-plane https://maya-stall.example.com <run-id>
 ```

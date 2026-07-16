@@ -128,6 +128,8 @@ submit and read the fake run:
 maya-stall run --control-plane https://maya-stall.example.com smoke
 maya-stall status --control-plane https://maya-stall.example.com --json --run <run-id>
 maya-stall events --control-plane https://maya-stall.example.com <run-id>
+maya-stall attach <run-id> --control-plane https://maya-stall.example.com --from-sequence 1
+maya-stall history --control-plane https://maya-stall.example.com --json
 maya-stall logs --control-plane https://maya-stall.example.com <run-id>
 maya-stall result --control-plane https://maya-stall.example.com <run-id>
 ```
@@ -135,6 +137,10 @@ maya-stall result --control-plane https://maya-stall.example.com <run-id>
 The URL selects Configured Control Plane Mode; Repo Run Config stays unchanged.
 Omit it to keep using Embedded Mode. With no enrolled Agent, the Control Plane
 uses its in-process fake runtime.
+
+The accepted run continues if the submitting client disconnects. Re-run
+configured `attach` with the printed next sequence after a bounded stream ends;
+durable event identities remain stable through completion.
 
 To prove the outbound Windows Host Agent boundary, expose one scoped Agent
 credential to the enrollment client and Host, then run:

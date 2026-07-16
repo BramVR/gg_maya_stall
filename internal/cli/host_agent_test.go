@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -304,6 +305,512 @@ func TestRunCompletesFakeScenarioThroughRegisteredWindowsHostAgent(t *testing.T)
 		t.Fatalf("repeated completion terminal = %+v", repeated)
 	}
 	waitForHostAgentState(t, server.Client(), server.URL, "windows-agent-01", "offline")
+}
+
+func TestRegisteredHostAgentCheckpointsEventsDuringExecution(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	dataDir := privateTempDir(t)
+	agentWorkRoot := privateTempDir(t)
+	handler, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "operator-token")
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	if code := RunWithRuntime([]string{
+		"control-plane", "enroll-agent", "--control-plane", server.URL,
+		"--agent-id", "windows-agent-01", "--host", "maya-win-01",
+		"--credential-env", "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL",
+	}, io.Discard, io.Discard, repoDir, "test-version", runtime); code != 0 {
+		t.Fatalf("enroll Windows Host Agent exit code = %d", code)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	agentRuntime := runtime
+	agentRuntime.SessionStarted = func(brokerSessionIdentity) error {
+		close(started)
+		<-release
+		return nil
+	}
+	agentDone := make(chan int, 1)
+	go func() {
+		agentDone <- RunWithRuntime([]string{
+			"host-agent", "run-once", "--control-plane", server.URL,
+			"--agent-id", "windows-agent-01", "--host", "maya-win-01",
+			"--work-root", agentWorkRoot, "--credential-env", "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL",
+		}, io.Discard, io.Discard, repoDir, "test-version", agentRuntime)
+	}()
+	waitForHostAgentState(t, server.Client(), server.URL, "windows-agent-01", "ready")
+	accepted := make(chan runOutcome, 1)
+	runtime.Accepted = func(outcome runOutcome) { accepted <- outcome }
+	runDone := make(chan int, 1)
+	go func() {
+		runDone <- RunWithRuntime([]string{"run", "--control-plane", server.URL, "smoke"}, io.Discard, io.Discard, repoDir, "test-version", runtime)
+	}()
+	<-started
+	runID := (<-accepted).RunID
+
+	deadline := time.Now().Add(5 * time.Second)
+	var active controlPlaneEventsResponse
+	for {
+		err = getControlPlaneJSON(server.URL, "", "/v1/runs/"+runID+"/events?fromSequence=1", runtime, &active)
+		if err == nil {
+			for _, event := range active.Events {
+				if event["type"] == "run.started" {
+					goto checkpointed
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("active Host Agent events = %+v err %v", active, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+checkpointed:
+	activeEvents := make(map[int][]byte, len(active.Events))
+	for _, event := range active.Events {
+		encoded, err := json.Marshal(event)
+		if err != nil {
+			t.Fatalf("marshal active event: %v", err)
+		}
+		activeEvents[ledgerEventSequence(event)] = encoded
+	}
+	close(release)
+	released = true
+	if code := <-agentDone; code != 0 {
+		t.Fatalf("Windows Host Agent exit code = %d", code)
+	}
+	if code := <-runDone; code != 0 {
+		t.Fatalf("Control Plane run exit code = %d", code)
+	}
+	var terminal controlPlaneEventsResponse
+	if err := getControlPlaneJSON(server.URL, "", "/v1/runs/"+runID+"/events?fromSequence=1", runtime, &terminal); err != nil {
+		t.Fatalf("read terminal Host Agent events: %v", err)
+	}
+	for _, event := range terminal.Events {
+		sequence := ledgerEventSequence(event)
+		if active, ok := activeEvents[sequence]; ok {
+			encoded, err := json.Marshal(event)
+			if err != nil || !bytes.Equal(active, encoded) {
+				t.Fatalf("event sequence %d changed from live %s to terminal %s", sequence, active, encoded)
+			}
+		}
+	}
+}
+
+func TestHostAgentProgressDoesNotHoldControlPlaneMutexDuringLedgerIO(t *testing.T) {
+	repoDir := privateTempDir(t)
+	dataDir := privateTempDir(t)
+	runID := "20260716T120000.000000000Z"
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	record := runLedgerRecord{
+		Version: runLedgerSchemaVersion, RunID: runID, Scenario: "smoke", TargetProfile: "default", Host: "maya-win-01",
+		State: "submitted", AcceptedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano),
+		EvidenceDir: filepath.ToSlash(filepath.Join("artifacts", "maya-stall", runID)), Events: runLedgerEventsFileName, Log: runLedgerLogPath,
+	}
+	if err := writeRunLedgerRecord(repoDir, record); err != nil {
+		t.Fatalf("write active Run Ledger: %v", err)
+	}
+	eventsPath := filepath.Join(runLedgerDir(repoDir, runID), runLedgerEventsFileName)
+	if err := writeRunLedgerBytes(eventsPath, []byte("{\"sequence\":1,\"type\":\"run.accepted\"}\n")); err != nil {
+		t.Fatalf("write active events: %v", err)
+	}
+	if err := writeRunLedgerBytes(filepath.Join(runLedgerDir(repoDir, runID), filepath.FromSlash(runLedgerLogPath)), nil); err != nil {
+		t.Fatalf("write active log: %v", err)
+	}
+
+	validated := make(chan struct{})
+	var observeValidation atomic.Bool
+	var nowCalls atomic.Int32
+	runtime := defaultRunRuntime()
+	runtime.Now = func() time.Time {
+		if observeValidation.Load() && nowCalls.Add(1) == 2 {
+			close(validated)
+		}
+		return now
+	}
+	httpHandler, err := newControlPlaneHandler(dataDir, "operator-token", runtime)
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	handler := httpHandler.(*controlPlaneHandler)
+	credentialDigest := sha256.Sum256([]byte(testHostAgentCredential))
+	agent := &controlPlaneHostAgent{
+		enrollment: hostAgentEnrollmentRecord{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", CredentialSHA256: fmt.Sprintf("%x", credentialDigest)},
+		status:     hostAgentStatusResponse{Version: hostAgentAPIVersion, Kind: "host-agent", AgentID: "windows-agent-01", HostID: "maya-win-01", State: "running", RunID: runID, SessionID: "session-1", SessionBinding: true},
+		notify:     make(chan struct{}), sessionExpiresAt: now.Add(hostAgentSessionLease),
+	}
+	assignment := &controlPlaneHostAgentAssignment{
+		record: hostAgentAssignmentRecord{
+			Version: hostAgentAPIVersion, RunID: runID, AgentID: "windows-agent-01", HostID: "maya-win-01", LockToken: "lock-1", State: "confirmed",
+			Submission: controlPlaneSubmission{Version: controlPlaneAPIVersion, Scenario: "smoke", TargetProfile: "default"}, SessionBindingRequired: true,
+		},
+		repoDir: repoDir, done: make(chan struct{}),
+	}
+	handler.hostAgents[agent.status.AgentID] = agent
+	handler.assignments[runID] = assignment
+
+	server := httptest.NewTLSServer(httpHandler)
+	t.Cleanup(server.Close)
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	runtime.ControlPlaneHTTPClient = server.Client()
+	lockHeld := make(chan struct{})
+	releaseLock := make(chan struct{})
+	lockDone := make(chan error, 1)
+	go func() {
+		lockDone <- withRunLedgerLock(repoDir, runID, func() error {
+			close(lockHeld)
+			<-releaseLock
+			return nil
+		})
+	}()
+	<-lockHeld
+	progress := hostAgentProgressRequest{
+		Version: hostAgentAPIVersion, RunID: runID, LockToken: "lock-1", SessionID: "session-1", Checkpoint: 1, Ledger: record,
+		Events: []byte("{\"sequence\":1,\"type\":\"run.accepted\"}\n{\"sequence\":2,\"type\":\"run.started\"}\n"), Log: []byte("started\n"),
+	}
+	progressDone := make(chan error, 1)
+	observeValidation.Store(true)
+	go func() {
+		var response hostAgentStatusResponse
+		progressDone <- postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/assignments/"+runID+"/progress", progress, runtime, http.StatusOK, &response)
+	}()
+	select {
+	case <-validated:
+	case <-time.After(2 * time.Second):
+		close(releaseLock)
+		t.Fatal("progress request did not pass Host Agent validation")
+	}
+	time.Sleep(20 * time.Millisecond)
+	mutexAvailable := handler.mu.TryLock()
+	if mutexAvailable {
+		handler.mu.Unlock()
+	}
+	confirmDone := make(chan error, 1)
+	go func() {
+		var response hostAgentStatusResponse
+		confirmDone <- postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/assignments/"+runID+"/confirm", hostAgentLockRequest{
+			Version: hostAgentAPIVersion, RunID: runID, LockToken: "lock-1", SessionID: "session-1",
+		}, runtime, http.StatusOK, &response)
+	}()
+	confirmCompletedDuringCheckpoint := false
+	var confirmErr error
+	select {
+	case confirmErr = <-confirmDone:
+		confirmCompletedDuringCheckpoint = true
+	case <-time.After(50 * time.Millisecond):
+	}
+	sessionDone := make(chan error, 1)
+	go func() {
+		var response hostAgentStatusResponse
+		sessionDone <- postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/assignments/"+runID+"/session", hostAgentSessionRequest{
+			Version: hostAgentAPIVersion, RunID: runID, LockToken: "lock-1", SessionID: "session-1", BrokerSession: brokerSessionIdentity{BrokerAdapter: "fake", SessionID: "maya-session-1"},
+		}, runtime, http.StatusOK, &response)
+	}()
+	sessionCompletedDuringCheckpoint := false
+	var sessionErr error
+	select {
+	case sessionErr = <-sessionDone:
+		sessionCompletedDuringCheckpoint = true
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseLock)
+	if err := <-lockDone; err != nil {
+		t.Fatalf("release held Run Ledger lock: %v", err)
+	}
+	if err := <-progressDone; err != nil {
+		t.Fatalf("persist Host Agent progress: %v", err)
+	}
+	if !confirmCompletedDuringCheckpoint {
+		confirmErr = <-confirmDone
+	}
+	if confirmErr != nil && !confirmCompletedDuringCheckpoint {
+		t.Fatalf("retry Host Lock confirmation after checkpoint: %v", confirmErr)
+	}
+	if !sessionCompletedDuringCheckpoint {
+		sessionErr = <-sessionDone
+	}
+	if sessionErr != nil && !sessionCompletedDuringCheckpoint {
+		t.Fatalf("bind Maya UI Session after checkpoint: %v", sessionErr)
+	}
+	if !mutexAvailable {
+		t.Fatal("Host Agent progress held the global Control Plane mutex while waiting on Run Ledger I/O")
+	}
+	if confirmCompletedDuringCheckpoint {
+		t.Fatal("Host Lock confirmation retry was allowed to race an in-flight Host Agent checkpoint")
+	}
+	if sessionCompletedDuringCheckpoint {
+		t.Fatal("Maya UI Session binding was allowed to race an in-flight Host Agent checkpoint")
+	}
+	handler.mu.Lock()
+	bound := handler.assignments[runID].record.BrokerSession
+	handler.mu.Unlock()
+	if bound == nil || bound.BrokerAdapter != "fake" || bound.SessionID != "maya-session-1" {
+		t.Fatalf("Maya UI Session binding after checkpoint = %+v", bound)
+	}
+}
+
+func TestMergeHostAgentProgressEventsRejectsDuplicateOrReorderedSequences(t *testing.T) {
+	current := []byte("{\"sequence\":1,\"type\":\"run.accepted\"}\n")
+	tests := map[string][]byte{
+		"duplicate":  []byte("{\"sequence\":1,\"type\":\"run.accepted\"}\n{\"sequence\":2,\"type\":\"run.started\"}\n{\"sequence\":2,\"type\":\"run.changed\"}\n"),
+		"reordered":  []byte("{\"sequence\":1,\"type\":\"run.accepted\"}\n{\"sequence\":3,\"type\":\"run.changed\"}\n{\"sequence\":2,\"type\":\"run.started\"}\n"),
+		"fractional": []byte("{\"sequence\":1,\"type\":\"run.accepted\"}\n{\"sequence\":2.5,\"type\":\"run.changed\"}\n"),
+	}
+	for name, incoming := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := mergeHostAgentProgressEvents(current, incoming); err == nil {
+				t.Fatal("malformed progress events were accepted")
+			}
+		})
+	}
+	current = []byte("{\"sequence\":1,\"type\":\"run.accepted\"}\n{\"sequence\":2,\"type\":\"run.started\"}\n{\"sequence\":3,\"type\":\"run.changed\"}\n")
+	stale := []byte("{\"sequence\":1,\"type\":\"run.accepted\"}\n{\"sequence\":2,\"type\":\"run.started\"}\n")
+	if _, err := mergeHostAgentProgressEvents(current, stale); err == nil {
+		t.Fatal("stale progress snapshot rewound acknowledged events")
+	}
+	middleMissing := []byte("{\"sequence\":1,\"type\":\"run.accepted\"}\n{\"sequence\":3,\"type\":\"run.changed\"}\n")
+	if _, err := mergeHostAgentProgressEvents(current, middleMissing); err == nil {
+		t.Fatal("progress snapshot silently dropped a middle event")
+	}
+	freshGap := []byte("{\"sequence\":1,\"type\":\"run.accepted\"}\n{\"sequence\":3,\"type\":\"run.changed\"}\n")
+	if _, err := mergeHostAgentProgressEvents([]byte("{\"sequence\":1,\"type\":\"run.accepted\"}\n"), freshGap); err == nil {
+		t.Fatal("progress snapshot silently introduced an unmarked sequence gap")
+	}
+}
+
+func TestMergeHostAgentTerminalEventsPreservesCheckpointGapAndTerminalTail(t *testing.T) {
+	current := []byte("{\"sequence\":1,\"timestamp\":\"2026-07-16T00:00:00Z\",\"type\":\"run.accepted\"}\n" +
+		"{\"details\":{\"firstOmittedSequence\":2,\"lastOmittedSequence\":3,\"omittedCount\":2},\"sequence\":2,\"timestamp\":\"2026-07-16T00:00:00Z\",\"type\":\"run-ledger.events.truncated\"}\n" +
+		"{\"sequence\":4,\"type\":\"run.changed\"}\n")
+	incoming := []byte("{\"sequence\":1,\"timestamp\":\"2026-07-16T00:00:00Z\",\"type\":\"run.accepted\"}\n" +
+		"{\"sequence\":2,\"type\":\"run.started\"}\n" +
+		"{\"sequence\":3,\"type\":\"run.executing\"}\n" +
+		"{\"sequence\":4,\"type\":\"run.changed\"}\n" +
+		"{\"sequence\":5,\"type\":\"run.completed\"}\n")
+
+	merged, err := mergeHostAgentTerminalEvents(current, incoming)
+	if err != nil {
+		t.Fatalf("merge terminal events: %v", err)
+	}
+	if bytes.Contains(merged, []byte(`"type":"run.started"`)) || bytes.Contains(merged, []byte(`"type":"run.executing"`)) {
+		t.Fatalf("terminal events restored unverifiable checkpoint gap: %s", merged)
+	}
+	if !bytes.Contains(merged, []byte(`"omittedCount":2`)) || !bytes.Contains(merged, []byte(`"sequence":5`)) {
+		t.Fatalf("terminal merge lost the checkpoint gap or terminal tail: %s", merged)
+	}
+}
+
+func TestHostAgentProgressFingerprintChangesOnlyWithStreamContent(t *testing.T) {
+	progress := hostAgentProgressRequest{Events: []byte("event\n"), Log: []byte("log\n")}
+	baseline := hostAgentProgressFingerprint(progress)
+	if got := hostAgentProgressFingerprint(progress); got != baseline {
+		t.Fatal("unchanged progress content produced a different fingerprint")
+	}
+	progress.Log = append(progress.Log, []byte("changed\n")...)
+	if got := hostAgentProgressFingerprint(progress); got == baseline {
+		t.Fatal("changed progress content produced the same fingerprint")
+	}
+}
+
+func TestHostAgentProgressEventCountBound(t *testing.T) {
+	content := bytes.Repeat([]byte("{}\n"), maximumHostAgentProgressEvents+1)
+	if got := runLedgerEventLineCount(content); got != maximumHostAgentProgressEvents+1 {
+		t.Fatalf("progress event line count = %d", got)
+	}
+}
+
+func TestHostAgentProgressSnapshotFailureIsRetriedBeforeBecomingTerminal(t *testing.T) {
+	var failures int
+	transient := errors.New("partial trailing event")
+	if err := terminalHostAgentProgressSnapshotError(&failures, transient); err != nil {
+		t.Fatalf("first snapshot failure was terminal: %v", err)
+	}
+	if failures != 1 {
+		t.Fatalf("snapshot failures = %d", failures)
+	}
+	if err := terminalHostAgentProgressSnapshotError(&failures, transient); err != nil {
+		t.Fatalf("second snapshot failure was terminal: %v", err)
+	}
+	if err := terminalHostAgentProgressSnapshotError(&failures, transient); !errors.Is(err, transient) {
+		t.Fatalf("third consecutive snapshot failure = %v", err)
+	}
+}
+
+func TestHostAgentProgressRejectedWhileTerminalCommitIsFinishing(t *testing.T) {
+	assignment := &controlPlaneHostAgentAssignment{
+		record:    hostAgentAssignmentRecord{State: "confirmed"},
+		finishing: true,
+	}
+	if hostAgentAssignmentAcceptsProgress(assignment) {
+		t.Fatal("progress remained writable during terminal commit")
+	}
+}
+
+func TestHostAgentProgressReboundsSanitizedArtifacts(t *testing.T) {
+	temporaryDir := privateTempDir(t)
+	var events bytes.Buffer
+	for sequence := 1; sequence <= 20; sequence++ {
+		_, _ = fmt.Fprintf(&events, "{\"details\":{\"path\":\"x\"},\"sequence\":%d,\"type\":\"run.changed\"}\n", sequence)
+	}
+	policy := runLedgerPolicy{MaxEvents: 20, MaxEventBytes: 1024, MaxLogBytes: 128}
+
+	bounded, err := boundSanitizedHostAgentProgressArtifacts(
+		temporaryDir, events.Bytes(), bytes.Repeat([]byte("x"), 100), policy,
+		"2026-07-16T00:00:00Z", newHostAgentTextSanitizer([]string{"x"}),
+	)
+
+	if err != nil {
+		t.Fatalf("bound sanitized progress: %v", err)
+	}
+	if len(bounded.Events) > policy.MaxEventBytes || len(bounded.Log) > policy.MaxLogBytes {
+		t.Fatalf("sanitized progress exceeded bounds: events %d, log %d", len(bounded.Events), len(bounded.Log))
+	}
+	if bounded.EventBytes != len(bounded.Events) || bounded.LogBytes != len(bounded.Log) || !bounded.EventsTruncated || !bounded.LogTruncated {
+		t.Fatalf("sanitized progress metadata = %+v", bounded)
+	}
+}
+
+func TestHostAgentFailurePreservationAppendsExactTerminalFailureEvent(t *testing.T) {
+	repoDir := privateTempDir(t)
+	runID := "20260716T120000.000000000Z"
+	record := runLedgerRecord{
+		Version: runLedgerSchemaVersion, RunID: runID, Scenario: "smoke", TargetProfile: "default", Host: "maya-win-01",
+		State: "failed", Status: resultStatusFailed, AcceptedAt: "2026-07-16T12:00:00Z", UpdatedAt: "2026-07-16T12:01:00Z",
+		EvidenceDir: filepath.ToSlash(filepath.Join("artifacts", "maya-stall", runID)), Events: runLedgerEventsFileName, Log: runLedgerLogPath,
+	}
+	if err := writeRunLedgerRecord(repoDir, record); err != nil {
+		t.Fatalf("write run ledger: %v", err)
+	}
+	acknowledged := []byte("{\"sequence\":1,\"type\":\"run.accepted\"}\n{\"sequence\":2,\"type\":\"run.failed-before-result-collection\"}\n")
+	terminal := []byte("{\"sequence\":2,\"type\":\"run.failed\"}\n")
+
+	if err := preserveAcknowledgedHostAgentFailure(repoDir, runID, acknowledged, terminal, nil, "Agent failed", defaultRunLedgerPolicy()); err != nil {
+		t.Fatalf("preserve Host Agent failure: %v", err)
+	}
+	retained, err := os.ReadFile(filepath.Join(runLedgerDir(repoDir, runID), runLedgerEventsFileName))
+	if err != nil {
+		t.Fatalf("read retained failure events: %v", err)
+	}
+	if !bytes.Contains(retained, []byte(`"sequence":3`)) || !bytes.Contains(retained, []byte(`"type":"run.failed"`)) {
+		t.Fatalf("retained events omitted exact terminal failure: %s", retained)
+	}
+}
+
+func TestHostAgentFailureSequenceAdvancesPastRetainedGap(t *testing.T) {
+	repoDir := privateTempDir(t)
+	runID := "20260716T120000.000000000Z"
+	record := runLedgerRecord{
+		Version: runLedgerSchemaVersion, RunID: runID, Scenario: "smoke", TargetProfile: "default", Host: "maya-win-01",
+		State: "failed", Status: resultStatusFailed, AcceptedAt: "2026-07-16T12:00:00Z", UpdatedAt: "2026-07-16T12:01:00Z",
+		EvidenceDir: filepath.ToSlash(filepath.Join("artifacts", "maya-stall", runID)), Events: runLedgerEventsFileName, Log: runLedgerLogPath,
+	}
+	if err := writeRunLedgerRecord(repoDir, record); err != nil {
+		t.Fatalf("write run ledger: %v", err)
+	}
+	acknowledged := []byte("{\"sequence\":1,\"type\":\"run.accepted\"}\n" +
+		"{\"details\":{\"firstOmittedSequence\":2,\"lastOmittedSequence\":6,\"omittedCount\":5},\"sequence\":2,\"type\":\"run-ledger.events.truncated\"}\n")
+
+	if err := preserveAcknowledgedHostAgentFailure(repoDir, runID, acknowledged, []byte("{\"sequence\":2,\"type\":\"run.failed\"}\n"), nil, "Agent failed", defaultRunLedgerPolicy()); err != nil {
+		t.Fatalf("preserve Host Agent failure: %v", err)
+	}
+	retained, err := os.ReadFile(filepath.Join(runLedgerDir(repoDir, runID), runLedgerEventsFileName))
+	if err != nil {
+		t.Fatalf("read retained failure events: %v", err)
+	}
+	if !bytes.Contains(retained, []byte(`"sequence":7`)) || !bytes.Contains(retained, []byte(`"type":"run.failed"`)) {
+		t.Fatalf("failure did not advance beyond retained gap: %s", retained)
+	}
+}
+
+func TestAcceptedRunSurvivesDisconnectBeforeHostAgentAssignmentPickup(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	dataDir := privateTempDir(t)
+	handler, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "operator-token")
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	if code := RunWithRuntime([]string{
+		"control-plane", "enroll-agent", "--control-plane", server.URL,
+		"--agent-id", "windows-agent-01", "--host", "maya-win-01",
+		"--credential-env", "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL",
+	}, io.Discard, io.Discard, repoDir, "test-version", runtime); code != 0 {
+		t.Fatalf("enroll Windows Host Agent exit code = %d", code)
+	}
+	var status hostAgentStatusResponse
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", hostAgentRegistrationRequest{
+		Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1, SessionBinding: true,
+	}, runtime, http.StatusOK, &status); err != nil {
+		t.Fatalf("register Windows Host Agent: %v", err)
+	}
+	submission, err := buildControlPlaneSubmission(repoDir, runOptions{ScenarioName: "smoke", StopAfter: stopAfterAlways})
+	if err != nil {
+		t.Fatalf("build Control Plane submission: %v", err)
+	}
+	body, _ := json.Marshal(submission)
+	request := httptest.NewRequest(http.MethodPost, "https://maya-stall.example.com/v1/runs", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer operator-token")
+	ctx, cancel := context.WithCancel(request.Context())
+	request = request.WithContext(ctx)
+	submitDone := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(&failingControlPlaneResponseWriter{header: make(http.Header)}, request)
+		close(submitDone)
+	}()
+	concrete := handler.(*controlPlaneHandler)
+	var runID string
+	deadline := time.Now().Add(2 * time.Second)
+	for runID == "" {
+		concrete.mu.Lock()
+		for candidate := range concrete.assignments {
+			runID = candidate
+		}
+		concrete.mu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("accepted run was not retained before Agent pickup")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	var assignment hostAgentAssignmentResponse
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/assignments/next", hostAgentNextRequest{
+		Version: hostAgentAPIVersion, SessionID: status.SessionID,
+	}, runtime, http.StatusOK, &assignment); err != nil {
+		t.Fatalf("pick up assignment after submitter disconnect: %v", err)
+	}
+	if assignment.RunID != runID {
+		t.Fatalf("picked up Run ID = %s, want %s", assignment.RunID, runID)
+	}
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/assignments/"+runID+"/confirm", hostAgentLockRequest{
+		Version: hostAgentAPIVersion, RunID: runID, LockToken: assignment.LockToken, SessionID: status.SessionID,
+	}, runtime, http.StatusOK, &status); err != nil {
+		t.Fatalf("confirm assignment after submitter disconnect: %v", err)
+	}
+	var terminal runCommandJSON
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/assignments/"+runID+"/fail", hostAgentFailureRequest{
+		Version: hostAgentAPIVersion, RunID: runID, LockToken: assignment.LockToken, SessionID: status.SessionID, Diagnostic: "controlled Agent stop before execution",
+	}, runtime, http.StatusOK, &terminal); err != nil {
+		t.Fatalf("settle assignment after submitter disconnect: %v", err)
+	}
+	<-submitDone
+	assertOnlyControlPlaneRunState(t, dataDir, "failed")
 }
 
 func TestEnsureHostAgentDirectoryDistinguishesFileFromSymlink(t *testing.T) {
@@ -1814,6 +2321,9 @@ func TestStaleHostLockTokenIsRejectedWithoutMutation(t *testing.T) {
 		{"bind-wrong-credential", "/v1/host-agents/windows-agent-01/assignments/" + assignment.RunID + "/session", hostAgentSessionRequest{Version: hostAgentAPIVersion, RunID: assignment.RunID, LockToken: assignment.LockToken, SessionID: status.SessionID, BrokerSession: brokerSessionIdentity{BrokerAdapter: "gg-mayasessiond", SessionID: "maya-session-01"}}, "wrong", http.StatusUnauthorized},
 		{"bind-stale-session", "/v1/host-agents/windows-agent-01/assignments/" + assignment.RunID + "/session", hostAgentSessionRequest{Version: hostAgentAPIVersion, RunID: assignment.RunID, LockToken: assignment.LockToken, SessionID: staleSession, BrokerSession: brokerSessionIdentity{BrokerAdapter: "gg-mayasessiond", SessionID: "maya-session-01"}}, testHostAgentCredential, http.StatusConflict},
 		{"bind-stale-lock-token", "/v1/host-agents/windows-agent-01/assignments/" + assignment.RunID + "/session", hostAgentSessionRequest{Version: hostAgentAPIVersion, RunID: assignment.RunID, LockToken: strings.Repeat("0", len(assignment.LockToken)), SessionID: status.SessionID, BrokerSession: brokerSessionIdentity{BrokerAdapter: "gg-mayasessiond", SessionID: "maya-session-01"}}, testHostAgentCredential, http.StatusConflict},
+		{"progress-wrong-credential", "/v1/host-agents/windows-agent-01/assignments/" + assignment.RunID + "/progress", hostAgentProgressRequest{Version: hostAgentAPIVersion, RunID: assignment.RunID, LockToken: assignment.LockToken, SessionID: status.SessionID}, "wrong", http.StatusUnauthorized},
+		{"progress-stale-session", "/v1/host-agents/windows-agent-01/assignments/" + assignment.RunID + "/progress", hostAgentProgressRequest{Version: hostAgentAPIVersion, RunID: assignment.RunID, LockToken: assignment.LockToken, SessionID: staleSession}, testHostAgentCredential, http.StatusConflict},
+		{"progress-stale-lock-token", "/v1/host-agents/windows-agent-01/assignments/" + assignment.RunID + "/progress", hostAgentProgressRequest{Version: hostAgentAPIVersion, RunID: assignment.RunID, LockToken: strings.Repeat("0", len(assignment.LockToken)), SessionID: status.SessionID}, testHostAgentCredential, http.StatusConflict},
 		{"fail-wrong-credential", "/v1/host-agents/windows-agent-01/assignments/" + assignment.RunID + "/fail", hostAgentFailureRequest{Version: hostAgentAPIVersion, RunID: assignment.RunID, LockToken: assignment.LockToken, SessionID: status.SessionID, Diagnostic: "rejected"}, "wrong", http.StatusUnauthorized},
 		{"fail-stale-session", "/v1/host-agents/windows-agent-01/assignments/" + assignment.RunID + "/fail", hostAgentFailureRequest{Version: hostAgentAPIVersion, RunID: assignment.RunID, LockToken: assignment.LockToken, SessionID: staleSession, Diagnostic: "rejected"}, testHostAgentCredential, http.StatusConflict},
 		{"complete-wrong-credential", "/v1/host-agents/windows-agent-01/assignments/" + assignment.RunID + "/complete", hostAgentCompletionRequest{Version: hostAgentAPIVersion, RunID: assignment.RunID, LockToken: assignment.LockToken, SessionID: status.SessionID}, "wrong", http.StatusUnauthorized},

@@ -47,7 +47,8 @@ through host config outside the consuming repo.
 The CLI has two operating modes. Embedded Mode is the default and keeps run
 ownership in the current checkout. Configured Control Plane Mode submits the
 same Scenario contract and declared payload snapshot to an authenticated HTTPS
-service. It can synchronously complete a fake or Agent-configured real Scenario
+service. It can complete a fake or Agent-configured real Scenario independently
+of the submitting connection
 through a registered outbound Windows Host Agent while keeping Host credentials
 and scheduling state outside Repo Run Config. Mode selection uses CLI flags,
 not Repo Run Config.
@@ -100,7 +101,8 @@ For a configured fake Control Plane, set
 `MAYA_STALL_CONTROL_PLANE_TOKEN` and add
 `--control-plane https://maya-stall.example.com` to `run` or `evidence
 collect`. Read the returned Run ID with `status`, `events`, `logs`, and
-`result` using the same flag.
+`result` using the same flag, or reconnect with `attach --from-sequence` while
+the run is active.
 
 To traverse the registered Agent contract, enroll one scoped Agent credential,
 then run [`host-agent run-once`](commands/host-agent.md) on its fixed Host before

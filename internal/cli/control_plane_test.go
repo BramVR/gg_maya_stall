@@ -895,6 +895,28 @@ func TestAttachReconnectsConfiguredRunFromRequestedSequence(t *testing.T) {
 	}
 }
 
+func TestAttachRejectsUnexpectedControlPlaneStreamContentType(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "test-token")
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := RunWithRuntime([]string{"attach", "run-1", "--control-plane", server.URL}, &stdout, &stderr, privateTempDir(t), "test-version", runtime)
+
+	if code != 1 {
+		t.Fatalf("configured attach exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `unexpected Content-Type "application/json"`) {
+		t.Fatalf("configured attach error missing observed Content-Type: %s", stderr.String())
+	}
+}
+
 func TestLogsReadConfiguredControlPlaneRunAsStableJSON(t *testing.T) {
 	repoDir := writeRunConfigFixture(t)
 	handler, err := newControlPlaneHandler(privateTempDir(t), "test-token", defaultRunRuntime())

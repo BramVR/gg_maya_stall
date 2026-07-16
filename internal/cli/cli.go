@@ -569,7 +569,7 @@ Usage:
   maya-stall init
   maya-stall doctor [--host-config <path>] [--target-profile <name>] [--host <id>] [--scenario <name>] [--repair-trusted-plugin-allowlist]
   maya-stall plan [--json] [--host-config <path>] <scenario>
-	  maya-stall history [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] [--before-run <run-id>] [--scenario <name>] [--host <id>] [--state <state>] [--since <duration-or-rfc3339>]
+  maya-stall history [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] [--before-run <run-id>] [--scenario <name>] [--host <id>] [--state <state>] [--since <duration-or-rfc3339>]
   maya-stall run [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] [--host-config <path>] [--target-profile <name>] [--host <id>] [--host-lock-wait <duration>|--host-lock-fail-fast] [--keep-on-failure|--stop-after <success|failure|always|never>] <scenario>
   maya-stall status [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] --run <run-id>
   maya-stall events [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] [--from-sequence <number>] <run-id>

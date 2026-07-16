@@ -173,8 +173,11 @@ func attachControlPlaneRun(options attachOptions, stdout io.Writer, runtime runR
 		return fmt.Errorf("attach to Control Plane: %w", err)
 	}
 	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "application/x-ndjson" {
+	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("control plane attach failed with HTTP %d", response.StatusCode)
+	}
+	if contentType := response.Header.Get("Content-Type"); contentType != "application/x-ndjson" {
+		return fmt.Errorf("control plane attach returned unexpected Content-Type %q", contentType)
 	}
 	decoder := json.NewDecoder(io.LimitReader(response.Body, int64(maximumControlPlaneLedgerResponseBytes)+1))
 	lastSequence := options.FromSequence - 1

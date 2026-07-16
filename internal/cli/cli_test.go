@@ -39,6 +39,9 @@ func TestHelpAndVersion(t *testing.T) {
 	if !strings.Contains(stdout.String(), "maya-stall") || !strings.Contains(stdout.String(), "init") {
 		t.Fatalf("help output missing command surface:\n%s", stdout.String())
 	}
+	if strings.Contains(stdout.String(), "\n\t") {
+		t.Fatalf("help output contains tab-indented command:\n%s", stdout.String())
+	}
 
 	stdout.Reset()
 	stderr.Reset()

@@ -200,9 +200,6 @@ func configuredMayaHostCapabilityRecord(host mayaHostConfig, now time.Time) maya
 	capabilities := inferredMayaHostCapabilities(host)
 	if host.Capabilities != nil {
 		capabilities = *host.Capabilities
-		if capabilities.SessionMayaBuild == "" && len(capabilities.MayaBuilds) == 1 {
-			capabilities.SessionMayaBuild = strings.TrimSpace(capabilities.MayaBuilds[0])
-		}
 	}
 	health := strings.ToLower(strings.TrimSpace(host.Health))
 	if health == "" {
@@ -245,7 +242,8 @@ func inferredMayaHostCapabilities(host mayaHostConfig) mayaHostCapabilities {
 	}
 	mayaBuilds := staticMayaVersions(host)
 	sessionMayaBuild := ""
-	if len(mayaBuilds) == 1 {
+	if !host.usesRealSSH() && len(mayaBuilds) == 1 {
+		// The controlled fake runtime is exact; real inventory names can be coarse product families.
 		sessionMayaBuild = mayaBuilds[0]
 	}
 	return mayaHostCapabilities{

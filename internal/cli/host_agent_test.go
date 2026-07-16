@@ -2619,6 +2619,7 @@ func enrollTestHostAgent(t *testing.T, workDir string, serverURL string, runtime
 
 func testHostAgentCapabilityRecord(hostID string, now time.Time) mayaHostCapabilityRecord {
 	report := configuredMayaHostCapabilityRecord(mayaHostConfig{ID: hostID, Health: "healthy"}, now)
+	report.Capabilities.SessionMayaBuild = report.Capabilities.MayaBuilds[0]
 	report.TargetProfiles = []string{"default"}
 	return report
 }

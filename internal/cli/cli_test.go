@@ -73,7 +73,8 @@ func TestInitWritesRepoOnlySmokeScenario(t *testing.T) {
 		"version: 1",
 		"scenarios:",
 		"smoke:",
-		"mayaVersion:",
+		"requirements:",
+		"minimum: \"2025\"",
 		"payload:",
 		"evidence:",
 	} {
@@ -114,6 +115,43 @@ func TestInitConfigRunsFakeSmokeScenario(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "status: passed") {
 		t.Fatalf("run output missing passed status:\n%s", stdout.String())
+	}
+}
+
+func TestInitConfigPlansForPreparedPointReleaseHost(t *testing.T) {
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"init"}, &stdout, &stderr, dir, "test-version"); code != 0 {
+		t.Fatalf("init exit code = %d; stderr: %s", code, stderr.String())
+	}
+	hostConfig := filepath.Join(dir, "hosts.yaml")
+	mustWriteFile(t, hostConfig, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows
+hostPools:
+  windows:
+    hosts:
+      - id: maya-win-01
+        capabilities:
+          mayaBuilds: ["2025.3"]
+          sessionMayaBuild: "2025.3"
+          python: "3.11"
+          sessionBroker:
+            version: "1"
+            features: [script.execute]
+          capture: [screenshot, visual-evidence]
+          control: []
+          renderers: [unknown]
+          gpu: [unknown]
+          display: [console]
+          licensing: [unknown]
+          trustedPluginArtifacts: false
+`)
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"plan", "--host-config", hostConfig, "smoke"}, &stdout, &stderr, dir, "test-version"); code != 0 {
+		t.Fatalf("prepared point-release plan exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
 }
 

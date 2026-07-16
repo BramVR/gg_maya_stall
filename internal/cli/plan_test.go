@@ -280,6 +280,7 @@ hostPools:
       - id: maya-win-01
         capabilities:
           mayaBuilds: ["2025.3"]
+          sessionMayaBuild: "2025.3"
           python: "3.11.9"
           sessionBroker:
             version: "1"
@@ -331,6 +332,7 @@ hostPools:
       - id: maya-win-01
         capabilities:
           mayaBuilds: ["2025.3"]
+          sessionMayaBuild: "2025.3"
           python: "3.10.12"
           sessionBroker:
             version: "1"
@@ -392,6 +394,7 @@ hostPools:
       - id: maya-win-01
         capabilities:
           mayaBuilds: ["2025.1"]
+          sessionMayaBuild: "2025.1"
           python: "3.10"
           sessionBroker:
             version: "2.0"
@@ -571,6 +574,20 @@ hostPools:
           sftpBinary: ` + binary + `
         workRoot: C:/maya-stall
         mayaVersions: ["2025"]
+        capabilities:
+          mayaBuilds: ["2025"]
+          sessionMayaBuild: "2025"
+          python: "unknown"
+          sessionBroker:
+            version: "1"
+            features: ["script.execute"]
+          capture: []
+          control: ["coordinate"]
+          renderers: ["unknown"]
+          gpu: ["unknown"]
+          display: ["unknown"]
+          licensing: ["unknown"]
+          trustedPluginArtifacts: false
         broker:
           type: gg-mayasessiond
           stateDir: C:/maya-stall/sessiond-ui

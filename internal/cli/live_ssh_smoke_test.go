@@ -433,6 +433,9 @@ func TestKLVPushConsumingRepoSmokeFixtureUsesBuiltPluginArtifact(t *testing.T) {
 		t.Fatalf("load generated Repo Run Config: %v", err)
 	}
 	scenario := config.Scenarios["klv-push-smoke"]
+	if scenario.MayaVersion != "" || scenario.Requirements.Maya.Minimum != "2025" {
+		t.Fatalf("Maya requirement = %+v with legacy version %q, want minimum 2025", scenario.Requirements.Maya, scenario.MayaVersion)
+	}
 	if len(scenario.Payload.PluginArtifacts) != 1 || scenario.Payload.PluginArtifacts[0] != "build/maya2025/Release/klv_push" {
 		t.Fatalf("pluginArtifacts = %#v, want nested klv_push artifact", scenario.Payload.PluginArtifacts)
 	}
@@ -558,7 +561,9 @@ func writeLiveRunConfigFixture(t *testing.T) string {
 scenarios:
   smoke:
     description: "Live Maya Host smoke Scenario."
-    mayaVersion: "2025"
+    requirements:
+      maya:
+        minimum: "2025"
     payload:
       scripts:
         - "maya/smoke.py"
@@ -576,7 +581,9 @@ scenarios:
       - type: visualEvidence
   retention-failure:
     description: "Live Maya Host retention failure Scenario."
-    mayaVersion: "2025"
+    requirements:
+      maya:
+        minimum: "2025"
     payload:
       scripts:
         - "maya/retention_failure.py"
@@ -844,7 +851,9 @@ func writeKLVPushConsumingRepoSmokeFixture(t *testing.T, sourceRepoDir string) s
 scenarios:
   klv-push-smoke:
     description: "KLV Push consuming repo smoke Scenario."
-    mayaVersion: "2025"
+    requirements:
+      maya:
+        minimum: "2025"
     payload:
       scripts:
         - "maya/klv_push_smoke.py"

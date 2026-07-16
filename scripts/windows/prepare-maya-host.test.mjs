@@ -46,6 +46,14 @@ test("prepare script creates the expected work-root layout", () => {
   assert.match(script, /Ensure-Directory \$StateDir "sessiond-state"/);
 });
 
+test("prepare script verifies the advertised Python capability", () => {
+  assert.match(script, /sys\.version_info\.micro/);
+  assert.match(script, /Test-VersionPrefix/);
+  assert.match(script, /could not query source Python version/);
+  assert.match(script, /source Python \$sourcePythonVersion does not match declared capability/);
+  assert.match(script, /does not match declared capability/);
+});
+
 test("generated launcher starts gg_mayasessiond with UI broker paths", () => {
   for (const token of [
     "-m gg_maya_sessiond.cli start",
@@ -83,6 +91,11 @@ test("host-config snippet stays public and points doctor at the prepared host", 
     "sftpTimeout: $SftpTimeout",
     "type: gg-mayasessiond",
     "visualEvidence: true",
+    "mayaBuilds: [\"$SessionMayaBuild\"]",
+    "sessionMayaBuild: \"$SessionMayaBuild\"",
+    "python: \"$ReportedPythonVersion\"",
+    "features: [script.execute]",
+    "trustedPluginArtifacts: false",
     "maya-stall doctor --host-config <host-config.yaml> --target-profile $TargetProfile --host $HostId --scenario smoke",
   ]) {
     assert.match(script, new RegExp(escapeRegExp(token)));
@@ -120,6 +133,10 @@ test("check-only fixture reports planned host shape without mutation when pwsh i
     mcpSource,
     "-MayaExe",
     mayaExe,
+    "-SessionMayaBuild",
+    "2025.3",
+    "-PythonVersion",
+    "3.11",
     "-HostId",
     "maya-win-fixture",
     "-TargetProfile",
@@ -178,6 +195,10 @@ test("check-only fixture keeps dependent plan visible when a manual prerequisite
     mcpSource,
     "-MayaExe",
     mayaExe,
+    "-SessionMayaBuild",
+    "2025.3",
+    "-PythonVersion",
+    "3.11",
     "-HostId",
     "maya-win-fixture",
     "-TargetProfile",

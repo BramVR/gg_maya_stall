@@ -321,6 +321,20 @@ hostPools:
           recoveryTask: MayaStallSessiondUI
         mayaVersions: ["2025"]
         visualEvidence: true
+        capabilities:
+          mayaBuilds: ["2025.3"]
+          sessionMayaBuild: "2025.3"
+          python: "3.11"
+          sessionBroker:
+            version: "1"
+            features: [script.execute]
+          capture: [screenshot, recording, visual-evidence]
+          control: [coordinate]
+          renderers: [unknown]
+          gpu: [unknown]
+          display: [console]
+          licensing: [unknown]
+          trustedPluginArtifacts: false
 ```
 
 Run doctor against the exact profile or host before a long workflow:

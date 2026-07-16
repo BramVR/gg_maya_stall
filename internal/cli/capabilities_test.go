@@ -12,6 +12,7 @@ func TestCompatibleHostAgentCandidatesAreDeterministicWithinTargetProfile(t *tes
 	now := time.Date(2026, time.July, 16, 12, 0, 0, 0, time.UTC)
 	newAgent := func(agentID string, hostID string, profiles ...string) *controlPlaneHostAgent {
 		report := configuredMayaHostCapabilityRecord(mayaHostConfig{ID: hostID, Health: "healthy"}, now)
+		report.Capabilities.SessionMayaBuild = report.Capabilities.MayaBuilds[0]
 		report.TargetProfiles = profiles
 		return &controlPlaneHostAgent{status: hostAgentStatusResponse{
 			AgentID: agentID, HostID: hostID, State: "ready", Slots: 1, SessionID: "session", SessionBinding: true, Capabilities: report,
@@ -35,6 +36,7 @@ func TestCompatibleHostAgentCandidatesAreDeterministicWithinTargetProfile(t *tes
 func TestIneligibleCapabilityReportsNeverQualify(t *testing.T) {
 	now := time.Date(2026, time.July, 16, 12, 0, 0, 0, time.UTC)
 	base := configuredMayaHostCapabilityRecord(mayaHostConfig{ID: "maya-win-01", Health: "healthy"}, now)
+	base.Capabilities.SessionMayaBuild = base.Capabilities.MayaBuilds[0]
 	tests := []struct {
 		name   string
 		mutate func(*mayaHostCapabilityRecord)
@@ -114,6 +116,7 @@ hostPools:
           repo: C:/maya-stall/GG_MayaSessiond
         capabilities:
           mayaBuilds: ["2025.3"]
+          sessionMayaBuild: "2025.3"
           python: "3.11.9"
           sessionBroker:
             version: "2.2"
@@ -137,6 +140,28 @@ hostPools:
 	}
 	if len(report.TargetProfiles) != 2 || report.TargetProfiles[0] != "ci" || report.TargetProfiles[1] != "render" || report.Capabilities.Python != "3.11.9" || report.Capabilities.TrustedPluginArtifacts == nil || !*report.Capabilities.TrustedPluginArtifacts {
 		t.Fatalf("capability record content = %+v", report)
+	}
+}
+
+func TestLegacyMayaInventoryDoesNotInferExactSessionBuild(t *testing.T) {
+	now := time.Date(2026, time.July, 16, 12, 0, 0, 0, time.UTC)
+	report := configuredMayaHostCapabilityRecord(mayaHostConfig{ID: "maya-win-01", Health: "healthy", Transport: "ssh", MayaVersions: []string{"2025"}}, now)
+	if len(report.Capabilities.MayaBuilds) != 1 || report.Capabilities.MayaBuilds[0] != "2025" {
+		t.Fatalf("reported Maya inventory = %v", report.Capabilities.MayaBuilds)
+	}
+	if report.Capabilities.SessionMayaBuild != "" {
+		t.Fatalf("legacy Maya inventory inferred exact session build %q", report.Capabilities.SessionMayaBuild)
+	}
+	decision := decideMayaHostCompatibility(scenarioRequirements{}, report, now)
+	if decision.Compatible || !containsString(decision.Reasons, "capability record is incomplete: missing session Maya build") {
+		t.Fatalf("legacy inventory eligibility = %+v", decision)
+	}
+}
+
+func TestStructuredMayaInventoryDoesNotInferExactSessionBuild(t *testing.T) {
+	report := configuredMayaHostCapabilityRecord(mayaHostConfig{Capabilities: &mayaHostCapabilities{MayaBuilds: []string{"2025.3"}}}, time.Now())
+	if report.Capabilities.SessionMayaBuild != "" {
+		t.Fatalf("structured Maya inventory inferred exact session build %q", report.Capabilities.SessionMayaBuild)
 	}
 }
 
@@ -331,9 +356,34 @@ func TestTrustedPluginAllowlistUsesStructuredMayaRequirementsAndCapabilities(t *
 	if len(exact) != 1 || exact[0] != "2025.3" {
 		t.Fatalf("exact trusted versions = %v", exact)
 	}
-	minimumHost := mayaHostConfig{Capabilities: &mayaHostCapabilities{MayaBuilds: []string{"2025.3", "2026"}, SessionMayaBuild: "2026"}}
+	exactConfiguredHost := exactHost
+	exactConfiguredHost.MayaVersions = []string{"2025"}
+	exactConfigured := trustedPluginAllowlistMayaVersions(exactConfiguredHost, scenarioConfig{Requirements: scenarioRequirements{Maya: versionRequirement{Exact: "2025.3"}}})
+	if len(exactConfigured) != 1 || exactConfigured[0] != "2025" {
+		t.Fatalf("configured exact trusted versions = %v, want configured Maya preferences family", exactConfigured)
+	}
+	minimumHost := mayaHostConfig{
+		MayaVersions: []string{"2025"},
+		Capabilities: &mayaHostCapabilities{MayaBuilds: []string{"2025.3", "2026"}, SessionMayaBuild: "2025.3"},
+	}
 	minimum := trustedPluginAllowlistMayaVersions(minimumHost, scenarioConfig{Requirements: scenarioRequirements{Maya: versionRequirement{Minimum: "2025"}}})
-	if len(minimum) != 1 || minimum[0] != "2026" {
-		t.Fatalf("minimum trusted versions = %v", minimum)
+	if len(minimum) != 1 || minimum[0] != "2025" {
+		t.Fatalf("minimum trusted versions = %v, want configured Maya preferences family", minimum)
+	}
+	unrelatedHost := mayaHostConfig{
+		MayaVersions: []string{"2025"},
+		Capabilities: &mayaHostCapabilities{MayaBuilds: []string{"2026"}, SessionMayaBuild: "2026"},
+	}
+	unrelated := trustedPluginAllowlistMayaVersions(unrelatedHost, scenarioConfig{Requirements: scenarioRequirements{Maya: versionRequirement{Minimum: "2025"}}})
+	if len(unrelated) != 1 || unrelated[0] != "2026" {
+		t.Fatalf("unrelated preferences family resolved as %v, want selected session build failure path", unrelated)
+	}
+	incompatibleHost := mayaHostConfig{
+		MayaVersions: []string{"2025", "2026"},
+		Capabilities: &mayaHostCapabilities{MayaBuilds: []string{"2025.3"}, SessionMayaBuild: "2025.3"},
+	}
+	incompatible := trustedPluginAllowlistMayaVersions(incompatibleHost, scenarioConfig{Requirements: scenarioRequirements{Maya: versionRequirement{Minimum: "2026"}}})
+	if len(incompatible) != 0 {
+		t.Fatalf("incompatible fixed session resolved preferences versions %v", incompatible)
 	}
 }

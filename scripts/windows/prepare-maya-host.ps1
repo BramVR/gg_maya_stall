@@ -29,6 +29,10 @@ param(
     [string]$IdentityFile = "~/.ssh/maya-stall-ci",
     [string]$SftpTimeout = "30m",
     [string]$MayaVersion = "2025",
+    [Parameter(Mandatory = $true)]
+    [string]$SessionMayaBuild,
+    [Parameter(Mandatory = $true)]
+    [string]$PythonVersion,
     [int]$WaitTimeoutSeconds = 180,
     [switch]$CheckOnly,
     [switch]$SkipSessiondInstall,
@@ -61,6 +65,7 @@ $VenvPython = Join-MayaStallPath $VenvPath "Scripts\python.exe"
 $Plan = New-Object System.Collections.Generic.List[object]
 $Ready = $true
 $Marker = "Maya Stall generated UI Session Broker launcher"
+$ReportedPythonVersion = $PythonVersion
 
 function ConvertTo-HostConfigPath {
     param([string]$Path)
@@ -85,6 +90,21 @@ function Add-PrepareStep {
     if (-not $IsReady) {
         $script:Ready = $false
     }
+}
+
+function Test-VersionPrefix {
+    param([string]$Actual, [string]$Expected)
+    $actualParts = $Actual.Split('.')
+    $expectedParts = $Expected.Split('.')
+    if (($expectedParts.Count -eq 0) -or ($expectedParts.Count -gt $actualParts.Count)) {
+        return $false
+    }
+    for ($index = 0; $index -lt $expectedParts.Count; $index++) {
+        if ($actualParts[$index] -ne $expectedParts[$index]) {
+            return $false
+        }
+    }
+    return $true
 }
 
 function ConvertTo-NativeArgumentString {
@@ -247,15 +267,40 @@ function Test-LauncherCanChange {
 }
 
 function Ensure-Venv {
+    $created = $false
     if (Test-Path -LiteralPath $VenvPython -PathType Leaf) {
-        Add-PrepareStep "python-venv" $VenvPath "ok" "virtual environment exists" $true
     } elseif ($CheckOnly) {
+        $sourceProbeArgs = $PythonForVenvArgs + @("-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')")
+        $sourcePythonVersion = (& $PythonForVenv @sourceProbeArgs 2>&1 | Out-String).Trim()
+        if (($LASTEXITCODE -ne 0) -or (-not $sourcePythonVersion)) {
+            Add-PrepareStep "python-venv" $VenvPath "failed" "could not query source Python version" $false
+            return
+        }
+        if (-not (Test-VersionPrefix $sourcePythonVersion $PythonVersion)) {
+            Add-PrepareStep "python-venv" $VenvPath "mismatch" "source Python $sourcePythonVersion does not match declared capability $PythonVersion" $false
+            return
+        }
+        $script:ReportedPythonVersion = $sourcePythonVersion
         Add-PrepareStep "python-venv" $VenvPath "planned" "would create virtual environment" $true
+        return
     } else {
         New-Item -ItemType Directory -Force -Path $WorkRoot | Out-Null
         Invoke-CheckedNativeCommand "create Python virtual environment" $PythonForVenv ($PythonForVenvArgs + @("-m", "venv", $VenvPath))
-        Add-PrepareStep "python-venv" $VenvPath "changed" "created virtual environment" $true
+        $created = $true
     }
+
+    $actualPythonVersion = (& $VenvPython -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')" 2>&1 | Out-String).Trim()
+    if (($LASTEXITCODE -ne 0) -or (-not $actualPythonVersion)) {
+        Add-PrepareStep "python-venv" $VenvPath "failed" "could not query virtual environment Python version" $false
+        return
+    }
+    if (-not (Test-VersionPrefix $actualPythonVersion $PythonVersion)) {
+        Add-PrepareStep "python-venv" $VenvPath "mismatch" "Python $actualPythonVersion does not match declared capability $PythonVersion" $false
+        return
+    }
+    $script:ReportedPythonVersion = $actualPythonVersion
+    $venvStatus = if ($created) { "changed" } else { "ok" }
+    Add-PrepareStep "python-venv" $VenvPath $venvStatus "virtual environment uses Python $actualPythonVersion" $true
 
     if ($CheckOnly -or $SkipSessiondInstall) {
         return
@@ -320,6 +365,20 @@ hostPools:
           mcpSource: $mcpSourceYaml
         mayaVersions: ["$MayaVersion"]
         visualEvidence: true
+        capabilities:
+          mayaBuilds: ["$SessionMayaBuild"]
+          sessionMayaBuild: "$SessionMayaBuild"
+          python: "$ReportedPythonVersion"
+          sessionBroker:
+            version: "1"
+            features: [script.execute]
+          capture: [screenshot, recording, visual-evidence]
+          control: [coordinate]
+          renderers: [unknown]
+          gpu: [unknown]
+          display: [console]
+          licensing: [unknown]
+          trustedPluginArtifacts: false
 
 doctor_command:
 maya-stall doctor --host-config <host-config.yaml> --target-profile $TargetProfile --host $HostId --scenario smoke

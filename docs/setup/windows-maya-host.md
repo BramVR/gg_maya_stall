@@ -17,6 +17,8 @@ already-licensed Windows Maya Hosts:
 powershell -ExecutionPolicy Bypass -File scripts/windows/prepare-maya-host.ps1 `
   -CheckOnly `
   -MayaExe "C:\Program Files\Autodesk\Maya2025\bin\maya.exe" `
+  -SessionMayaBuild "2025.3" `
+  -PythonVersion "3.11" `
   -SessiondRepo "C:\maya-stall-src\GG_MayaSessiond" `
   -McpSource "C:\maya-stall-src\GG_MayaMCP"
 ```
@@ -47,7 +49,11 @@ shape without starting the Session Broker.
 
 The script also prints a host-config YAML snippet and the matching
 `maya-stall doctor --host-config ... --target-profile ... --host ... --scenario smoke`
-command. Treat that output as an operator starting point: keep private
+command. `-SessionMayaBuild` is the exact build started by the fixed launcher,
+not the broader `-MayaVersion` installation/preferences family. The script
+also verifies the existing or newly created virtual environment against the
+required `-PythonVersion` before advertising it. Treat that output as an
+operator starting point: keep private
 hostnames, SSH key paths, Windows users, license details, and Evidence Store
 credentials in user or CI host config, not in `.maya-stall.yaml`.
 
@@ -56,6 +62,8 @@ Example apply:
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/windows/prepare-maya-host.ps1 `
   -MayaExe "C:\Program Files\Autodesk\Maya2025\bin\maya.exe" `
+  -SessionMayaBuild "2025.3" `
+  -PythonVersion "3.11" `
   -SessiondRepo "C:\maya-stall-src\GG_MayaSessiond" `
   -McpSource "C:\maya-stall-src\GG_MayaMCP" `
   -HostId "maya-win-01" `
@@ -106,9 +114,12 @@ Host config and reports unknown operator-managed categories explicitly. A
 Scenario that requires an unknown value will not match. If `capabilities` is
 present, every category must be present; omitted categories make the report
 incomplete and ineligible. `sessionMayaBuild` names the build started by the
-Host's fixed Session Broker launcher; it must be one of `mayaBuilds`. A
-single-build inventory infers that value, while a multi-build Host must declare
-it explicitly.
+Host's fixed Session Broker launcher; it must be one of `mayaBuilds`. Declare
+it explicitly: legacy `mayaVersions` values describe installed product or
+preferences families and never infer an exact session build for a real Host.
+Such a Host without an explicit session build remains incomplete and ineligible
+for new work; only the controlled fake runtime has a deterministic inferred
+session build.
 
 Doctor layer:
 
@@ -149,6 +160,20 @@ hostPools:
         broker: ok
         mayaVersions: ["2025"]
         visualEvidence: true
+        capabilities:
+          mayaBuilds: ["2025.3"]
+          sessionMayaBuild: "2025.3"
+          python: "3.11"
+          sessionBroker:
+            version: "1"
+            features: [script.execute]
+          capture: [screenshot, recording, visual-evidence]
+          control: [coordinate]
+          renderers: [unknown]
+          gpu: [unknown]
+          display: [console]
+          licensing: [unknown]
+          trustedPluginArtifacts: true
 ```
 
 Doctor layer:

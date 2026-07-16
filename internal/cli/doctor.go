@@ -491,15 +491,28 @@ func mayaVersionLayer(options doctorOptions, host mayaHostConfig, scenario scena
 	}
 	installed := strings.Join(versions, ",")
 	drift := mayaVersionDriftDetail(host.MayaVersions, versions)
-	if options.ScenarioName == "" || scenario.MayaVersion == "" {
+	requirement := normalizedScenarioRequirements(scenario).Maya
+	if options.ScenarioName == "" || (requirement.Exact == "" && requirement.Minimum == "") {
 		return okCheck("maya-version", installed+drift)
 	}
 	for _, version := range versions {
-		if version == scenario.MayaVersion {
+		if requirement.Exact != "" && sameMayaBuildVersion(version, requirement.Exact) {
+			return okCheck("maya-version", fmt.Sprintf("%s satisfies Scenario %s%s", version, options.ScenarioName, drift))
+		}
+		if requirement.Minimum != "" && versionAtLeast(version, requirement.Minimum) {
 			return okCheck("maya-version", fmt.Sprintf("%s satisfies Scenario %s%s", version, options.ScenarioName, drift))
 		}
 	}
-	return failedCheck("maya-version", fmt.Sprintf("Scenario %s needs %s; host has %s%s", options.ScenarioName, scenario.MayaVersion, installed, drift), mayaVersionMismatchHint(scenario.MayaVersion, installed))
+	required := requirement.Exact
+	description := required
+	if scenario.MayaVersion == "" && requirement.Exact != "" {
+		description = "exact " + requirement.Exact
+	}
+	if requirement.Minimum != "" {
+		required = requirement.Minimum
+		description = "minimum " + requirement.Minimum
+	}
+	return failedCheck("maya-version", fmt.Sprintf("Scenario %s needs %s; host has %s%s", options.ScenarioName, description, installed, drift), mayaVersionMismatchHint(required, installed))
 }
 
 func installedMayaVersionsForDoctor(host mayaHostConfig) ([]string, error) {

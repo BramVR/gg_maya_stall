@@ -71,6 +71,10 @@ type sessionBroker interface {
 	StopSession(runContext, brokerSessionIdentity) error
 }
 
+type mayaSessionBuildVerifier interface {
+	VerifyMayaBuild(runContext, brokerSessionIdentity, string) error
+}
+
 // brokerSessionIdentity identifies the Maya UI Session a Session Broker
 // started or stopped for a run. It lands in run evidence as an additive
 // `brokerSession` field.
@@ -1344,6 +1348,10 @@ func (broker fakeSessionBroker) RunScenario(context runContext, scenario scenari
 		return ScenarioResult{}, err
 	}
 	return broker.Result, nil
+}
+
+func (fakeSessionBroker) VerifyMayaBuild(runContext, brokerSessionIdentity, string) error {
+	return nil
 }
 
 func (fakeSessionBroker) RetentionCapabilities() brokerCapabilities {

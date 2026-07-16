@@ -626,6 +626,7 @@ type runOptions struct {
 	ControlPlaneSet      bool
 	ControlPlaneTokenEnv string
 	AssignedRunID        string
+	AssignedMayaBuild    string
 	HostOptionsSet       bool
 	SharedFakeWorkRoot   string
 }

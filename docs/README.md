@@ -56,8 +56,9 @@ not Repo Run Config.
 ## A Run, End To End
 
 1. The CLI loads repo config from `.maya-stall.yaml` or `maya-stall.yaml`.
-2. It selects a named Scenario and resolves Target Profile, Host Pool, and Maya
-   Host from external host config when provided.
+2. It selects a named Scenario, evaluates its exact/minimum version and feature
+   requirements, and resolves a compatible Maya Host from the Target Profile's
+   Host Pool using external config or a fresh Agent capability report.
 3. It acquires a Host Lock so one Fresh Run uses a Maya Host at a time.
 4. It stages only declared Run Payload paths into clean run state.
 5. It asks the Session Broker to launch or use a Maya UI Session.

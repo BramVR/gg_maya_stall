@@ -123,6 +123,56 @@ func (broker ggMayaSessiondBroker) StartFreshSession(context runContext, scenari
 	return identity, nil
 }
 
+func (broker ggMayaSessiondBroker) VerifyMayaBuild(context runContext, session brokerSessionIdentity, expected string) error {
+	status, err := broker.status()
+	if err != nil {
+		return fmt.Errorf("inspect fresh Maya UI Session before build verification: %w", err)
+	}
+	if session.SessionID == "" || status.State.SessionID != session.SessionID {
+		return fmt.Errorf("fresh Maya UI Session changed before build verification")
+	}
+	probePath := remoteJoin(context.RunWorkspace.RemoteWorkspace(), ".maya-stall-maya-build.py")
+	resultPath := remoteJoin(context.RunWorkspace.RemoteWorkspace(), ".maya-stall-maya-build.txt")
+	if err := broker.stageRemoteFile(probePath, []byte(mayaBuildProbeScript(resultPath))); err != nil {
+		return fmt.Errorf("stage Maya build verification: %w", err)
+	}
+	result, err := broker.callTool("script.execute", []string{"file_path=" + probePath, "timeout=30"}, sessiondCommandTimeout)
+	if err != nil {
+		return fmt.Errorf("verify selected Maya build %s: %w", expected, err)
+	}
+	if !result.OK {
+		return fmt.Errorf("verify selected Maya build %s: gg_mayasessiond script.execute failed: %s", expected, result.Error)
+	}
+	tempFile, err := os.CreateTemp("", "maya-stall-maya-build-*")
+	if err != nil {
+		return err
+	}
+	localPath := tempFile.Name()
+	if err := tempFile.Close(); err != nil {
+		os.Remove(localPath)
+		return err
+	}
+	defer os.Remove(localPath)
+	batch := newSFTPBatch()
+	batch.get(resultPath, localPath, false)
+	if err := runSFTPBatch(broker.host, batch.String()); err != nil {
+		return fmt.Errorf("download Maya build verification: %w", err)
+	}
+	content, err := os.ReadFile(localPath)
+	if err != nil {
+		return err
+	}
+	actual := strings.TrimSpace(string(content))
+	if !sameMayaBuildVersion(actual, expected) {
+		return fmt.Errorf("selected Maya build %s but fresh Maya UI Session reports %s", expected, actual)
+	}
+	return appendEvent(context.EventsPath, "maya.build.verified", actual)
+}
+
+func mayaBuildProbeScript(resultPath string) string {
+	return "from pathlib import Path\nfrom maya import cmds\nparts = [str(cmds.about(majorVersion=True)), str(cmds.about(minorVersion=True)), str(cmds.about(patchVersion=True))]\nwhile len(parts) > 1 and parts[-1] == '0':\n    parts.pop()\nPath(" + pythonString(resultPath) + ").write_text('.'.join(parts), encoding='utf-8')\n"
+}
+
 func (broker ggMayaSessiondBroker) StopSession(context runContext, session brokerSessionIdentity) error {
 	if err := broker.validate(); err != nil {
 		return err

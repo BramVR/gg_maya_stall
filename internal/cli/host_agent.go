@@ -50,6 +50,7 @@ type hostAgentRunOnceOptions struct {
 	HostConfig    string
 	CredentialEnv string
 	SessionID     string
+	Capabilities  mayaHostCapabilityRecord
 }
 
 type hostAgentEnrollmentRequest struct {
@@ -68,11 +69,12 @@ type hostAgentEnrollmentRecord struct {
 }
 
 type hostAgentRegistrationRequest struct {
-	Version        int    `json:"version"`
-	AgentID        string `json:"agentId"`
-	HostID         string `json:"hostId"`
-	Slots          int    `json:"slots"`
-	SessionBinding bool   `json:"sessionBinding"`
+	Version        int                      `json:"version"`
+	AgentID        string                   `json:"agentId"`
+	HostID         string                   `json:"hostId"`
+	Slots          int                      `json:"slots"`
+	SessionBinding bool                     `json:"sessionBinding"`
+	Capabilities   mayaHostCapabilityRecord `json:"capabilities"`
 }
 
 type hostAgentNextRequest struct {
@@ -80,26 +82,108 @@ type hostAgentNextRequest struct {
 	SessionID string `json:"sessionId"`
 }
 
+type hostAgentHeartbeatRequest struct {
+	Version      int                      `json:"version"`
+	SessionID    string                   `json:"sessionId"`
+	Capabilities mayaHostCapabilityRecord `json:"capabilities"`
+}
+
 type hostAgentStatusResponse struct {
-	Version        int    `json:"version"`
-	Kind           string `json:"kind"`
-	AgentID        string `json:"agentId"`
-	HostID         string `json:"hostId"`
-	Slots          int    `json:"slots"`
-	State          string `json:"state"`
-	RunID          string `json:"runId,omitempty"`
-	SessionID      string `json:"sessionId,omitempty"`
-	SessionBinding bool   `json:"sessionBinding"`
+	Version        int                      `json:"version"`
+	Kind           string                   `json:"kind"`
+	AgentID        string                   `json:"agentId"`
+	HostID         string                   `json:"hostId"`
+	Slots          int                      `json:"slots"`
+	State          string                   `json:"state"`
+	RunID          string                   `json:"runId,omitempty"`
+	SessionID      string                   `json:"sessionId,omitempty"`
+	SessionBinding bool                     `json:"sessionBinding"`
+	Capabilities   mayaHostCapabilityRecord `json:"-"`
 }
 
 type hostAgentAssignmentResponse struct {
-	Version    int                    `json:"version"`
-	Kind       string                 `json:"kind"`
-	RunID      string                 `json:"runId"`
-	AgentID    string                 `json:"agentId"`
-	HostID     string                 `json:"hostId"`
-	LockToken  string                 `json:"lockToken"`
-	Submission controlPlaneSubmission `json:"submission"`
+	Version           int                      `json:"version"`
+	Kind              string                   `json:"kind"`
+	RunID             string                   `json:"runId"`
+	AgentID           string                   `json:"agentId"`
+	HostID            string                   `json:"hostId"`
+	LockToken         string                   `json:"lockToken"`
+	Submission        controlPlaneSubmission   `json:"submission"`
+	Capabilities      mayaHostCapabilityRecord `json:"-"`
+	SelectedMayaBuild string                   `json:"selectedMayaBuild,omitempty"`
+}
+
+type hostAgentStatusResponseAlias hostAgentStatusResponse
+
+func (status hostAgentStatusResponse) MarshalJSON() ([]byte, error) {
+	var capabilities *mayaHostCapabilityRecord
+	if status.Capabilities.Version != 0 {
+		snapshot := snapshotMayaHostCapabilityRecord(status.Capabilities)
+		capabilities = &snapshot
+	}
+	return json.Marshal(struct {
+		hostAgentStatusResponseAlias
+		Capabilities *mayaHostCapabilityRecord `json:"capabilities,omitempty"`
+	}{hostAgentStatusResponseAlias: hostAgentStatusResponseAlias(status), Capabilities: capabilities})
+}
+
+func (status *hostAgentStatusResponse) UnmarshalJSON(content []byte) error {
+	decoded := struct {
+		hostAgentStatusResponseAlias
+		Capabilities *mayaHostCapabilityRecord `json:"capabilities,omitempty"`
+	}{}
+	if err := decodeHostAgentExtensionJSON(content, &decoded); err != nil {
+		return err
+	}
+	*status = hostAgentStatusResponse(decoded.hostAgentStatusResponseAlias)
+	if decoded.Capabilities != nil {
+		status.Capabilities = snapshotMayaHostCapabilityRecord(*decoded.Capabilities)
+	}
+	return nil
+}
+
+type hostAgentAssignmentResponseAlias hostAgentAssignmentResponse
+
+func (assignment hostAgentAssignmentResponse) MarshalJSON() ([]byte, error) {
+	var capabilities *mayaHostCapabilityRecord
+	if assignment.Capabilities.Version != 0 {
+		snapshot := snapshotMayaHostCapabilityRecord(assignment.Capabilities)
+		capabilities = &snapshot
+	}
+	return json.Marshal(struct {
+		hostAgentAssignmentResponseAlias
+		Capabilities *mayaHostCapabilityRecord `json:"capabilities,omitempty"`
+	}{hostAgentAssignmentResponseAlias: hostAgentAssignmentResponseAlias(assignment), Capabilities: capabilities})
+}
+
+func (assignment *hostAgentAssignmentResponse) UnmarshalJSON(content []byte) error {
+	decoded := struct {
+		hostAgentAssignmentResponseAlias
+		Capabilities *mayaHostCapabilityRecord `json:"capabilities,omitempty"`
+	}{}
+	if err := decodeHostAgentExtensionJSON(content, &decoded); err != nil {
+		return err
+	}
+	*assignment = hostAgentAssignmentResponse(decoded.hostAgentAssignmentResponseAlias)
+	if decoded.Capabilities != nil {
+		assignment.Capabilities = snapshotMayaHostCapabilityRecord(*decoded.Capabilities)
+	}
+	return nil
+}
+
+func decodeHostAgentExtensionJSON(content []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("Host Agent response contains multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
 
 type hostAgentLockRequest struct {
@@ -159,21 +243,23 @@ type hostAgentLockRecord struct {
 }
 
 type hostAgentAssignmentRecord struct {
-	Version                int                    `json:"version"`
-	RunID                  string                 `json:"runId"`
-	AgentID                string                 `json:"agentId"`
-	HostID                 string                 `json:"hostId"`
-	LockToken              string                 `json:"lockToken"`
-	State                  string                 `json:"state"`
-	CreatedAt              string                 `json:"createdAt"`
-	Submission             controlPlaneSubmission `json:"submission"`
-	SessionBindingRequired bool                   `json:"sessionBindingRequired,omitempty"`
-	BrokerSession          *brokerSessionIdentity `json:"brokerSession,omitempty"`
-	Terminal               *runCommandJSON        `json:"terminal,omitempty"`
-	TerminalLedger         *runLedgerRecord       `json:"terminalLedger,omitempty"`
-	AssignedLedger         *runLedgerRecord       `json:"assignedLedger,omitempty"`
-	ProgressSequence       int64                  `json:"progressSequence,omitempty"`
-	ProgressDigest         string                 `json:"progressDigest,omitempty"`
+	Version                int                      `json:"version"`
+	RunID                  string                   `json:"runId"`
+	AgentID                string                   `json:"agentId"`
+	HostID                 string                   `json:"hostId"`
+	LockToken              string                   `json:"lockToken"`
+	State                  string                   `json:"state"`
+	CreatedAt              string                   `json:"createdAt"`
+	Submission             controlPlaneSubmission   `json:"submission"`
+	Capabilities           mayaHostCapabilityRecord `json:"capabilities"`
+	SelectedMayaBuild      string                   `json:"selectedMayaBuild,omitempty"`
+	SessionBindingRequired bool                     `json:"sessionBindingRequired,omitempty"`
+	BrokerSession          *brokerSessionIdentity   `json:"brokerSession,omitempty"`
+	Terminal               *runCommandJSON          `json:"terminal,omitempty"`
+	TerminalLedger         *runLedgerRecord         `json:"terminalLedger,omitempty"`
+	AssignedLedger         *runLedgerRecord         `json:"assignedLedger,omitempty"`
+	ProgressSequence       int64                    `json:"progressSequence,omitempty"`
+	ProgressDigest         string                   `json:"progressDigest,omitempty"`
 }
 
 type controlPlaneHostAgent struct {
@@ -1028,6 +1114,7 @@ func (handler *controlPlaneHandler) serveHostAgentRegistration(response http.Res
 	candidate := agent.status
 	candidate.SessionID = sessionID
 	candidate.SessionBinding = registration.SessionBinding
+	candidate.Capabilities = registration.Capabilities
 	if candidate.RunID == "" {
 		candidate.State = "ready"
 	} else {
@@ -1046,7 +1133,7 @@ func (handler *controlPlaneHandler) serveHostAgentRegistration(response http.Res
 }
 
 func (handler *controlPlaneHandler) serveHostAgentHeartbeat(response http.ResponseWriter, request *http.Request, agentID string) {
-	var heartbeat hostAgentNextRequest
+	var heartbeat hostAgentHeartbeatRequest
 	if err := decodeHostAgentRequest(request, &heartbeat); err != nil || heartbeat.Version != hostAgentAPIVersion || heartbeat.SessionID == "" {
 		writeControlPlaneError(response, http.StatusBadRequest, "invalid Windows Host Agent heartbeat")
 		return
@@ -1060,6 +1147,11 @@ func (handler *controlPlaneHandler) serveHostAgentHeartbeat(response http.Respon
 	}
 	if !handler.acceptHostAgentSession(agent, heartbeat.SessionID) {
 		writeControlPlaneError(response, http.StatusConflict, "Windows Host Agent session changed")
+		return
+	}
+	agent.status.Capabilities = heartbeat.Capabilities
+	if err := handler.persistHostAgentStatus(agent); err != nil {
+		writeControlPlaneError(response, http.StatusInternalServerError, "persist Windows Host Agent capabilities")
 		return
 	}
 	response.Header().Set("Content-Type", "application/json")
@@ -1155,7 +1247,7 @@ func (handler *controlPlaneHandler) disconnectHostAgentSession(agentID string, s
 func assignmentResponse(record hostAgentAssignmentRecord) hostAgentAssignmentResponse {
 	return hostAgentAssignmentResponse{
 		Version: hostAgentAPIVersion, Kind: "host-agent-assignment", RunID: record.RunID,
-		AgentID: record.AgentID, HostID: record.HostID, LockToken: record.LockToken, Submission: record.Submission,
+		AgentID: record.AgentID, HostID: record.HostID, LockToken: record.LockToken, Submission: record.Submission, Capabilities: record.Capabilities, SelectedMayaBuild: record.SelectedMayaBuild,
 	}
 }
 
@@ -2225,37 +2317,53 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 	if submission.StopAfter != stopAfterAlways {
 		return failHostAgentSelection(repoDir, options, runtime, errors.New("registered Windows Host Agent runs require stop-after always"))
 	}
+	targetProfile := submission.TargetProfile
+	if targetProfile == "" {
+		targetProfile = "default"
+	}
+	requirements, err := scenarioRequirementsForScheduling(repoDir, submission.Scenario)
+	if err != nil {
+		return failHostAgentSelection(repoDir, options, runtime, err)
+	}
 	handler.mu.Lock()
 	var selected *controlPlaneHostAgent
+	var selectedCapabilities mayaHostCapabilityRecord
+	var selectedMayaBuild string
 	var sharedFakeHostRelease func() error
-	ids := make([]string, 0, len(handler.hostAgents))
-	for id := range handler.hostAgents {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		agent := handler.hostAgents[id]
+	for _, agent := range handler.hostAgents {
 		if agent.status.State == "ready" && agent.status.SessionID != "" && !handler.runtime.Now().Before(agent.sessionExpiresAt) {
 			agent.status.State = "offline"
 			agent.status.SessionID = ""
 			agent.sessionExpiresAt = time.Time{}
 			_ = handler.persistHostAgentStatus(agent)
+		}
+	}
+	selectionNow := handler.runtime.Now()
+	candidates, selectionReasons := compatibleHostAgentCandidates(handler.hostAgents, targetProfile, requirements, selectionNow)
+	for _, agent := range candidates {
+		release, locked, err := acquireHostLock(filepath.Join(handler.dataDir, "fake-host"), agent.status.HostID)
+		if err != nil {
+			selectionReasons = append(selectionReasons, fmt.Sprintf("Maya Host %s Host Lock check failed", agent.status.HostID))
 			continue
 		}
-		if agent.status.State == "ready" && agent.status.RunID == "" && agent.status.SessionID != "" && agent.status.Slots == 1 && agent.status.SessionBinding {
-			release, locked, err := acquireHostLock(filepath.Join(handler.dataDir, "fake-host"), agent.status.HostID)
-			if err != nil || locked {
-				continue
-			}
-			selected = agent
-			sharedFakeHostRelease = release
-			agent.status.State = "reserving"
-			break
+		if locked {
+			selectionReasons = append(selectionReasons, fmt.Sprintf("Maya Host %s is locked", agent.status.HostID))
+			continue
 		}
+		selected = agent
+		selectedCapabilities = snapshotMayaHostCapabilityRecord(agent.status.Capabilities)
+		selectedMayaBuild = decideMayaHostCompatibility(requirements, selectedCapabilities, selectionNow).SelectedMayaBuild
+		sharedFakeHostRelease = release
+		agent.status.State = "reserving"
+		break
 	}
 	handler.mu.Unlock()
 	if selected == nil {
-		return failHostAgentSelection(repoDir, options, runtime, errors.New("no registered ready Windows Host Agent is available"))
+		reason := "no registered ready Windows Host Agent is compatible"
+		if len(selectionReasons) > 0 {
+			reason += ": " + strings.Join(selectionReasons, "; ")
+		}
+		return failHostAgentSelection(repoDir, options, runtime, errors.New(reason))
 	}
 
 	acceptedCallback := runtime.Accepted
@@ -2298,9 +2406,9 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 	record := hostAgentAssignmentRecord{
 		Version: hostAgentAPIVersion, RunID: runID, AgentID: selected.status.AgentID, HostID: selected.status.HostID,
 		LockToken: lockToken, State: "assigned", CreatedAt: createdAt, Submission: submission,
-		SessionBindingRequired: selected.status.SessionBinding, AssignedLedger: &assignedLedger,
+		Capabilities: selectedCapabilities, SelectedMayaBuild: selectedMayaBuild, SessionBindingRequired: selected.status.SessionBinding, AssignedLedger: &assignedLedger,
 	}
-	targetProfile := record.Submission.TargetProfile
+	targetProfile = record.Submission.TargetProfile
 	if targetProfile == "" {
 		targetProfile = "default"
 	}
@@ -2873,8 +2981,14 @@ func runHostAgentOnce(options hostAgentRunOnceOptions, runtime runRuntime, stdou
 	if err := ensureHostAgentDirectory(filepath.Join(options.WorkRoot, "runs")); err != nil {
 		return err
 	}
+	capabilities, err := hostAgentCapabilityRecord(options, runtime.Now())
+	if err != nil {
+		return err
+	}
+	options.Capabilities = capabilities
 	registration := hostAgentRegistrationRequest{
 		Version: hostAgentAPIVersion, AgentID: options.AgentID, HostID: options.HostID, Slots: 1, SessionBinding: true,
+		Capabilities: capabilities,
 	}
 	var status hostAgentStatusResponse
 	registerPath := "/v1/host-agents/" + options.AgentID + "/register"
@@ -2958,7 +3072,7 @@ func runHostAgentOnce(options hostAgentRunOnceOptions, runtime runRuntime, stdou
 	stopProgress := startHostAgentProgress(options, assignment, repoDir, runtime)
 	outcome, runErr := runScenario(repoDir, runOptions{
 		ScenarioName: assignment.Submission.Scenario, TargetProfile: targetProfile, HostPin: assignment.HostID,
-		HostConfig: hostConfigPath, StopAfter: assignment.Submission.StopAfter, AssignedRunID: assignment.RunID,
+		HostConfig: hostConfigPath, StopAfter: assignment.Submission.StopAfter, AssignedRunID: assignment.RunID, AssignedMayaBuild: assignment.SelectedMayaBuild,
 	}, agentRuntime)
 	progressErr := stopProgress()
 	operationalErr := errors.Join(runErr, progressErr)
@@ -3236,9 +3350,12 @@ func startHostAgentHeartbeat(options hostAgentRunOnceOptions, runtime runRuntime
 			select {
 			case <-ticker.C:
 				var status hostAgentStatusResponse
-				err := postControlPlaneJSON(options.ControlPlane, options.CredentialEnv, "/v1/host-agents/"+options.AgentID+"/heartbeat", hostAgentNextRequest{
-					Version: hostAgentAPIVersion, SessionID: options.SessionID,
-				}, heartbeatRuntime, http.StatusOK, &status)
+				capabilities, err := hostAgentCapabilityRecord(options, heartbeatRuntime.Now())
+				if err == nil {
+					err = postControlPlaneJSON(options.ControlPlane, options.CredentialEnv, "/v1/host-agents/"+options.AgentID+"/heartbeat", hostAgentHeartbeatRequest{
+						Version: hostAgentAPIVersion, SessionID: options.SessionID, Capabilities: capabilities,
+					}, heartbeatRuntime, http.StatusOK, &status)
+				}
 				if err != nil {
 					heartbeatErr := fmt.Errorf("Windows Host Agent process-session heartbeat: %w", err) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 					heartbeatErrors <- heartbeatErr
@@ -3353,6 +3470,20 @@ func pollHostAgentAssignment(options hostAgentRunOnceOptions, runtime runRuntime
 func validateHostAgentAssignment(options hostAgentRunOnceOptions, assignment hostAgentAssignmentResponse) error {
 	if assignment.Version != hostAgentAPIVersion || assignment.Kind != "host-agent-assignment" || assignment.AgentID != options.AgentID || assignment.HostID != options.HostID || validateRunID(assignment.RunID) != nil || assignment.LockToken == "" {
 		return fmt.Errorf("Control Plane returned an unsupported Windows Host Agent assignment") //nolint:staticcheck // Product terms start the user-facing diagnostic.
+	}
+	if assignment.Capabilities.Version != 0 {
+		var config repoRunConfig
+		if err := decodeKnownYAMLFields(assignment.Submission.Config, &config); err != nil || config.Version != 1 {
+			return fmt.Errorf("Control Plane returned an assignment with invalid Scenario requirements") //nolint:staticcheck // Product term starts the user-facing diagnostic.
+		}
+		scenario, ok := config.Scenarios[assignment.Submission.Scenario]
+		if !ok {
+			return fmt.Errorf("Control Plane returned an assignment with unknown Scenario requirements") //nolint:staticcheck // Product term starts the user-facing diagnostic.
+		}
+		selected, compatible := selectMayaBuild([]string{assignment.Capabilities.Capabilities.SessionMayaBuild}, normalizedScenarioRequirements(scenario).Maya)
+		if !compatible || selected != assignment.SelectedMayaBuild {
+			return fmt.Errorf("Control Plane selected Maya build %q but the assignment capability snapshot matches %q", assignment.SelectedMayaBuild, selected) //nolint:staticcheck // Product term starts the user-facing diagnostic.
+		}
 	}
 	return nil
 }

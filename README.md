@@ -27,7 +27,9 @@ optional Configured Control Plane Mode submits the same repo-owned Scenario and
 declared payload snapshot to an authenticated HTTPS service without changing
 Repo Run Config. The Control Plane can execute a fake or Agent-configured real
 Scenario through one registered Windows Host Agent over an outbound
-authenticated connection.
+authenticated connection. Agents publish fresh versioned Host capability
+records so planning and Control Plane scheduling can apply the same exact or
+minimum version and required-feature compatibility decision before assignment.
 
 ## Who Maya Stall Is For
 

@@ -80,6 +80,36 @@ Doctor layer:
 - Give each Maya Host a stable id in user or CI host config.
 - Decide how the Target Profile selects from the Host Pool: first healthy unlocked host, pinned Maya Host, wait, or fail fast.
 
+For capability scheduling, declare the Host values that Scenarios may require:
+
+```yaml
+capabilities:
+  mayaBuilds: ["2025.3"]
+  sessionMayaBuild: "2025.3"
+  python: "3.11.9"
+  sessionBroker:
+    version: "2.1"
+    features: [script.execute, status.observe]
+  capture: [screenshot, recording, visual-evidence]
+  control: [coordinate]
+  renderers: [arnold]
+  gpu: [nvidia]
+  display: [console, dpi-100]
+  licensing: [available]
+  trustedPluginArtifacts: true
+```
+
+The Windows Host Agent adds its report version, timestamp, Target Profile
+membership, and eligibility state, then refreshes the record on heartbeat. If
+`capabilities` is omitted, the Agent derives safe known values from existing
+Host config and reports unknown operator-managed categories explicitly. A
+Scenario that requires an unknown value will not match. If `capabilities` is
+present, every category must be present; omitted categories make the report
+incomplete and ineligible. `sessionMayaBuild` names the build started by the
+Host's fixed Session Broker launcher; it must be one of `mayaBuilds`. A
+single-build inventory infers that value, while a multi-build Host must declare
+it explicitly.
+
 Doctor layer:
 
 - `target-profile`: missing or invalid Target Profile in host config.

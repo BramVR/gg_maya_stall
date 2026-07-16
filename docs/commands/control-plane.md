@@ -44,7 +44,8 @@ SHA256 digest; neither credential is accepted through Repo Run Config or a
 command argument.
 
 After at least one Agent is enrolled, Scenario submissions require a registered
-ready Agent process. Registration issues a leased, ephemeral process-session
+ready Agent process with a complete, fresh, compatible capability report for
+the submitted Target Profile. Registration issues a leased, ephemeral process-session
 fence; heartbeats renew it during execution, concurrent live processes using
 the same Agent identity are rejected, and a replacement may take over only
 after the prior lease expires and before execution confirmation. Loss after
@@ -59,6 +60,16 @@ Restarted Control Planes reload active locks and keep their Hosts unavailable.
 An unverified Maya shutdown moves the assignment to `quarantined`; its Agent
 and shared Host Locks remain unavailable. Version 1 has no automated
 quarantine recovery endpoint; this is an intentional fail-closed boundary.
+
+Before an assignment or Host Lock is created, scheduling evaluates every ready
+Host with the same compatibility decision used by `maya-stall plan`. Stale,
+incomplete, offline, unhealthy, maintained, and quarantined reports never
+qualify. Every mismatch is returned in the failed host-selection diagnostic.
+Compatible Hosts in the Target Profile's Host Pool are selected by Maya Host id
+and then Agent id, making selection deterministic. The selected report is
+stored with the durable assignment. An exact or minimum Maya requirement also
+resolves one concrete reported build; the Agent verifies that the fresh Maya UI
+Session reports that build before Scenario execution.
 
 Run the Agent with [`host-agent run-once`](host-agent.md). It makes only outbound
 authenticated HTTPS requests, confirms the exact Host Lock token, binds the

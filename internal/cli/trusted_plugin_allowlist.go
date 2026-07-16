@@ -447,13 +447,27 @@ func manifestHasPluginArtifacts(payload []manifestPayload) bool {
 }
 
 func trustedPluginAllowlistMayaVersions(host mayaHostConfig, scenario scenarioConfig) []string {
-	if strings.TrimSpace(scenario.MayaVersion) != "" {
-		return []string{strings.TrimSpace(scenario.MayaVersion)}
+	requirement := normalizedScenarioRequirements(scenario).Maya
+	if requirement.Exact != "" {
+		return []string{requirement.Exact}
 	}
-	if len(host.MayaVersions) > 0 {
-		return compactMayaVersions(host.MayaVersions)
+	versions := host.MayaVersions
+	if host.Capabilities != nil && strings.TrimSpace(host.Capabilities.SessionMayaBuild) != "" {
+		versions = []string{host.Capabilities.SessionMayaBuild}
+	} else if host.Capabilities != nil && len(host.Capabilities.MayaBuilds) > 0 {
+		versions = host.Capabilities.MayaBuilds
 	}
-	return nil
+	versions = compactMayaVersions(versions)
+	if requirement.Minimum == "" {
+		return versions
+	}
+	compatible := make([]string, 0, len(versions))
+	for _, version := range versions {
+		if versionAtLeast(version, requirement.Minimum) {
+			compatible = append(compatible, version)
+		}
+	}
+	return compatible
 }
 
 func compactMayaVersions(versions []string) []string {

@@ -757,6 +757,7 @@ func TestAcceptedRunSurvivesDisconnectBeforeHostAgentAssignmentPickup(t *testing
 	var status hostAgentStatusResponse
 	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", hostAgentRegistrationRequest{
 		Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1, SessionBinding: true,
+		Capabilities: testHostAgentCapabilityRecord("maya-win-01", time.Now()),
 	}, runtime, http.StatusOK, &status); err != nil {
 		t.Fatalf("register Windows Host Agent: %v", err)
 	}
@@ -1345,7 +1346,7 @@ func TestQuarantinedAssignmentRetainsBothHostLocksAndRejectsTakeover(t *testing.
 	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
 	runtime.ControlPlaneHTTPClient = server.Client()
 	enrollTestHostAgent(t, repoDir, server.URL, runtime)
-	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1, SessionBinding: true}
+	registration := testHostAgentRegistration("windows-agent-01", "maya-win-01", runtime.Now())
 	var status hostAgentStatusResponse
 	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &status); err != nil {
 		t.Fatalf("register Windows Host Agent: %v", err)
@@ -1494,7 +1495,7 @@ func TestSecondHostAgentProcessRegistrationIsRejected(t *testing.T) {
 	runtime := defaultRunRuntime()
 	runtime.ControlPlaneHTTPClient = server.Client()
 	enrollTestHostAgent(t, t.TempDir(), server.URL, runtime)
-	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1, SessionBinding: true}
+	registration := testHostAgentRegistration("windows-agent-01", "maya-win-01", runtime.Now())
 	var first hostAgentStatusResponse
 	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &first); err != nil {
 		t.Fatalf("register first Windows Host Agent process: %v", err)
@@ -1525,7 +1526,7 @@ func TestExpiredHostAgentSessionAllowsReEnrollment(t *testing.T) {
 	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
 	runtime.ControlPlaneHTTPClient = server.Client()
 	enrollTestHostAgent(t, t.TempDir(), server.URL, runtime)
-	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1, SessionBinding: true}
+	registration := testHostAgentRegistration("windows-agent-01", "maya-win-01", runtime.Now())
 	var first hostAgentStatusResponse
 	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &first); err != nil {
 		t.Fatalf("register Windows Host Agent process: %v", err)
@@ -1560,6 +1561,7 @@ func TestHostAgentMutationRevalidatesRotatedCredential(t *testing.T) {
 	}
 	content, err := json.Marshal(hostAgentRegistrationRequest{
 		Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1, SessionBinding: true,
+		Capabilities: testHostAgentCapabilityRecord("maya-win-01", time.Now()),
 	})
 	if err != nil {
 		t.Fatalf("marshal registration: %v", err)
@@ -1593,7 +1595,7 @@ func TestExpiredHostAgentSessionAllowsFencedProcessTakeover(t *testing.T) {
 	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
 	runtime.ControlPlaneHTTPClient = server.Client()
 	enrollTestHostAgent(t, repoDir, server.URL, runtime)
-	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1, SessionBinding: true}
+	registration := testHostAgentRegistration("windows-agent-01", "maya-win-01", runtime.Now())
 	var first hostAgentStatusResponse
 	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &first); err != nil {
 		t.Fatalf("register first Windows Host Agent process: %v", err)
@@ -1669,7 +1671,7 @@ func TestExpiredReadyHostAgentIsNotSelected(t *testing.T) {
 	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
 	runtime.ControlPlaneHTTPClient = server.Client()
 	enrollTestHostAgent(t, repoDir, server.URL, runtime)
-	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1, SessionBinding: true}
+	registration := testHostAgentRegistration("windows-agent-01", "maya-win-01", runtime.Now())
 	var status hostAgentStatusResponse
 	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &status); err != nil {
 		t.Fatalf("register Windows Host Agent: %v", err)
@@ -1691,6 +1693,47 @@ func TestExpiredReadyHostAgentIsNotSelected(t *testing.T) {
 	}
 }
 
+func TestStaleCapabilityReportNeverReceivesAssignment(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	dataDir := privateTempDir(t)
+	now := time.Date(2026, time.July, 16, 12, 0, 0, 0, time.UTC)
+	runtime := defaultRunRuntime()
+	runtime.Now = func() time.Time { return now }
+	handler, err := newControlPlaneHandler(dataDir, "operator-token", runtime)
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "operator-token")
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	runtime.ControlPlaneHTTPClient = server.Client()
+	enrollTestHostAgent(t, repoDir, server.URL, runtime)
+	report := configuredMayaHostCapabilityRecord(mayaHostConfig{ID: "maya-win-01", Health: "healthy"}, now.Add(-mayaHostCapabilityFreshness-time.Second))
+	report.TargetProfiles = []string{"default"}
+	registration := hostAgentRegistrationRequest{
+		Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1, SessionBinding: true,
+		Capabilities: report,
+	}
+	var status hostAgentStatusResponse
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &status); err != nil {
+		t.Fatalf("register Windows Host Agent: %v", err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &stdout, &stderr, repoDir, "test-version", runtime); code != 1 {
+		t.Fatalf("stale-report Scenario exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	results := decodeRunJSONLines(t, stdout.Bytes())
+	if len(results) != 2 || !strings.Contains(results[1].Diagnostic, "capability record is stale") {
+		t.Fatalf("stale-report result = %+v", results)
+	}
+	status = readHostAgentStatus(t, server.Client(), server.URL, "windows-agent-01")
+	if status.State != "ready" || status.RunID != "" {
+		t.Fatalf("stale-report Agent received assignment: %+v", status)
+	}
+}
+
 func TestSharedFakeHostLockBlocksAgentAssignment(t *testing.T) {
 	repoDir := writeRunConfigFixture(t)
 	dataDir := privateTempDir(t)
@@ -1705,7 +1748,7 @@ func TestSharedFakeHostLockBlocksAgentAssignment(t *testing.T) {
 	runtime := defaultRunRuntime()
 	runtime.ControlPlaneHTTPClient = server.Client()
 	enrollTestHostAgent(t, repoDir, server.URL, runtime)
-	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1, SessionBinding: true}
+	registration := testHostAgentRegistration("windows-agent-01", "maya-win-01", runtime.Now())
 	var status hostAgentStatusResponse
 	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &status); err != nil {
 		t.Fatalf("register Windows Host Agent: %v", err)
@@ -1727,7 +1770,7 @@ func TestSharedFakeHostLockBlocksAgentAssignment(t *testing.T) {
 }
 
 func TestLegacyHostAgentWithoutSessionBindingDoesNotReceiveNewAssignment(t *testing.T) {
-	repoDir := t.TempDir()
+	repoDir := writeRunConfigFixture(t)
 	runtime := defaultRunRuntime()
 	handlerValue, err := newControlPlaneHandler(privateTempDir(t), "operator-token", runtime)
 	if err != nil {
@@ -1754,7 +1797,7 @@ func TestLegacyHostAgentWithoutSessionBindingDoesNotReceiveNewAssignment(t *test
 }
 
 func TestHostAgentAcceptanceReportingFailureFinalizesRun(t *testing.T) {
-	repoDir := t.TempDir()
+	repoDir := writeRunConfigFixture(t)
 	dataDir := privateTempDir(t)
 	runtime := defaultRunRuntime()
 	handlerValue, err := newControlPlaneHandler(dataDir, "operator-token", runtime)
@@ -1767,6 +1810,7 @@ func TestHostAgentAcceptanceReportingFailureFinalizesRun(t *testing.T) {
 		status: hostAgentStatusResponse{
 			Version: hostAgentAPIVersion, Kind: "host-agent-status", AgentID: "windows-agent-01", HostID: "maya-win-01",
 			Slots: 1, State: "ready", SessionID: strings.Repeat("a", 32), SessionBinding: true,
+			Capabilities: testHostAgentCapabilityRecord("maya-win-01", runtime.Now()),
 		},
 		notify: make(chan struct{}), sessionExpiresAt: time.Now().Add(time.Minute),
 	}
@@ -1791,7 +1835,7 @@ func TestHostAgentAcceptanceReportingFailureFinalizesRun(t *testing.T) {
 }
 
 func TestHostAgentLeaseExpiryDuringAcceptanceRejectsAssignment(t *testing.T) {
-	repoDir := t.TempDir()
+	repoDir := writeRunConfigFixture(t)
 	dataDir := privateTempDir(t)
 	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
 	runtime := defaultRunRuntime()
@@ -1806,6 +1850,7 @@ func TestHostAgentLeaseExpiryDuringAcceptanceRejectsAssignment(t *testing.T) {
 		status: hostAgentStatusResponse{
 			Version: hostAgentAPIVersion, Kind: "host-agent-status", AgentID: "windows-agent-01", HostID: "maya-win-01",
 			Slots: 1, State: "ready", SessionID: strings.Repeat("a", 32), SessionBinding: true,
+			Capabilities: testHostAgentCapabilityRecord("maya-win-01", runtime.Now()),
 		},
 		notify: make(chan struct{}), sessionExpiresAt: now.Add(hostAgentSessionLease),
 	}
@@ -1830,6 +1875,12 @@ func TestPartialHostAgentAssignmentTransitionQuarantinesSlot(t *testing.T) {
 	if err := os.MkdirAll(repoDir, 0o700); err != nil {
 		t.Fatalf("create run repo: %v", err)
 	}
+	mustWriteFile(t, filepath.Join(repoDir, ".maya-stall.yaml"), `version: 1
+scenarios:
+  smoke:
+    expectedOutputs:
+      scenarioResult: "outputs/smoke-result.json"
+`)
 	runtime := defaultRunRuntime()
 	runtime.Now = func() time.Time { return now }
 	handlerValue, err := newControlPlaneHandler(dataDir, "operator-token", runtime)
@@ -1850,6 +1901,7 @@ func TestPartialHostAgentAssignmentTransitionQuarantinesSlot(t *testing.T) {
 		status: hostAgentStatusResponse{
 			Version: hostAgentAPIVersion, Kind: "host-agent-status", AgentID: "windows-agent-01", HostID: "maya-win-01",
 			Slots: 1, State: "ready", SessionID: strings.Repeat("a", 32), SessionBinding: true,
+			Capabilities: testHostAgentCapabilityRecord("maya-win-01", runtime.Now()),
 		},
 		notify: make(chan struct{}), sessionExpiresAt: now.Add(hostAgentSessionLease),
 	}
@@ -1904,7 +1956,7 @@ func TestPartialHostAgentAssignmentTransitionQuarantinesSlot(t *testing.T) {
 	t.Cleanup(restartedServer.Close)
 	restartedRuntime := defaultRunRuntime()
 	restartedRuntime.ControlPlaneHTTPClient = restartedServer.Client()
-	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: enrollment.AgentID, HostID: enrollment.HostID, Slots: 1, SessionBinding: true}
+	registration := testHostAgentRegistration(enrollment.AgentID, enrollment.HostID, restartedRuntime.Now())
 	var restartedStatus hostAgentStatusResponse
 	if err := postControlPlaneJSON(restartedServer.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, restartedRuntime, http.StatusOK, &restartedStatus); err == nil {
 		t.Fatal("restarted quarantined Windows Host Agent registration succeeded")
@@ -1927,7 +1979,7 @@ func TestRegisteredHostAgentRejectsRetainedStopPolicyBeforeAssignment(t *testing
 	runtime := defaultRunRuntime()
 	runtime.ControlPlaneHTTPClient = server.Client()
 	enrollTestHostAgent(t, repoDir, server.URL, runtime)
-	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1, SessionBinding: true}
+	registration := testHostAgentRegistration("windows-agent-01", "maya-win-01", runtime.Now())
 	var status hostAgentStatusResponse
 	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &status); err != nil {
 		t.Fatalf("register Windows Host Agent: %v", err)
@@ -2005,7 +2057,7 @@ func TestControlPlaneRecoversJournaledHostAgentAssignmentTransition(t *testing.T
 	t.Cleanup(restartedServer.Close)
 	restartedRuntime := defaultRunRuntime()
 	restartedRuntime.ControlPlaneHTTPClient = restartedServer.Client()
-	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: record.AgentID, HostID: record.HostID, Slots: 1, SessionBinding: true}
+	registration := testHostAgentRegistration(record.AgentID, record.HostID, restartedRuntime.Now())
 	var status hostAgentStatusResponse
 	if err := postControlPlaneJSON(restartedServer.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, restartedRuntime, http.StatusOK, &status); err == nil {
 		t.Fatal("replacement Windows Host Agent registered during restart grace")
@@ -2201,6 +2253,7 @@ func TestUnauthorizedWindowsHostAgentCannotRegisterOrMutateState(t *testing.T) {
 
 	body, err := json.Marshal(hostAgentRegistrationRequest{
 		Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1, SessionBinding: true,
+		Capabilities: testHostAgentCapabilityRecord("maya-win-01", runtime.Now()),
 	})
 	if err != nil {
 		t.Fatalf("marshal registration: %v", err)
@@ -2245,7 +2298,7 @@ func TestStaleHostLockTokenIsRejectedWithoutMutation(t *testing.T) {
 	runtime := defaultRunRuntime()
 	runtime.ControlPlaneHTTPClient = server.Client()
 	enrollTestHostAgent(t, repoDir, server.URL, runtime)
-	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1, SessionBinding: true}
+	registration := testHostAgentRegistration("windows-agent-01", "maya-win-01", runtime.Now())
 	var status hostAgentStatusResponse
 	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &status); err != nil {
 		t.Fatalf("register Windows Host Agent: %v", err)
@@ -2398,7 +2451,7 @@ func TestSecondAssignmentToSameMayaHostIsRejectedWithoutMutation(t *testing.T) {
 	runtime := defaultRunRuntime()
 	runtime.ControlPlaneHTTPClient = server.Client()
 	enrollTestHostAgent(t, repoDir, server.URL, runtime)
-	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1, SessionBinding: true}
+	registration := testHostAgentRegistration("windows-agent-01", "maya-win-01", runtime.Now())
 	var registered hostAgentStatusResponse
 	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &registered); err != nil {
 		t.Fatalf("register Windows Host Agent: %v", err)
@@ -2535,7 +2588,7 @@ func TestControlPlaneRestartKeepsDurableHostLockUnavailable(t *testing.T) {
 	if status.State != "offline" || status.RunID != runID {
 		t.Fatalf("restarted Host Agent status = %+v, want offline with durable Run ID", status)
 	}
-	registration := hostAgentRegistrationRequest{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1, SessionBinding: true}
+	registration := testHostAgentRegistration("windows-agent-01", "maya-win-01", runtime.Now())
 	if err := postControlPlaneJSON(restarted.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, restartedRuntime, http.StatusOK, &status); err != nil {
 		t.Fatalf("register restarted Windows Host Agent: %v", err)
 	}
@@ -2561,6 +2614,19 @@ func enrollTestHostAgent(t *testing.T, workDir string, serverURL string, runtime
 		"--credential-env", "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL",
 	}, &stdout, &stderr, workDir, "test-version", runtime); code != 0 {
 		t.Fatalf("enroll Windows Host Agent exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+}
+
+func testHostAgentCapabilityRecord(hostID string, now time.Time) mayaHostCapabilityRecord {
+	report := configuredMayaHostCapabilityRecord(mayaHostConfig{ID: hostID, Health: "healthy"}, now)
+	report.TargetProfiles = []string{"default"}
+	return report
+}
+
+func testHostAgentRegistration(agentID string, hostID string, now time.Time) hostAgentRegistrationRequest {
+	return hostAgentRegistrationRequest{
+		Version: hostAgentAPIVersion, AgentID: agentID, HostID: hostID, Slots: 1, SessionBinding: true,
+		Capabilities: testHostAgentCapabilityRecord(hostID, now),
 	}
 }
 

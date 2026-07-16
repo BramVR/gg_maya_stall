@@ -378,6 +378,9 @@ func (run *freshRunLifecycle) setup() error {
 	if err != nil {
 		return err
 	}
+	if run.options.AssignedMayaBuild != "" {
+		scenario.Config.SelectedMayaBuild = run.options.AssignedMayaBuild
+	}
 	run.scenario = scenario
 	if err := validateScenarioInputs(run.repoDir, scenario); err != nil {
 		return err
@@ -951,6 +954,14 @@ func (run *freshRunLifecycle) startFreshSession() error {
 		if run.runtime.SessionStarted != nil {
 			if bindErr := run.runtime.SessionStarted(session); bindErr != nil {
 				return errors.Join(err, fmt.Errorf("bind Maya UI Session for %s: %w", run.manifest.RunID, bindErr))
+			}
+		}
+		if err == nil && run.scenario.Config.SelectedMayaBuild != "" {
+			verifier, ok := run.runtime.Broker.(mayaSessionBuildVerifier)
+			if !ok {
+				err = fmt.Errorf("session broker cannot verify selected Maya build %s", run.scenario.Config.SelectedMayaBuild)
+			} else if verifyErr := verifier.VerifyMayaBuild(run.context, session, run.scenario.Config.SelectedMayaBuild); verifyErr != nil {
+				err = verifyErr
 			}
 		}
 	}

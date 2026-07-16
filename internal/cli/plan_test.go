@@ -248,11 +248,257 @@ hostPools:
 	if len(hosts) != 3 || !hosts[0].Compatible || hosts[1].Compatible || hosts[2].Compatible {
 		t.Fatalf("host compatibility = %+v", hosts)
 	}
-	if hosts[1].Reasons[0] != "Scenario needs Maya 2025; configured inventory has 2024" {
+	if hosts[1].Reasons[0] != "Scenario requires exact Maya build 2025; reported session build is 2024; installed builds are 2024" {
 		t.Fatalf("old-host reasons = %+v", hosts[1].Reasons)
 	}
 	if hosts[2].Reasons[0] != "Maya Host health is unhealthy" {
 		t.Fatalf("offline-host reasons = %+v", hosts[2].Reasons)
+	}
+}
+
+func TestPlanMatchesExactMayaBuildFromStructuredCapabilities(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".maya-stall.yaml"), []byte(`version: 1
+scenarios:
+  smoke:
+    requirements:
+      maya:
+        exact: "2025.3"
+    expectedOutputs:
+      scenarioResult: outputs/result.json
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hostConfigPath := filepath.Join(dir, "hosts.yaml")
+	if err := os.WriteFile(hostConfigPath, []byte(`version: 1
+targetProfiles:
+  ci:
+    hostPool: windows
+hostPools:
+  windows:
+    hosts:
+      - id: maya-win-01
+        capabilities:
+          mayaBuilds: ["2025.3"]
+          sessionMayaBuild: "2025.3"
+          python: "3.11.9"
+          sessionBroker:
+            version: "1"
+            features: ["script.execute"]
+          capture: []
+          control: []
+          renderers: ["unknown"]
+          gpu: ["unknown"]
+          display: ["console"]
+          licensing: ["available"]
+          trustedPluginArtifacts: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := buildScenarioPlan(dir, planOptions{ScenarioName: "smoke", HostConfig: hostConfigPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Requirements.HostCapabilities.Maya.Exact != "2025.3" {
+		t.Fatalf("normalized plan requirements = %+v", plan.Requirements)
+	}
+	if !plan.Ready || len(plan.TargetProfiles) != 1 || !plan.TargetProfiles[0].Hosts[0].Compatible {
+		t.Fatalf("exact Maya capability plan = %+v", plan)
+	}
+}
+
+func TestPlanRejectsPythonBelowMinimumVersion(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".maya-stall.yaml"), []byte(`version: 1
+scenarios:
+  smoke:
+    requirements:
+      python:
+        minimum: "3.11"
+    expectedOutputs:
+      scenarioResult: outputs/result.json
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hostConfigPath := filepath.Join(dir, "hosts.yaml")
+	if err := os.WriteFile(hostConfigPath, []byte(`version: 1
+targetProfiles:
+  ci:
+    hostPool: windows
+hostPools:
+  windows:
+    hosts:
+      - id: maya-win-01
+        capabilities:
+          mayaBuilds: ["2025.3"]
+          sessionMayaBuild: "2025.3"
+          python: "3.10.12"
+          sessionBroker:
+            version: "1"
+            features: ["script.execute"]
+          capture: []
+          control: []
+          renderers: ["unknown"]
+          gpu: ["unknown"]
+          display: ["console"]
+          licensing: ["available"]
+          trustedPluginArtifacts: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := buildScenarioPlan(dir, planOptions{ScenarioName: "smoke", HostConfig: hostConfigPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := plan.TargetProfiles[0].Hosts[0]
+	if plan.Ready || host.Compatible || !strings.Contains(strings.Join(host.Reasons, "\n"), "Python requires minimum 3.11; reported version is 3.10.12") {
+		t.Fatalf("minimum Python capability plan = %+v", plan)
+	}
+}
+
+func TestPlanExplainsEveryCapabilityMismatch(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".maya-stall.yaml"), []byte(`version: 1
+scenarios:
+  smoke:
+    requirements:
+      maya:
+        minimum: "2025.2"
+      python:
+        exact: "3.11.9"
+      sessionBroker:
+        minimum: "2.1"
+        features: ["script.execute", "status.observe"]
+      capture: ["recording"]
+      control: ["semantic"]
+      renderers: ["arnold"]
+      gpu: ["nvidia"]
+      display: ["console"]
+      licensing: ["available"]
+      trustedPluginArtifacts: true
+    expectedOutputs:
+      scenarioResult: outputs/result.json
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hostConfigPath := filepath.Join(dir, "hosts.yaml")
+	if err := os.WriteFile(hostConfigPath, []byte(`version: 1
+targetProfiles:
+  ci:
+    hostPool: windows
+hostPools:
+  windows:
+    hosts:
+      - id: maya-win-01
+        capabilities:
+          mayaBuilds: ["2025.1"]
+          sessionMayaBuild: "2025.1"
+          python: "3.10"
+          sessionBroker:
+            version: "2.0"
+            features: ["script.execute"]
+          capture: ["screenshot"]
+          control: ["coordinate"]
+          renderers: ["maya-software"]
+          gpu: ["amd"]
+          display: ["services"]
+          licensing: ["unavailable"]
+          trustedPluginArtifacts: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := buildScenarioPlan(dir, planOptions{ScenarioName: "smoke", HostConfig: hostConfigPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := plan.TargetProfiles[0].Hosts[0]
+	joined := strings.Join(host.Reasons, "\n")
+	for _, wanted := range []string{
+		"Maya requires minimum 2025.2",
+		"Python requires exact 3.11.9",
+		"Session Broker requires minimum 2.1",
+		"Session Broker feature status.observe is required",
+		"capture capability recording is required",
+		"control capability semantic is required",
+		"renderer capability arnold is required",
+		"GPU capability nvidia is required",
+		"display capability console is required",
+		"licensing capability available is required",
+		"trusted Plugin Artifact support must be true",
+	} {
+		if !strings.Contains(joined, wanted) {
+			t.Fatalf("capability reasons missing %q: %+v", wanted, host.Reasons)
+		}
+	}
+}
+
+func TestPlanRejectsAmbiguousVersionRequirements(t *testing.T) {
+	tests := []struct {
+		name        string
+		requirement string
+		want        string
+	}{
+		{
+			name: "exact and minimum",
+			requirement: `    requirements:
+      python:
+        exact: "3.11.9"
+        minimum: "3.11"
+`,
+			want: "Python requirement cannot set both exact and minimum",
+		},
+		{
+			name: "legacy and structured Maya",
+			requirement: `    mayaVersion: "2025"
+    requirements:
+      maya:
+        minimum: "2025.2"
+`,
+			want: "Scenario cannot combine mayaVersion with requirements.maya",
+		},
+		{
+			name: "malformed Maya minimum",
+			requirement: `    requirements:
+      maya:
+        minimum: "banana"
+`,
+			want: "Maya minimum version must be numeric",
+		},
+		{
+			name: "malformed Python minimum",
+			requirement: `    requirements:
+      python:
+        minimum: "3.x"
+`,
+			want: "Python minimum version must be numeric",
+		},
+		{
+			name: "malformed Session Broker minimum",
+			requirement: `    requirements:
+      sessionBroker:
+        minimum: "v2"
+`,
+			want: "Session Broker minimum version must be numeric",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			config := "version: 1\nscenarios:\n  smoke:\n" + test.requirement + "    expectedOutputs:\n      scenarioResult: outputs/result.json\n"
+			if err := os.WriteFile(filepath.Join(dir, ".maya-stall.yaml"), []byte(config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			plan, err := buildScenarioPlan(dir, planOptions{ScenarioName: "smoke"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.Ready || len(plan.Issues) == 0 || !strings.Contains(plan.Issues[0].Reason, test.want) {
+				t.Fatalf("ambiguous requirement plan = %+v, want %q", plan, test.want)
+			}
+		})
 	}
 }
 
@@ -266,6 +512,9 @@ func TestPlanHumanOutputIncludesRequirementsAndTargetReasons(t *testing.T) {
 			MayaVersion:   "2025",
 			SessionBroker: true,
 			Capabilities:  []string{"script.execute", "screenshot.capture"},
+			HostCapabilities: scenarioRequirements{
+				Python: versionRequirement{Minimum: "3.11"}, Capture: []string{"screenshot"},
+			},
 		},
 		Payload: []planPayload{{Kind: "scenes", Source: "scene.ma", Destination: "payload/scenes/scene.ma", Size: 12, SHA256: "abc", Status: "ready"}},
 		TargetProfiles: []planTargetProfile{{
@@ -281,6 +530,8 @@ func TestPlanHumanOutputIncludesRequirementsAndTargetReasons(t *testing.T) {
 	for _, wanted := range []string{
 		"capability: script.execute",
 		"capability: screenshot.capture",
+		"python-version: minimum 3.11",
+		"required-capture: screenshot",
 		"target-profile: ci (Host Pool windows) [compatible]",
 		"host: maya-win-01 [compatible]",
 		"host: maya-win-old [incompatible: Scenario needs Maya 2025; configured inventory has 2024]",
@@ -323,6 +574,20 @@ hostPools:
           sftpBinary: ` + binary + `
         workRoot: C:/maya-stall
         mayaVersions: ["2025"]
+        capabilities:
+          mayaBuilds: ["2025"]
+          sessionMayaBuild: "2025"
+          python: "unknown"
+          sessionBroker:
+            version: "1"
+            features: ["script.execute"]
+          capture: []
+          control: ["coordinate"]
+          renderers: ["unknown"]
+          gpu: ["unknown"]
+          display: ["unknown"]
+          licensing: ["unknown"]
+          trustedPluginArtifacts: false
         broker:
           type: gg-mayasessiond
           stateDir: C:/maya-stall/sessiond-ui

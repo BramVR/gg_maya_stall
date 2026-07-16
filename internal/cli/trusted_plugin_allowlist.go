@@ -447,13 +447,60 @@ func manifestHasPluginArtifacts(payload []manifestPayload) bool {
 }
 
 func trustedPluginAllowlistMayaVersions(host mayaHostConfig, scenario scenarioConfig) []string {
-	if strings.TrimSpace(scenario.MayaVersion) != "" {
-		return []string{strings.TrimSpace(scenario.MayaVersion)}
+	requirement := normalizedScenarioRequirements(scenario).Maya
+	configured := compactMayaVersions(host.MayaVersions)
+	if host.Capabilities != nil && strings.TrimSpace(host.Capabilities.SessionMayaBuild) != "" && len(configured) > 0 {
+		sessionBuild := strings.TrimSpace(host.Capabilities.SessionMayaBuild)
+		if _, compatible := selectMayaBuild([]string{sessionBuild}, requirement); !compatible {
+			return nil
+		}
+		if versions := configuredMayaPreferenceVersions(configured, sessionBuild); len(versions) > 0 {
+			return versions
+		}
+		// An unrelated configured family must not make the selected runtime look allowlisted.
+		return []string{sessionBuild}
 	}
-	if len(host.MayaVersions) > 0 {
-		return compactMayaVersions(host.MayaVersions)
+	if requirement.Exact != "" {
+		return []string{requirement.Exact}
 	}
-	return nil
+	versions := configured
+	if len(versions) == 0 && host.Capabilities != nil && strings.TrimSpace(host.Capabilities.SessionMayaBuild) != "" {
+		versions = []string{host.Capabilities.SessionMayaBuild}
+	} else if len(versions) == 0 && host.Capabilities != nil && len(host.Capabilities.MayaBuilds) > 0 {
+		versions = host.Capabilities.MayaBuilds
+	}
+	versions = compactMayaVersions(versions)
+	if requirement.Minimum == "" {
+		return versions
+	}
+	compatible := make([]string, 0, len(versions))
+	for _, version := range versions {
+		if versionAtLeast(version, requirement.Minimum) {
+			compatible = append(compatible, version)
+		}
+	}
+	return compatible
+}
+
+func configuredMayaPreferenceVersions(configured []string, sessionBuild string) []string {
+	exact := make([]string, 0, len(configured))
+	for _, version := range configured {
+		if sameMayaBuildVersion(version, sessionBuild) {
+			exact = append(exact, version)
+		}
+	}
+	if len(exact) > 0 {
+		return exact
+	}
+	// Maya update builds can report 2025.3 while sharing the operator-configured 2025 preferences directory.
+	family := strings.SplitN(sessionBuild, ".", 2)[0]
+	matching := make([]string, 0, len(configured))
+	for _, version := range configured {
+		if strings.SplitN(version, ".", 2)[0] == family {
+			matching = append(matching, version)
+		}
+	}
+	return matching
 }
 
 func compactMayaVersions(versions []string) []string {

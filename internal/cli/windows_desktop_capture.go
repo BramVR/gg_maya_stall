@@ -115,7 +115,8 @@ func writeRemotePowerShellScript(host mayaHostConfig, remotePath string, content
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("write remote PowerShell script timed out after %s", timeout)
 		}
-		detail := firstUsefulStderrLine(stderr.String())
+		detail := sshFailureDetail(err, stderr.String())
+		err = sanitizedSSHExecutionErrorFor(err, stderr.String())
 		if detail != "" {
 			return fmt.Errorf("write remote PowerShell script failed: %w: %s", err, detail)
 		}

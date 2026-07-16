@@ -73,7 +73,8 @@ func TestInitWritesRepoOnlySmokeScenario(t *testing.T) {
 		"version: 1",
 		"scenarios:",
 		"smoke:",
-		"mayaVersion:",
+		"requirements:",
+		"minimum: \"2025\"",
 		"payload:",
 		"evidence:",
 	} {
@@ -114,6 +115,43 @@ func TestInitConfigRunsFakeSmokeScenario(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "status: passed") {
 		t.Fatalf("run output missing passed status:\n%s", stdout.String())
+	}
+}
+
+func TestInitConfigPlansForPreparedPointReleaseHost(t *testing.T) {
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"init"}, &stdout, &stderr, dir, "test-version"); code != 0 {
+		t.Fatalf("init exit code = %d; stderr: %s", code, stderr.String())
+	}
+	hostConfig := filepath.Join(dir, "hosts.yaml")
+	mustWriteFile(t, hostConfig, `version: 1
+targetProfiles:
+  ci:
+    hostPool: windows
+hostPools:
+  windows:
+    hosts:
+      - id: maya-win-01
+        capabilities:
+          mayaBuilds: ["2025.3"]
+          sessionMayaBuild: "2025.3"
+          python: "3.11"
+          sessionBroker:
+            version: "1"
+            features: [script.execute]
+          capture: [screenshot, visual-evidence]
+          control: []
+          renderers: [unknown]
+          gpu: [unknown]
+          display: [console]
+          licensing: [unknown]
+          trustedPluginArtifacts: false
+`)
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"plan", "--host-config", hostConfig, "smoke"}, &stdout, &stderr, dir, "test-version"); code != 0 {
+		t.Fatalf("prepared point-release plan exit code = %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
 }
 
@@ -2710,6 +2748,234 @@ func TestRunSSHCommandOutputWithInputStreamsStdin(t *testing.T) {
 	}
 	if string(got) != "large-input-payload" {
 		t.Fatalf("SSH stdin = %q", string(got))
+	}
+}
+
+func TestRunSSHCommandOutputRedactsConfiguredEndpointFromFailure(t *testing.T) {
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "fake-ssh-private-endpoint")
+	script := "#!/bin/sh\nprintf 'runner-private: ssh: connect to host maya-private.example port 22: Operation timed out\\n' >&2\nexit 255\n"
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake SSH: %v", err)
+	}
+	host := mayaHostConfig{SSH: sshConfig{
+		Host: "maya-private.example", User: "runner-private", IdentityFile: "/private/identity", Binary: sshPath,
+	}}
+
+	_, err := runSSHCommandOutput(host, []string{"ignored"}, sshCommandTimeout)
+	if err == nil {
+		t.Fatal("failed SSH command returned no error")
+	}
+	for _, private := range []string{host.SSH.Host, host.SSH.User, host.SSH.IdentityFile} {
+		if strings.Contains(err.Error(), private) {
+			t.Fatalf("SSH error exposed configured endpoint detail %q: %v", private, err)
+		}
+	}
+	if !strings.Contains(err.Error(), "SSH operation reported an error") {
+		t.Fatalf("SSH error missing public-safe diagnostic: %v", err)
+	}
+}
+
+func TestRunSSHCommandOutputRedactsBeforeTruncatingFailure(t *testing.T) {
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "fake-ssh-long-private-endpoint")
+	hostName := strings.Repeat("private-endpoint-", 20) + ".example"
+	script := fmt.Sprintf("#!/bin/sh\nprintf %%s\\n %s >&2\nexit 255\n", shellQuote("ssh: connect to host "+hostName+" port 22: Operation timed out"))
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake SSH: %v", err)
+	}
+	host := mayaHostConfig{SSH: sshConfig{Host: hostName, Binary: sshPath}}
+
+	_, err := runSSHCommandOutput(host, []string{"ignored"}, sshCommandTimeout)
+	if err == nil {
+		t.Fatal("failed SSH command returned no error")
+	}
+	if strings.Contains(err.Error(), "private-endpoint-") || !strings.Contains(err.Error(), "SSH operation reported an error") {
+		t.Fatalf("SSH error did not redact before truncation: %v", err)
+	}
+}
+
+func TestRunSSHCommandOutputRedactsConfiguredExecutableStartFailure(t *testing.T) {
+	privateBinary := filepath.Join(t.TempDir(), "private-ssh-binary")
+	host := mayaHostConfig{SSH: sshConfig{Host: "maya.example", Binary: privateBinary}}
+
+	_, err := runSSHCommandOutput(host, []string{"ignored"}, sshCommandTimeout)
+	if err == nil {
+		t.Fatal("missing SSH executable returned no error")
+	}
+	if strings.Contains(err.Error(), privateBinary) || !strings.Contains(err.Error(), "[SSH executable]") {
+		t.Fatalf("SSH start error exposed configured executable: %v", err)
+	}
+}
+
+func TestRunSSHCommandOutputDoesNotForwardResolvedEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "fake-ssh-resolved-endpoint")
+	script := "#!/bin/sh\nprintf 'ssh: connect to host 203.0.113.10 port 2222: Operation timed out\\n' >&2\nexit 255\n"
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake SSH: %v", err)
+	}
+	host := mayaHostConfig{SSH: sshConfig{Host: "maya-alias", Port: 2222, Binary: sshPath}}
+
+	_, err := runSSHCommandOutput(host, []string{"ignored"}, sshCommandTimeout)
+	if err == nil {
+		t.Fatal("failed SSH command returned no error")
+	}
+	for _, private := range []string{"203.0.113.10", "2222"} {
+		if strings.Contains(err.Error(), private) {
+			t.Fatalf("SSH error forwarded effective endpoint detail %q: %v", private, err)
+		}
+	}
+}
+
+func TestRunSSHCommandOutputKeepsPublicLabelWithShortUsername(t *testing.T) {
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "fake-ssh-short-user")
+	script := "#!/bin/sh\nprintf 'ssh: connect to host maya.example port 22: Operation timed out\\n' >&2\nexit 255\n"
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake SSH: %v", err)
+	}
+	host := mayaHostConfig{SSH: sshConfig{Host: "maya.example", User: "a", Binary: sshPath}}
+
+	_, err := runSSHCommandOutput(host, []string{"ignored"}, sshCommandTimeout)
+	if err == nil {
+		t.Fatal("failed SSH command returned no error")
+	}
+	if !strings.Contains(err.Error(), "SSH operation reported an error") {
+		t.Fatalf("short SSH username corrupted public-safe diagnostic: %v", err)
+	}
+}
+
+func TestRunSSHCommandOutputKeepsRemoteFailurePrivateForRecoveryClassification(t *testing.T) {
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "fake-ssh-command-port-failure")
+	script := "#!/bin/sh\nprintf 'Cannot connect to Maya commandPort at localhost:7001\\n' >&2\nexit 1\n"
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake SSH: %v", err)
+	}
+	host := mayaHostConfig{SSH: sshConfig{Host: "maya-win-01", Binary: sshPath}}
+
+	_, err := runSSHCommandOutput(host, []string{"ignored"}, sshCommandTimeout)
+	if err == nil {
+		t.Fatal("failed remote command returned no error")
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "commandport") || strings.Contains(err.Error(), "localhost:7001") {
+		t.Fatalf("public SSH error exposed private remote failure detail: %v", err)
+	}
+	if !isCommandPortError(err) {
+		t.Fatalf("private remote failure was unavailable for recovery classification: %v", err)
+	}
+}
+
+func TestRunSSHCommandOutputDoesNotMisclassifyRemoteFailureAsTransportFailure(t *testing.T) {
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "fake-ssh-remote-permission-failure")
+	script := "#!/bin/sh\nprintf 'remote tool: permission denied for private resource\\n' >&2\nexit 1\n"
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake SSH: %v", err)
+	}
+	host := mayaHostConfig{SSH: sshConfig{Host: "maya-win-01", Binary: sshPath}}
+
+	_, err := runSSHCommandOutput(host, []string{"ignored"}, sshCommandTimeout)
+	if err == nil {
+		t.Fatal("failed remote command returned no error")
+	}
+	if strings.Contains(err.Error(), "authentication failed") || !strings.Contains(err.Error(), "SSH operation reported an error") {
+		t.Fatalf("remote failure was misclassified as an SSH transport failure: %v", err)
+	}
+	if strings.Contains(err.Error(), "private resource") {
+		t.Fatalf("public SSH error exposed private remote failure detail: %v", err)
+	}
+}
+
+func TestRunSSHCommandOutputKeepsAmbiguousExit255Generic(t *testing.T) {
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "fake-ssh-remote-exit-255")
+	script := "#!/bin/sh\nprintf 'remote tool: permission denied for private resource\\n' >&2\nexit 255\n"
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake SSH: %v", err)
+	}
+	host := mayaHostConfig{SSH: sshConfig{Host: "maya-win-01", Binary: sshPath}}
+
+	_, err := runSSHCommandOutput(host, []string{"ignored"}, sshCommandTimeout)
+	if err == nil {
+		t.Fatal("failed remote command returned no error")
+	}
+	if strings.Contains(err.Error(), "authentication failed") || !strings.Contains(err.Error(), "SSH operation reported an error") {
+		t.Fatalf("ambiguous exit 255 was misclassified as an SSH transport failure: %v", err)
+	}
+	if strings.Contains(err.Error(), "private resource") {
+		t.Fatalf("public SSH error exposed private remote failure detail: %v", err)
+	}
+}
+
+func TestRunSSHCommandOutputPreservesCanonicalDesktopDiagnostics(t *testing.T) {
+	tests := []string{
+		"schtasks.exe is required for interactive desktop control",
+		"interactive desktop session is unavailable for screenshot capture",
+	}
+	for _, diagnostic := range tests {
+		t.Run(diagnostic, func(t *testing.T) {
+			dir := t.TempDir()
+			sshPath := filepath.Join(dir, "fake-ssh-canonical-diagnostic")
+			script := fmt.Sprintf("#!/bin/sh\nprintf %%s\\n %s >&2\nexit 1\n", shellQuote(diagnostic))
+			if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+				t.Fatalf("write fake SSH: %v", err)
+			}
+			host := mayaHostConfig{SSH: sshConfig{Host: "maya-win-01", Binary: sshPath}}
+
+			_, err := runSSHCommandOutput(host, []string{"ignored"}, sshCommandTimeout)
+			if err == nil || !strings.Contains(err.Error(), diagnostic) {
+				t.Fatalf("SSH error did not preserve canonical product diagnostic %q: %v", diagnostic, err)
+			}
+		})
+	}
+}
+
+func TestRunSSHCommandOutputFindsCanonicalDiagnosticAfterPowerShellPreamble(t *testing.T) {
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "fake-ssh-powershell-preamble")
+	diagnostic := "interactive desktop session is unavailable for recording capture"
+	script := fmt.Sprintf("#!/bin/sh\nprintf 'OpenSSH warning\\n#< CLIXML\\n<Objs>%%s</Objs>\\n' %s >&2\nexit 1\n", shellQuote(diagnostic))
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake SSH: %v", err)
+	}
+	host := mayaHostConfig{SSH: sshConfig{Host: "maya-win-01", Binary: sshPath}}
+
+	_, err := runSSHCommandOutput(host, []string{"ignored"}, sshCommandTimeout)
+	if err == nil || !strings.Contains(err.Error(), diagnostic) {
+		t.Fatalf("SSH error did not preserve canonical diagnostic after PowerShell preamble: %v", err)
+	}
+}
+
+func TestRunSFTPBatchUsesPublicSafeSFTPDiagnostic(t *testing.T) {
+	dir := t.TempDir()
+	sftpPath := filepath.Join(dir, "fake-sftp-private-endpoint")
+	script := "#!/bin/sh\nprintf 'ssh: connect to host 203.0.113.10 port 2222: Operation timed out\\n' >&2\nexit 255\n"
+	if err := os.WriteFile(sftpPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake SFTP: %v", err)
+	}
+	host := mayaHostConfig{SSH: sshConfig{Host: "maya-alias", Port: 2222, SFTPBinary: sftpPath}}
+
+	err := runSFTPBatch(host, "quit\n")
+	if err == nil {
+		t.Fatal("failed SFTP command returned no error")
+	}
+	if strings.Contains(err.Error(), "203.0.113.10") || strings.Contains(err.Error(), "2222") {
+		t.Fatalf("SFTP error exposed effective endpoint: %v", err)
+	}
+	if strings.Contains(err.Error(), "SSH operation") || !strings.Contains(err.Error(), "SFTP operation reported an error") {
+		t.Fatalf("SFTP error used an incorrect public-safe diagnostic: %v", err)
+	}
+
+	privateBinary := filepath.Join(dir, "private-missing-sftp")
+	host.SSH.SFTPBinary = privateBinary
+	err = runSFTPBatch(host, "quit\n")
+	if err == nil {
+		t.Fatal("missing SFTP executable returned no error")
+	}
+	if strings.Contains(err.Error(), privateBinary) || strings.Contains(err.Error(), "[SSH executable]") || !strings.Contains(err.Error(), "[SFTP executable]") {
+		t.Fatalf("SFTP start error used an incorrect public-safe executable label: %v", err)
 	}
 }
 

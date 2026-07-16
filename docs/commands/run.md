@@ -40,6 +40,11 @@ by Run ID and inclusive event sequence while an in-process fake or registered
 Windows Host Agent Scenario is running. Configured stop and run-scoped desktop
 mutations are not exposed.
 
+When registered Agents exist, the Control Plane matches the normalized Scenario
+requirements against fresh Agent capability reports before assignment, Host
+Lock acquisition, or Agent-side payload staging. A no-compatible-Host result is
+a durable `host-selection` failure that explains every candidate mismatch.
+
 ## Behavior
 
 Syntax errors that do not identify a Scenario are usage errors: they exit `2`

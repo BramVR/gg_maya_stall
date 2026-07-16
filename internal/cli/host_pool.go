@@ -144,16 +144,17 @@ type hostPoolConfig struct {
 }
 
 type mayaHostConfig struct {
-	ID                         string       `yaml:"id"`
-	Health                     string       `yaml:"health"`
-	Transport                  string       `yaml:"transport"`
-	SSH                        sshConfig    `yaml:"ssh"`
-	WorkRoot                   string       `yaml:"workRoot"`
-	TrustedPluginArtifactsRoot string       `yaml:"trustedPluginArtifactsRoot"`
-	Broker                     brokerConfig `yaml:"broker"`
-	MayaVersions               []string     `yaml:"mayaVersions"`
-	FakeInstalledMayaVersions  []string     `yaml:"fakeInstalledMayaVersions"`
-	VisualEvidence             *bool        `yaml:"visualEvidence"`
+	ID                         string                `yaml:"id"`
+	Health                     string                `yaml:"health"`
+	Transport                  string                `yaml:"transport"`
+	SSH                        sshConfig             `yaml:"ssh"`
+	WorkRoot                   string                `yaml:"workRoot"`
+	TrustedPluginArtifactsRoot string                `yaml:"trustedPluginArtifactsRoot"`
+	Broker                     brokerConfig          `yaml:"broker"`
+	MayaVersions               []string              `yaml:"mayaVersions"`
+	FakeInstalledMayaVersions  []string              `yaml:"fakeInstalledMayaVersions"`
+	VisualEvidence             *bool                 `yaml:"visualEvidence"`
+	Capabilities               *mayaHostCapabilities `yaml:"capabilities"`
 }
 
 type brokerConfig struct {

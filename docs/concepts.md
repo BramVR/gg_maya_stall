@@ -59,6 +59,10 @@ and coordinates cleanup with the Session Broker.
 **Host Health** - layered readiness checks for config, SSH, work root, Session
 Broker, Maya version, Visual Evidence, Host Lock, and Scenario inputs.
 
+**Maya Host Capability Record** - a versioned, timestamped Windows Host Agent
+report covering Maya/Python/Session Broker versions and the Host features used
+by planning and scheduling. Incomplete or stale records never qualify.
+
 **Host Lock** - a shared claim with a unique lock token that prevents more than
 one active or kept Maya UI run from using the same Maya Host at the same time.
 

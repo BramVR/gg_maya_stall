@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 const root = path.resolve(new URL("../..", import.meta.url).pathname);
 const scriptPath = path.join(root, "scripts", "windows", "prepare-maya-host.ps1");
 const script = fs.readFileSync(scriptPath, "utf8");
+const fixturePython = pythonFixture();
 
 test("prepare script exposes safe host-admin modes", () => {
   for (const flag of ["$CheckOnly", "$Force", "$Json", "$SkipSessiondInstall", "$NoStartTask"]) {
@@ -44,6 +45,14 @@ test("prepare script creates the expected work-root layout", () => {
   assert.match(script, /Ensure-Directory \$RunRoot "run-root"/);
   assert.match(script, /Ensure-Directory \$ArtifactRoot "artifact-root"/);
   assert.match(script, /Ensure-Directory \$StateDir "sessiond-state"/);
+});
+
+test("prepare script verifies the advertised Python capability", () => {
+  assert.match(script, /sys\.version_info\.micro/);
+  assert.match(script, /Test-VersionPrefix/);
+  assert.match(script, /could not query source Python version/);
+  assert.match(script, /source Python \$sourcePythonVersion does not match declared capability/);
+  assert.match(script, /does not match declared capability/);
 });
 
 test("generated launcher starts gg_mayasessiond with UI broker paths", () => {
@@ -83,13 +92,18 @@ test("host-config snippet stays public and points doctor at the prepared host", 
     "sftpTimeout: $SftpTimeout",
     "type: gg-mayasessiond",
     "visualEvidence: true",
+    "mayaBuilds: [\"$SessionMayaBuild\"]",
+    "sessionMayaBuild: \"$SessionMayaBuild\"",
+    "python: \"$ReportedPythonVersion\"",
+    "features: [script.execute]",
+    "trustedPluginArtifacts: false",
     "maya-stall doctor --host-config <host-config.yaml> --target-profile $TargetProfile --host $HostId --scenario smoke",
   ]) {
     assert.match(script, new RegExp(escapeRegExp(token)));
   }
 });
 
-test("check-only fixture reports planned host shape without mutation when pwsh is available", { skip: !hasCommand("pwsh") }, () => {
+test("check-only fixture reports planned host shape without mutation when pwsh and Python are available", { skip: !hasCommand("pwsh") || !fixturePython }, () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "maya-stall-prepare-"));
   const sessiondRepo = path.join(dir, "GG_MayaSessiond");
   const mcpSource = path.join(dir, "GG_MayaMCP");
@@ -120,6 +134,14 @@ test("check-only fixture reports planned host shape without mutation when pwsh i
     mcpSource,
     "-MayaExe",
     mayaExe,
+    "-SessionMayaBuild",
+    "2025.3",
+    "-PythonVersion",
+    fixturePython.version,
+    "-PythonForVenv",
+    fixturePython.executable,
+    "-PythonForVenvArgs",
+    ...fixturePython.args,
     "-HostId",
     "maya-win-fixture",
     "-TargetProfile",
@@ -148,7 +170,7 @@ test("check-only fixture reports planned host shape without mutation when pwsh i
   ]);
 });
 
-test("check-only fixture keeps dependent plan visible when a manual prerequisite is missing", { skip: !hasCommand("pwsh") }, () => {
+test("check-only fixture keeps dependent plan visible when a manual prerequisite is missing", { skip: !hasCommand("pwsh") || !fixturePython }, () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "maya-stall-prepare-missing-"));
   const sessiondRepo = path.join(dir, "GG_MayaSessiond");
   const mcpSource = path.join(dir, "GG_MayaMCP");
@@ -178,6 +200,14 @@ test("check-only fixture keeps dependent plan visible when a manual prerequisite
     mcpSource,
     "-MayaExe",
     mayaExe,
+    "-SessionMayaBuild",
+    "2025.3",
+    "-PythonVersion",
+    fixturePython.version,
+    "-PythonForVenv",
+    fixturePython.executable,
+    "-PythonForVenvArgs",
+    ...fixturePython.args,
     "-HostId",
     "maya-win-fixture",
     "-TargetProfile",
@@ -205,6 +235,22 @@ function hasCommand(command) {
     stdio: "pipe",
   });
   return result.status === 0;
+}
+
+function pythonFixture() {
+  const windows = process.platform === "win32";
+  const command = windows ? "py" : "python3";
+  const args = windows ? ["-3.11"] : [];
+  const probe = spawnSync(command, [...args, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"], {
+    encoding: "utf8",
+    stdio: "pipe",
+  });
+  if (probe.status !== 0 || !probe.stdout.trim()) return null;
+  return {
+    executable: windows ? command : "/usr/bin/env",
+    args: windows ? args : [command],
+    version: probe.stdout.trim(),
+  };
 }
 
 function escapeRegExp(value) {

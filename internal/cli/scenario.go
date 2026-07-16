@@ -41,6 +41,9 @@ func resolveScenarioContract(config repoRunConfig, name string) (scenarioContrac
 }
 
 func normalizeScenarioConfig(name string, scenario scenarioConfig) (scenarioConfig, error) {
+	if err := validateScenarioRequirements(scenario); err != nil {
+		return scenarioConfig{}, fmt.Errorf("Scenario %q: %w", name, err) //nolint:staticcheck // Scenario is a product term.
+	}
 	if scenario.ExpectedOutputs.ScenarioResult == "" {
 		return scenarioConfig{}, fmt.Errorf("Scenario %q missing expectedOutputs.scenarioResult", name)
 	}

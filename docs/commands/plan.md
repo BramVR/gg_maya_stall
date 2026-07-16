@@ -21,16 +21,48 @@ is a deterministic tree digest over each sorted repo-relative file path, a NUL
 separator, the decimal byte size, another NUL separator, and the file bytes.
 Path changes and content changes therefore both change the digest.
 
-Requirements include the Scenario's Maya Version Requirement, the required
-Session Broker, and known capabilities such as `script.execute`,
-`screenshot.capture`, `recording.capture`, and `visual-evidence.required` for a
-required Visual Evidence Validator.
+Requirements include exact or minimum Maya, Python, and Session Broker
+versions; required Session Broker, capture, control, renderer, GPU, display,
+and licensing values; trusted Plugin Artifact support; and known capabilities
+such as `script.execute`, `screenshot.capture`, `recording.capture`, and
+`visual-evidence.required` for a required Visual Evidence Validator. Every
+Scenario implicitly requires the Session Broker `script.execute` feature;
+enabled screenshot or recording evidence implicitly requires the matching
+capture capability. A required Visual Evidence validator implicitly requires
+the `visual-evidence` capture capability.
 
 When `--host-config` is present, `plan` reads every Target Profile, Host Pool,
 and Maya Host from that local file. It reports compatible and incompatible
-hosts using configured health, runtime shape, declared Maya inventory, and
-Visual Evidence support. This is static planning information, not live health
-proof; run `doctor` for live checks.
+hosts using configured health, runtime shape, declared capabilities, and
+Visual Evidence support. It uses the same compatibility decision and mismatch
+wording as Control Plane scheduling. This is static planning information, not
+an Agent heartbeat or live Host Health proof; run `doctor` for live checks.
+
+Example Scenario requirements:
+
+```yaml
+requirements:
+  maya:
+    minimum: "2025.2"
+  python:
+    exact: "3.11.9"
+  sessionBroker:
+    minimum: "2.1"
+    features: [script.execute, status.observe]
+  capture: [screenshot, recording]
+  control: [coordinate]
+  renderers: [arnold]
+  gpu: [nvidia]
+  display: [console]
+  licensing: [available]
+  trustedPluginArtifacts: true
+```
+
+Each version requirement accepts `exact` or `minimum`, never both. The legacy
+`mayaVersion` field remains an exact requirement and cannot be combined with
+`requirements.maya`. Matching uses the Host's declared Session Broker Maya
+build, not an arbitrary installed build; configured Agent execution binds the
+fresh session durably and then verifies that build before payload staging.
 
 `plan` never acquires a Host Lock, creates Run State or an Evidence Bundle,
 opens SSH, calls the Session Broker, reads an Evidence Store, or mutates an
@@ -42,7 +74,8 @@ explicit in human output.
 `--json` emits one stable `scenario-plan` document. Its top-level fields are:
 
 - `version`, `kind`, `scenario`, `configPath`, and `ready`;
-- `requirements`;
+- `requirements`, including normalized `hostCapabilities` exact/minimum and
+  feature requirements;
 - `payload` entries with `kind`, `source`, `destination`, `size`, `sha256`, and
   `status`;
 - `issues` with source-specific reasons;

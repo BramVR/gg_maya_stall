@@ -626,6 +626,7 @@ type runOptions struct {
 	ControlPlaneSet      bool
 	ControlPlaneTokenEnv string
 	AssignedRunID        string
+	AssignedMayaBuild    string
 	HostOptionsSet       bool
 	SharedFakeWorkRoot   string
 }
@@ -837,7 +838,9 @@ const initialConfig = `version: 1
 scenarios:
   smoke:
     description: "Open a minimal Maya scene and produce visual evidence."
-    mayaVersion: "2025"
+    requirements:
+      maya:
+        minimum: "2025"
     payload:
       mayaScripts: []
       scenes: []

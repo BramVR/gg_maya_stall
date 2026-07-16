@@ -28,6 +28,9 @@ descriptive; code is the source-backed check when behavior claims disagree.
 
 ## Host Selection And Transport
 
+- Host capability records, Scenario requirements, shared compatibility reasons,
+  and deterministic Agent candidate ranking: `internal/cli/capabilities.go`,
+  `internal/cli/capabilities_test.go`
 - Host Pool selection and Host Locks: `internal/cli/host_pool.go`
 - Real SSH and SFTP transport, PowerShell wrapping, upload/download behavior,
   and fixed SSH/SFTP command timeouts: `internal/cli/ssh_transport.go`

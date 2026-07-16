@@ -68,6 +68,10 @@ _Avoid_: Repo-local lock, session lock when the machine-level run claim is meant
 The readiness of a Maya Host to accept a run, checked in layers such as SSH, workspace access, Session Broker, Maya UI, Visual Evidence, and Scenario inputs.
 _Avoid_: Status when only the current lock or run state is meant
 
+**Maya Host Capability Record**:
+A versioned, timestamped Windows Host Agent report of the Maya builds, runtime features, and eligibility state used by planning and scheduling.
+_Avoid_: Host Health when referring to compatibility rather than live readiness layers
+
 **Maya UI Session**:
 An interactive Autodesk Maya desktop process used for a run.
 _Avoid_: Batch session, headless session

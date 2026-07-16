@@ -123,6 +123,56 @@ func (broker ggMayaSessiondBroker) StartFreshSession(context runContext, scenari
 	return identity, nil
 }
 
+func (broker ggMayaSessiondBroker) VerifyMayaBuild(context runContext, session brokerSessionIdentity, expected string) error {
+	status, err := broker.status()
+	if err != nil {
+		return fmt.Errorf("inspect fresh Maya UI Session before build verification: %w", err)
+	}
+	if session.SessionID == "" || status.State.SessionID != session.SessionID {
+		return fmt.Errorf("fresh Maya UI Session changed before build verification")
+	}
+	probePath := remoteJoin(context.RunWorkspace.RemoteWorkspace(), ".maya-stall-maya-build.py")
+	resultPath := remoteJoin(context.RunWorkspace.RemoteWorkspace(), ".maya-stall-maya-build.txt")
+	if err := broker.stageRemoteFile(probePath, []byte(mayaBuildProbeScript(resultPath))); err != nil {
+		return fmt.Errorf("stage Maya build verification: %w", err)
+	}
+	result, err := broker.callTool("script.execute", []string{"file_path=" + probePath, "timeout=30"}, sessiondCommandTimeout)
+	if err != nil {
+		return fmt.Errorf("verify selected Maya build %s: %w", expected, err)
+	}
+	if !result.OK {
+		return fmt.Errorf("verify selected Maya build %s: gg_mayasessiond script.execute failed: %s", expected, result.Error)
+	}
+	tempFile, err := os.CreateTemp("", "maya-stall-maya-build-*")
+	if err != nil {
+		return err
+	}
+	localPath := tempFile.Name()
+	if err := tempFile.Close(); err != nil {
+		_ = os.Remove(localPath)
+		return err
+	}
+	defer func() { _ = os.Remove(localPath) }()
+	batch := newSFTPBatch()
+	batch.get(resultPath, localPath, false)
+	if err := runSFTPBatch(broker.host, batch.String()); err != nil {
+		return fmt.Errorf("download Maya build verification: %w", err)
+	}
+	content, err := os.ReadFile(localPath)
+	if err != nil {
+		return err
+	}
+	actual := strings.TrimSpace(string(content))
+	if !sameMayaBuildVersion(actual, expected) {
+		return fmt.Errorf("selected Maya build %s but fresh Maya UI Session reports %s", expected, actual)
+	}
+	return appendEvent(context.EventsPath, "maya.build.verified", actual)
+}
+
+func mayaBuildProbeScript(resultPath string) string {
+	return "from pathlib import Path\nfrom maya import cmds\nparts = [str(cmds.about(majorVersion=True)), str(cmds.about(minorVersion=True)), str(cmds.about(patchVersion=True))]\nwhile len(parts) > 1 and parts[-1] == '0':\n    parts.pop()\nPath(" + pythonString(resultPath) + ").write_text('.'.join(parts), encoding='utf-8')\n"
+}
+
 func (broker ggMayaSessiondBroker) StopSession(context runContext, session brokerSessionIdentity) error {
 	if err := broker.validate(); err != nil {
 		return err
@@ -655,14 +705,14 @@ func unrecoverableSessiondHealth(reason string, detail string, hint string) sess
 }
 
 func isCommandPortError(err error) bool {
-	message := strings.ToLower(err.Error())
+	message := sshFailureClassificationText(err)
 	return strings.Contains(message, "commandport") || strings.Contains(message, "localhost:7001")
 }
 
 // Older live broker sessions can retain a handler that returns a malformed
 // tool result instead of the expected object; restarting the session repairs it.
 func isKnownSessiondScriptExecuteResponseError(err error) bool {
-	message := strings.ToLower(err.Error())
+	message := sshFailureClassificationText(err)
 	return strings.Contains(message, "'int' object has no attribute 'get'") ||
 		strings.Contains(message, "expecting value: line 1 column 1 (char 0)")
 }
@@ -1271,7 +1321,8 @@ func runSSHCommandOutputWithInput(host mayaHostConfig, remoteCommand []string, i
 		if ctx.Err() == context.DeadlineExceeded {
 			return stdout.Bytes(), fmt.Errorf("%w after %s", errSSHCommandTimedOut, timeout)
 		}
-		detail := firstUsefulStderrLine(stderr.String())
+		detail := sshFailureDetail(err, stderr.String())
+		err = sanitizedSSHExecutionErrorFor(err, stderr.String())
 		if detail != "" {
 			return stdout.Bytes(), fmt.Errorf("ssh command failed: %w: %s", err, detail)
 		}
@@ -1280,16 +1331,105 @@ func runSSHCommandOutputWithInput(host mayaHostConfig, remoteCommand []string, i
 	return stdout.Bytes(), nil
 }
 
-func firstUsefulStderrLine(stderr string) string {
+func firstUsefulStderrLineUnbounded(stderr string) string {
 	for _, line := range strings.Split(stderr, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#< CLIXML") || strings.HasPrefix(line, "<Objs ") {
 			continue
 		}
-		if len(line) > 240 {
-			return line[:240] + "..."
-		}
 		return line
 	}
 	return ""
+}
+
+func sshFailureDetail(err error, stderr string) string {
+	if strings.TrimSpace(stderr) == "" {
+		return ""
+	}
+	// OpenSSH forwards remote exit codes and combines remote stderr with its own;
+	// exit 255 is ambiguous, so only known product diagnostics from other exits
+	// may cross the public boundary, and only in canonical form.
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() != 255 {
+		privateDetail := strings.ToLower(stderr)
+		for _, diagnostic := range publicRemoteSSHFailureDiagnostics {
+			if strings.Contains(privateDetail, diagnostic.match) {
+				return diagnostic.message
+			}
+		}
+	}
+	return "SSH operation reported an error"
+}
+
+func sftpFailureDetail(stderr string) string {
+	if firstUsefulStderrLineUnbounded(stderr) == "" {
+		return ""
+	}
+	return "SFTP operation reported an error"
+}
+
+var publicRemoteSSHFailureDiagnostics = []struct {
+	match   string
+	message string
+}{
+	{"agent work root grants access to another identity", "Agent work root grants access to another identity"},
+	{"remote capture root is not writable", "remote capture root is not writable"},
+	{"schtasks.exe is required for interactive desktop capture", "schtasks.exe is required for interactive desktop capture"},
+	{"schtasks.exe is required for interactive desktop control modal proof", "schtasks.exe is required for interactive desktop control modal proof"},
+	{"schtasks.exe is required for interactive desktop control", "schtasks.exe is required for interactive desktop control"},
+	{"windows powershell desktop assemblies system.windows.forms and system.drawing are required", "Windows PowerShell desktop assemblies System.Windows.Forms and System.Drawing are required"},
+	{"interactive desktop session is unavailable for screenshot capture", "interactive desktop session is unavailable for screenshot capture"},
+	{"interactive desktop session is unavailable for recording capture", "interactive desktop session is unavailable for recording capture"},
+	{"setcursorpos failed; interactive desktop session is unavailable for desktop control", "SetCursorPos failed; interactive desktop session is unavailable for desktop control"},
+	{"failed to create interactive desktop screenshot task with schtasks.exe /it", "failed to create interactive desktop screenshot task with schtasks.exe /IT; ensure an interactive desktop session is logged in"},
+	{"failed to create interactive desktop recording task with schtasks.exe /it", "failed to create interactive desktop recording task with schtasks.exe /IT; ensure an interactive desktop session is logged in"},
+	{"failed to create interactive desktop click task with schtasks.exe /it", "failed to create interactive desktop click task with schtasks.exe /IT; ensure an interactive desktop session is logged in"},
+	{"failed to create interactive desktop control modal task with schtasks.exe /it", "failed to create interactive desktop control modal task with schtasks.exe /IT; ensure an interactive desktop session is logged in"},
+	{"scheduled interactive desktop screenshot did not produce output", "scheduled interactive desktop screenshot did not produce output; ensure an interactive desktop session is logged in"},
+	{"scheduled interactive desktop recording did not produce output", "scheduled interactive desktop recording did not produce output; ensure an interactive desktop session is logged in"},
+	{"scheduled interactive desktop click did not complete", "scheduled interactive desktop click did not complete; ensure an interactive desktop session is logged in"},
+	{"scheduled interactive desktop control modal did not appear", "scheduled interactive desktop control modal did not appear; ensure an interactive desktop session is logged in"},
+	{"desktop control modal fixture did not close after click", "desktop control modal fixture did not close after click"},
+	{"compress-archive is not recognized", "Compress-Archive is not recognized"},
+	{"timed out waiting for host lock mutex file", "timed out waiting for Host Lock mutex file"},
+	{"did not stop before restart", "scheduled Session Broker task did not stop before restart"},
+	{"access denied removing trusted plugin artifact", "access denied removing trusted Plugin Artifact"},
+	{"ssh connection lost after task start", "ssh connection lost after task start"},
+}
+
+type sanitizedSSHExecutionError struct {
+	cause         error
+	message       string
+	privateDetail string
+}
+
+func (err *sanitizedSSHExecutionError) Error() string { return err.message }
+func (err *sanitizedSSHExecutionError) Unwrap() error { return err.cause }
+
+func sanitizedSSHExecutionErrorFor(err error, privateDetail string) error {
+	return sanitizedTransportExecutionErrorFor(err, privateDetail, "SSH")
+}
+
+func sanitizedSFTPExecutionErrorFor(err error, privateDetail string) error {
+	return sanitizedTransportExecutionErrorFor(err, privateDetail, "SFTP")
+}
+
+func sanitizedTransportExecutionErrorFor(err error, privateDetail string, executableLabel string) error {
+	message := fmt.Sprintf("[%s executable] could not start", executableLabel)
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		message = exitErr.Error()
+	}
+	return &sanitizedSSHExecutionError{cause: err, message: message, privateDetail: privateDetail}
+}
+
+// Recovery classification may inspect remote application failures, but raw SSH
+// stderr must never cross the public diagnostic boundary through Error().
+func sshFailureClassificationText(err error) string {
+	message := strings.ToLower(err.Error())
+	var sshErr *sanitizedSSHExecutionError
+	if errors.As(err, &sshErr) {
+		message += "\n" + strings.ToLower(sshErr.privateDetail)
+	}
+	return message
 }

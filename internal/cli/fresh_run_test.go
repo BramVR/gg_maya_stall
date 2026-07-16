@@ -43,6 +43,31 @@ func TestFreshRunLifecycleOrdersSetupExecuteAndSettle(t *testing.T) {
 	}
 }
 
+func TestFreshRunBindsSessionBeforeAssignedMayaBuildVerification(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	recorder := &freshRunLifecycleRecorder{}
+	runtime := defaultRunRuntime()
+	runtime.Host = recordingRunHost{recorder: recorder}
+	runtime.Broker = recordingSessionBroker{recorder: recorder, result: ScenarioResult{Status: resultStatusPassed, Summary: "recorded"}}
+	runtime.SessionStarted = func(brokerSessionIdentity) error {
+		recorder.add("execute.bind-session")
+		return nil
+	}
+
+	if _, err := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways, AssignedMayaBuild: "2025"}, runtime).Run(); err != nil {
+		t.Fatal(err)
+	}
+	recorder.requireOrder(t,
+		"execute.start-session",
+		"execute.bind-session",
+		"execute.verify-maya-build",
+		"setup.stage-payload",
+		"execute.run-scenario",
+		"settle.collect-artifacts",
+		"settle.stop-session",
+	)
+}
+
 func TestFreshRunLifecycleSelectsUniqueRunIDWithoutChangingExistingState(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	now := time.Date(2026, 7, 6, 12, 30, 0, 0, time.UTC)
@@ -1109,6 +1134,11 @@ func (host recordingRunHost) CollectArtifacts(runContext, scenarioContract) erro
 type recordingSessionBroker struct {
 	recorder *freshRunLifecycleRecorder
 	result   ScenarioResult
+}
+
+func (broker recordingSessionBroker) VerifyMayaBuild(runContext, brokerSessionIdentity, string) error {
+	broker.recorder.add("execute.verify-maya-build")
+	return nil
 }
 
 func (broker recordingSessionBroker) StartFreshSession(context runContext, scenario scenarioConfig) (brokerSessionIdentity, error) {

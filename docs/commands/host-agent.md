@@ -39,10 +39,27 @@ ASCII letters, digits, and interior hyphens, excluding Windows reserved device
 names. This prevents case, trailing-dot, and device-name aliases from sharing a
 state path on Windows.
 
+At registration the Agent reports a version 1 capability record for its fixed
+Maya Host. The record includes a timestamp, Target Profile membership,
+online/health/maintenance/quarantine state, Maya builds, the build started by
+the fixed Session Broker launcher, Python, Session Broker version/features,
+capture/control, renderer, GPU, display, licensing, and
+trusted Plugin Artifact support. Each heartbeat rebuilds and refreshes the
+record from the Agent-local Host config. An omitted category is incomplete;
+an explicitly empty feature list reports no support. The optional capability
+extension is omitted from legacy version 1 responses, allowing an assignment
+already in flight during a rolling upgrade to finish. An older Agent without a
+capability report never qualifies for new work. Reusing one Maya Host id across
+Target Profiles requires identical Host definitions; conflicting definitions
+are rejected rather than merged nondeterministically.
+
 This command advertises exactly one slot. It confirms the unique Host Lock token
 and its leased process-session fence before execution, renews that fence while
 working, and binds the shared Host Lock to the exact Session Broker adapter and
 Maya UI Session identity immediately after launch and before payload staging.
+When scheduling resolves the reported Session Broker Maya build, the Agent
+first binds the launched session durably, then queries it and fails closed on a
+different runtime version before payload staging or Scenario execution.
 Registration explicitly advertises this binding capability. The Control Plane
 does not assign new work to an older Agent that omits it; an assignment already
 in flight during a rolling upgrade may finish under its original contract.

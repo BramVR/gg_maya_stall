@@ -15,12 +15,14 @@ type repoRunConfig struct {
 }
 
 type scenarioConfig struct {
-	Description     string            `yaml:"description"`
-	MayaVersion     string            `yaml:"mayaVersion"`
-	Payload         runPayload        `yaml:"payload"`
-	ExpectedOutputs expectedOutputs   `yaml:"expectedOutputs"`
-	Evidence        evidenceConfig    `yaml:"evidence"`
-	Validators      []validatorConfig `yaml:"validators"`
+	Description       string               `yaml:"description"`
+	MayaVersion       string               `yaml:"mayaVersion"`
+	Requirements      scenarioRequirements `yaml:"requirements"`
+	SelectedMayaBuild string               `yaml:"-"`
+	Payload           runPayload           `yaml:"payload"`
+	ExpectedOutputs   expectedOutputs      `yaml:"expectedOutputs"`
+	Evidence          evidenceConfig       `yaml:"evidence"`
+	Validators        []validatorConfig    `yaml:"validators"`
 }
 
 type runPayload struct {

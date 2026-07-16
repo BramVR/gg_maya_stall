@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -33,9 +34,10 @@ type scenarioPlan struct {
 }
 
 type planRequirements struct {
-	MayaVersion   string   `json:"mayaVersion,omitempty"`
-	SessionBroker bool     `json:"sessionBroker"`
-	Capabilities  []string `json:"capabilities"`
+	MayaVersion      string               `json:"mayaVersion,omitempty"`
+	SessionBroker    bool                 `json:"sessionBroker"`
+	Capabilities     []string             `json:"capabilities"`
+	HostCapabilities scenarioRequirements `json:"hostCapabilities"`
 }
 
 type planPayload struct {
@@ -113,9 +115,10 @@ func buildScenarioPlan(repoDir string, options planOptions) (scenarioPlan, error
 		Scenario:   options.ScenarioName,
 		ConfigPath: filepath.ToSlash(relConfigPath),
 		Requirements: planRequirements{
-			MayaVersion:   rawScenario.MayaVersion,
-			SessionBroker: true,
-			Capabilities:  scenarioPlanCapabilities(rawScenario),
+			MayaVersion:      rawScenario.MayaVersion,
+			SessionBroker:    true,
+			Capabilities:     scenarioPlanCapabilities(rawScenario),
+			HostCapabilities: normalizedScenarioRequirements(rawScenario),
 		},
 		Payload:        make([]planPayload, 0),
 		Issues:         []planIssue{},
@@ -269,10 +272,8 @@ func planHostCompatibility(repoDir string, host mayaHostConfig, scenario scenari
 	if err := validateHostID(host.ID); err != nil {
 		planned.Reasons = append(planned.Reasons, err.Error())
 	}
-	if !isHealthyHost(host) {
-		health := strings.ToLower(strings.TrimSpace(host.Health))
-		planned.Reasons = append(planned.Reasons, "Maya Host health is "+health)
-	}
+	decision := decideMayaHostCompatibility(normalizedScenarioRequirements(scenario), configuredMayaHostCapabilityRecord(host, time.Now()), time.Now())
+	planned.Reasons = append(planned.Reasons, decision.Reasons...)
 	if _, err := resolveRuntimeForHost(host); err != nil {
 		planned.Reasons = append(planned.Reasons, err.Error())
 	}
@@ -286,14 +287,6 @@ func planHostCompatibility(repoDir string, host mayaHostConfig, scenario scenari
 		}
 		if err := validateFakeTransportStatus(host.SSH.FakeStatus); err != nil {
 			planned.Reasons = append(planned.Reasons, err.Error())
-		}
-	}
-	if scenario.MayaVersion != "" {
-		versions := staticMayaVersions(host)
-		if len(versions) == 0 {
-			planned.Reasons = append(planned.Reasons, "Maya version inventory is not declared")
-		} else if !containsString(versions, scenario.MayaVersion) {
-			planned.Reasons = append(planned.Reasons, fmt.Sprintf("Scenario needs Maya %s; configured inventory has %s", scenario.MayaVersion, strings.Join(versions, ",")))
 		}
 	}
 	if scenarioRequiresVisualEvidence(scenario) && host.VisualEvidence != nil && !*host.VisualEvidence {
@@ -326,6 +319,9 @@ func validatePlanTrustedPluginConfig(repoDir string, host mayaHostConfig, scenar
 }
 
 func staticMayaVersions(host mayaHostConfig) []string {
+	if host.Capabilities != nil && len(host.Capabilities.MayaBuilds) > 0 {
+		return normalizeMayaVersions(host.Capabilities.MayaBuilds)
+	}
 	if host.usesRealSSH() {
 		return normalizeMayaVersions(host.MayaVersions)
 	}
@@ -453,12 +449,40 @@ func printScenarioPlan(writer io.Writer, plan scenarioPlan, jsonOutput bool) {
 	}
 	_, _ = fmt.Fprintf(writer, "Scenario Plan: %s\nstatus: %s\n", planHumanText(plan.Scenario), status)
 	mayaVersion := plan.Requirements.MayaVersion
+	if requirement := plan.Requirements.HostCapabilities.Maya; requirement.Exact != "" {
+		mayaVersion = "exact " + requirement.Exact
+	} else if requirement.Minimum != "" {
+		mayaVersion = "minimum " + requirement.Minimum
+	}
 	if mayaVersion == "" {
 		mayaVersion = "any"
 	}
 	_, _ = fmt.Fprintf(writer, "maya-version: %s\nsession-broker: required\n", planHumanText(mayaVersion))
+	printPlanVersionRequirement(writer, "python-version", plan.Requirements.HostCapabilities.Python)
+	printPlanVersionRequirement(writer, "session-broker-version", versionRequirement{
+		Exact: plan.Requirements.HostCapabilities.SessionBroker.Exact, Minimum: plan.Requirements.HostCapabilities.SessionBroker.Minimum,
+	})
 	for _, capability := range plan.Requirements.Capabilities {
 		_, _ = fmt.Fprintf(writer, "capability: %s\n", planHumanText(capability))
+	}
+	for _, required := range []struct {
+		label  string
+		values []string
+	}{
+		{label: "session-broker-feature", values: plan.Requirements.HostCapabilities.SessionBroker.Features},
+		{label: "capture", values: plan.Requirements.HostCapabilities.Capture},
+		{label: "control", values: plan.Requirements.HostCapabilities.Control},
+		{label: "renderer", values: plan.Requirements.HostCapabilities.Renderers},
+		{label: "gpu", values: plan.Requirements.HostCapabilities.GPU},
+		{label: "display", values: plan.Requirements.HostCapabilities.Display},
+		{label: "licensing", values: plan.Requirements.HostCapabilities.Licensing},
+	} {
+		for _, value := range required.values {
+			_, _ = fmt.Fprintf(writer, "required-%s: %s\n", required.label, planHumanText(value))
+		}
+	}
+	if required := plan.Requirements.HostCapabilities.TrustedPluginArtifacts; required != nil {
+		_, _ = fmt.Fprintf(writer, "required-trusted-plugin-artifacts: %t\n", *required)
 	}
 	for _, item := range plan.Payload {
 		_, _ = fmt.Fprintf(writer, "payload: %s %s -> %s (%d bytes, sha256 %s) [%s]\n", planHumanText(item.Kind), planHumanText(item.Source), planHumanText(item.Destination), item.Size, planHumanText(item.SHA256), planHumanText(item.Status))
@@ -477,6 +501,14 @@ func printScenarioPlan(writer io.Writer, plan scenarioPlan, jsonOutput bool) {
 		_, _ = fmt.Fprintf(writer, "issue: %s: %s\n", planHumanText(issue.Source), planHumanText(issue.Reason))
 	}
 	_, _ = fmt.Fprintln(writer, "host-contact: none")
+}
+
+func printPlanVersionRequirement(writer io.Writer, label string, requirement versionRequirement) {
+	if requirement.Exact != "" {
+		_, _ = fmt.Fprintf(writer, "%s: exact %s\n", label, planHumanText(requirement.Exact))
+	} else if requirement.Minimum != "" {
+		_, _ = fmt.Fprintf(writer, "%s: minimum %s\n", label, planHumanText(requirement.Minimum))
+	}
 }
 
 func planHumanText(value string) string {

@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -184,6 +185,7 @@ type controlPlaneHostAgent struct {
 }
 
 type controlPlaneHostAgentAssignment struct {
+	checkpointMu          sync.Mutex
 	record                hostAgentAssignmentRecord
 	repoDir               string
 	done                  chan struct{}
@@ -936,11 +938,12 @@ func (handler *controlPlaneHandler) serveHostAgentStatus(response http.ResponseW
 	if agent.status.SessionID != "" && !handler.runtime.Now().Before(agent.sessionExpiresAt) {
 		assignment := handler.assignments[agent.status.RunID]
 		if assignment != nil && assignment.record.State == "confirmed" && !assignment.finishing {
+			handler.mu.Unlock()
 			if _, _, err := handler.quarantineHostAgentAssignment(assignment, agent, "Windows Host Agent process-session lease expired before Maya shutdown was verified"); err != nil {
-				handler.mu.Unlock()
 				writeControlPlaneError(response, http.StatusInternalServerError, "persist expired Windows Host Agent quarantine")
 				return
 			}
+			handler.mu.Lock()
 		} else {
 			agent.status.SessionID = ""
 			agent.sessionExpiresAt = time.Time{}
@@ -997,10 +1000,13 @@ func (handler *controlPlaneHandler) serveHostAgentRegistration(response http.Res
 			sessionExpired := agent.status.SessionID != "" && !now.Before(agent.sessionExpiresAt)
 			restartGraceExpired := agent.status.SessionID == "" && !now.Before(agent.takeoverNotBefore)
 			if assignment.record.State == "confirmed" && !assignment.finishing && (sessionExpired || restartGraceExpired) {
+				handler.mu.Unlock()
 				if _, _, err := handler.quarantineHostAgentAssignment(assignment, agent, "Windows Host Agent process disappeared before Maya session shutdown was verified"); err != nil {
+					handler.mu.Lock()
 					writeControlPlaneError(response, http.StatusInternalServerError, "persist quarantined Windows Host Agent assignment")
 					return
 				}
+				handler.mu.Lock()
 				writeControlPlaneError(response, http.StatusConflict, "confirmed Windows Host Agent assignment quarantined after process loss")
 				return
 			}
@@ -1164,9 +1170,25 @@ func (handler *controlPlaneHandler) serveHostAgentConfirm(response http.Response
 		return
 	}
 	handler.mu.Lock()
+	checkpointAssignment := handler.assignments[runID]
+	agent := handler.hostAgents[agentID]
+	if !requestMatchesHostAgentCredential(request, agent) {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusUnauthorized, "Windows Host Agent authentication changed")
+		return
+	}
+	if checkpointAssignment == nil {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusConflict, "Host Lock ownership changed")
+		return
+	}
+	handler.mu.Unlock()
+	checkpointAssignment.checkpointMu.Lock()
+	defer checkpointAssignment.checkpointMu.Unlock()
+	handler.mu.Lock()
 	defer handler.mu.Unlock()
 	assignment := handler.assignments[runID]
-	agent := handler.hostAgents[agentID]
+	agent = handler.hostAgents[agentID]
 	if !requestMatchesHostAgentCredential(request, agent) {
 		writeControlPlaneError(response, http.StatusUnauthorized, "Windows Host Agent authentication changed")
 		return
@@ -1200,9 +1222,25 @@ func (handler *controlPlaneHandler) serveHostAgentSession(response http.Response
 		return
 	}
 	handler.mu.Lock()
+	checkpointAssignment := handler.assignments[runID]
+	agent := handler.hostAgents[agentID]
+	if !requestMatchesHostAgentCredential(request, agent) {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusUnauthorized, "Windows Host Agent authentication changed")
+		return
+	}
+	if checkpointAssignment == nil {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusConflict, "Host Lock ownership changed")
+		return
+	}
+	handler.mu.Unlock()
+	checkpointAssignment.checkpointMu.Lock()
+	defer checkpointAssignment.checkpointMu.Unlock()
+	handler.mu.Lock()
 	defer handler.mu.Unlock()
 	assignment := handler.assignments[runID]
-	agent := handler.hostAgents[agentID]
+	agent = handler.hostAgents[agentID]
 	if !requestMatchesHostAgentCredential(request, agent) {
 		writeControlPlaneError(response, http.StatusUnauthorized, "Windows Host Agent authentication changed")
 		return
@@ -1243,14 +1281,33 @@ func (handler *controlPlaneHandler) serveHostAgentProgress(response http.Respons
 		return
 	}
 	handler.mu.Lock()
-	defer handler.mu.Unlock()
-	assignment := handler.assignments[runID]
+	checkpointAssignment := handler.assignments[runID]
 	agent := handler.hostAgents[agentID]
 	if !requestMatchesHostAgentCredential(request, agent) {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusUnauthorized, "Windows Host Agent authentication changed")
+		return
+	}
+	if checkpointAssignment == nil {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusConflict, "Host Lock ownership changed")
+		return
+	}
+	handler.mu.Unlock()
+
+	// Serialize checkpoints for one assignment without blocking unrelated Control Plane reads.
+	checkpointAssignment.checkpointMu.Lock()
+	defer checkpointAssignment.checkpointMu.Unlock()
+	handler.mu.Lock()
+	assignment := handler.assignments[runID]
+	agent = handler.hostAgents[agentID]
+	if !requestMatchesHostAgentCredential(request, agent) {
+		handler.mu.Unlock()
 		writeControlPlaneError(response, http.StatusUnauthorized, "Windows Host Agent authentication changed")
 		return
 	}
 	if progress.Version != hostAgentAPIVersion || progress.RunID != runID || progress.Checkpoint < 1 || !hostAgentAssignmentAcceptsProgress(assignment) || assignment.record.AgentID != agentID || agent == nil || !sameLockToken(progress.LockToken, assignment.record.LockToken) || !handler.acceptHostAgentSession(agent, progress.SessionID) {
+		handler.mu.Unlock()
 		writeControlPlaneError(response, http.StatusConflict, "Host Lock ownership changed")
 		return
 	}
@@ -1259,6 +1316,7 @@ func (handler *controlPlaneHandler) serveHostAgentProgress(response http.Respons
 		expectedProfile = "default"
 	}
 	if progress.Ledger.RunID != runID || progress.Ledger.Scenario != assignment.record.Submission.Scenario || progress.Ledger.TargetProfile != expectedProfile || progress.Ledger.Host != assignment.record.HostID || progress.Ledger.State != "submitted" {
+		handler.mu.Unlock()
 		writeControlPlaneError(response, http.StatusConflict, "Windows Host Agent progress changed run identity")
 		return
 	}
@@ -1266,25 +1324,33 @@ func (handler *controlPlaneHandler) serveHostAgentProgress(response http.Respons
 	digest := hex.EncodeToString(fingerprint[:])
 	if progress.Checkpoint == assignment.record.ProgressSequence {
 		if digest != assignment.record.ProgressDigest {
+			handler.mu.Unlock()
 			writeControlPlaneError(response, http.StatusConflict, "Windows Host Agent checkpoint identity changed")
 			return
 		}
+		status := agent.status
+		handler.mu.Unlock()
 		response.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(response).Encode(agent.status)
+		_ = json.NewEncoder(response).Encode(status)
 		return
 	}
 	if progress.Checkpoint != assignment.record.ProgressSequence+1 {
+		handler.mu.Unlock()
 		writeControlPlaneError(response, http.StatusConflict, "Windows Host Agent checkpoint is stale or skipped")
 		return
 	}
-	updatedAssignment := assignment.record
+	previousAssignment := assignment.record
+	repoDir := assignment.repoDir
+	handler.mu.Unlock()
+
+	updatedAssignment := previousAssignment
 	var identityErr error
-	persistErr := withRunLedgerLock(assignment.repoDir, runID, func() error {
-		current, err := readRunLedgerRecord(assignment.repoDir, runID)
+	persistErr := withRunLedgerLock(repoDir, runID, func() error {
+		current, err := readRunLedgerRecord(repoDir, runID)
 		if err != nil {
 			return err
 		}
-		ledgerDir := runLedgerDir(assignment.repoDir, runID)
+		ledgerDir := runLedgerDir(repoDir, runID)
 		currentEvents, err := readRunLedgerBytes(filepath.Join(ledgerDir, filepath.FromSlash(current.Events)))
 		if err != nil {
 			return err
@@ -1310,9 +1376,9 @@ func (handler *controlPlaneHandler) serveHostAgentProgress(response http.Respons
 		current.EventBytes = eventBytes
 		current.LogBytes = len(progress.Log)
 		current.LogTruncated = progress.Ledger.LogTruncated
-		current.Host = assignment.record.HostID
+		current.Host = previousAssignment.HostID
 		current.UpdatedAt = handler.runtime.Now().UTC().Format(time.RFC3339Nano)
-		if err := writeRunLedgerRecord(assignment.repoDir, current); err != nil {
+		if err := writeRunLedgerRecord(repoDir, current); err != nil {
 			return err
 		}
 		copy := current
@@ -1321,6 +1387,8 @@ func (handler *controlPlaneHandler) serveHostAgentProgress(response http.Respons
 		updatedAssignment.ProgressDigest = digest
 		return handler.persistAssignment(updatedAssignment)
 	})
+	// The per-run lock is released before taking handler.mu; quarantine may wait
+	// on the ledger while fenced by handler.mu without creating a lock cycle.
 	if identityErr != nil {
 		writeControlPlaneError(response, http.StatusConflict, "Windows Host Agent progress changed event identity")
 		return
@@ -1329,9 +1397,19 @@ func (handler *controlPlaneHandler) serveHostAgentProgress(response http.Respons
 		writeControlPlaneError(response, http.StatusInternalServerError, "persist active Run Ledger checkpoint")
 		return
 	}
+	handler.mu.Lock()
+	assignment = handler.assignments[runID]
+	agent = handler.hostAgents[agentID]
+	if assignment != checkpointAssignment || !hostAgentAssignmentAcceptsProgress(assignment) || assignment.record.ProgressSequence != previousAssignment.ProgressSequence || !sameBrokerSession(assignment.record.BrokerSession, previousAssignment.BrokerSession) || agent == nil || !requestMatchesHostAgentCredential(request, agent) || !sameLockToken(progress.LockToken, assignment.record.LockToken) || !sameLockToken(progress.SessionID, agent.status.SessionID) {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusConflict, "Host Lock ownership changed")
+		return
+	}
 	assignment.record = updatedAssignment
+	status := agent.status
+	handler.mu.Unlock()
 	response.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(response).Encode(agent.status)
+	_ = json.NewEncoder(response).Encode(status)
 }
 
 func hostAgentAssignmentAcceptsProgress(assignment *controlPlaneHostAgentAssignment) bool {
@@ -1620,6 +1698,17 @@ func (handler *controlPlaneHandler) serveHostAgentComplete(response http.Respons
 		writeControlPlaneError(response, http.StatusConflict, "Host Lock ownership changed")
 		return
 	}
+	handler.mu.Unlock()
+	assignment.checkpointMu.Lock()
+	defer assignment.checkpointMu.Unlock()
+	handler.mu.Lock()
+	assignment = handler.assignments[runID]
+	agent = handler.hostAgents[agentID]
+	if completion.Version != hostAgentAPIVersion || completion.RunID != runID || assignment == nil || assignment.record.AgentID != agentID || agent == nil || !requestMatchesHostAgentCredential(request, agent) || !sameLockToken(completion.LockToken, assignment.record.LockToken) || assignment.record.State != "confirmed" || assignment.finishing || !handler.acceptHostAgentSession(agent, completion.SessionID) {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusConflict, "Host Lock ownership changed")
+		return
+	}
 	assignment.finishing = true
 	handler.mu.Unlock()
 
@@ -1668,15 +1757,25 @@ func (handler *controlPlaneHandler) serveHostAgentFail(response http.ResponseWri
 		return
 	}
 	if failure.Quarantine {
+		handler.mu.Unlock()
 		outcome, runErr, err := handler.quarantineHostAgentAssignment(assignment, agent, failure.Diagnostic)
 		if err != nil {
-			handler.mu.Unlock()
 			writeControlPlaneError(response, http.StatusInternalServerError, "persist quarantined Windows Host Agent assignment")
 			return
 		}
-		handler.mu.Unlock()
 		response.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(response).Encode(controlPlaneTerminalResponse(outcome, runErr, assignment.repoDir))
+		return
+	}
+	handler.mu.Unlock()
+	assignment.checkpointMu.Lock()
+	defer assignment.checkpointMu.Unlock()
+	handler.mu.Lock()
+	assignment = handler.assignments[runID]
+	agent = handler.hostAgents[agentID]
+	if assignment == nil || assignment.record.AgentID != agentID || agent == nil || !requestMatchesHostAgentCredential(request, agent) || !sameLockToken(failure.LockToken, assignment.record.LockToken) || assignment.record.State != "confirmed" || assignment.finishing || !handler.acceptHostAgentSession(agent, failure.SessionID) {
+		handler.mu.Unlock()
+		writeControlPlaneError(response, http.StatusConflict, "Host Lock ownership changed")
 		return
 	}
 	assignment.finishing = true
@@ -1747,56 +1846,81 @@ func (handler *controlPlaneHandler) serveHostAgentFail(response http.ResponseWri
 }
 
 func (handler *controlPlaneHandler) quarantineHostAgentAssignment(assignment *controlPlaneHostAgentAssignment, agent *controlPlaneHostAgent, diagnostic string) (runOutcome, error, error) {
+	assignment.checkpointMu.Lock()
+	defer assignment.checkpointMu.Unlock()
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	if handler.assignments[assignment.record.RunID] != assignment || handler.hostAgents[assignment.record.AgentID] != agent || assignment.finishing {
+		ownershipErr := errors.New("Host Lock ownership changed") //nolint:staticcheck // Host Lock is a product term.
+		return runOutcome{}, ownershipErr, ownershipErr
+	}
+	if assignment.record.State == "quarantined" && assignment.finished {
+		return assignment.outcome, assignment.err, nil
+	}
+	if assignment.record.State != "confirmed" && assignment.record.State != "quarantined" {
+		ownershipErr := errors.New("Host Lock ownership changed") //nolint:staticcheck // Host Lock is a product term.
+		return runOutcome{}, ownershipErr, ownershipErr
+	}
+	return handler.quarantineHostAgentAssignmentLocked(assignment, agent, diagnostic)
+}
+
+// quarantineHostAgentAssignmentLocked runs with checkpointMu and handler.mu held.
+func (handler *controlPlaneHandler) quarantineHostAgentAssignmentLocked(assignment *controlPlaneHostAgentAssignment, agent *controlPlaneHostAgent, diagnostic string) (runOutcome, error, error) {
 	runErr := errors.New(diagnostic)
-	run := assignment.run
-	if run == nil {
-		var err error
-		run, err = loadAcceptedHostAgentRun(assignment.repoDir, assignment.record, handler.runtime)
-		if err != nil {
-			return runOutcome{}, runErr, err
+	var outcome runOutcome
+	var terminalLedger runLedgerRecord
+	transactionErr := withRunLedgerLock(assignment.repoDir, assignment.record.RunID, func() error {
+		run := assignment.run
+		if run == nil {
+			var err error
+			run, err = loadAcceptedHostAgentRun(assignment.repoDir, assignment.record, handler.runtime)
+			if err != nil {
+				return err
+			}
+			assignment.run = run
 		}
-		assignment.run = run
-	}
-	currentLedger, err := readRunLedgerRecord(run.repoDir, assignment.record.RunID)
-	if err != nil {
-		return runOutcome{}, runErr, err
-	}
-	acknowledgedEvents, err := readRunLedgerBytes(filepath.Join(runLedgerDir(run.repoDir, assignment.record.RunID), filepath.FromSlash(currentLedger.Events)))
-	if err != nil {
-		return runOutcome{}, runErr, err
-	}
-	acknowledgedLog, err := readRunLedgerBytes(filepath.Join(runLedgerDir(run.repoDir, assignment.record.RunID), filepath.FromSlash(currentLedger.Log)))
-	if err != nil {
-		return runOutcome{}, runErr, err
-	}
-	targetProfile := assignment.record.Submission.TargetProfile
-	if targetProfile == "" {
-		targetProfile = "default"
-	}
-	run.host.HostID = assignment.record.HostID
-	run.host.TargetProfile = targetProfile
-	run.manifest.Host = assignment.record.HostID
-	run.manifest.TargetProfile = targetProfile
-	run.stopPolicy = "unresolved"
-	if err := run.ensureAcceptedFailureEvidence(runErr); err != nil {
-		return runOutcome{}, runErr, err
-	}
-	run.failure.CleanupState = "failed"
-	run.failure.RemediationHint = "Verify and stop the retained Maya session; this version keeps the quarantined Host Lock fail-closed."
-	if err := run.updateTerminalFailureEvidence(); err != nil {
-		return runOutcome{}, runErr, err
-	}
-	terminalEvents, err := readRunLedgerBytes(run.context.EventsPath)
-	if err != nil {
-		return runOutcome{}, runErr, err
-	}
-	outcome := run.currentOutcome()
-	terminalLedger, err := finalizeAcknowledgedHostAgentFailure(
-		run.repoDir, outcome, run.manifest, run.ledgerPolicy, run.runtime.Now(),
-		acknowledgedEvents, terminalEvents, acknowledgedLog, diagnostic, nil,
-	)
-	if err != nil {
-		return runOutcome{}, runErr, err
+		currentLedger, err := readRunLedgerRecord(run.repoDir, assignment.record.RunID)
+		if err != nil {
+			return err
+		}
+		acknowledgedEvents, err := readRunLedgerBytes(filepath.Join(runLedgerDir(run.repoDir, assignment.record.RunID), filepath.FromSlash(currentLedger.Events)))
+		if err != nil {
+			return err
+		}
+		acknowledgedLog, err := readRunLedgerBytes(filepath.Join(runLedgerDir(run.repoDir, assignment.record.RunID), filepath.FromSlash(currentLedger.Log)))
+		if err != nil {
+			return err
+		}
+		targetProfile := assignment.record.Submission.TargetProfile
+		if targetProfile == "" {
+			targetProfile = "default"
+		}
+		run.host.HostID = assignment.record.HostID
+		run.host.TargetProfile = targetProfile
+		run.manifest.Host = assignment.record.HostID
+		run.manifest.TargetProfile = targetProfile
+		run.stopPolicy = "unresolved"
+		if err := run.ensureAcceptedFailureEvidence(runErr); err != nil {
+			return err
+		}
+		run.failure.CleanupState = "failed"
+		run.failure.RemediationHint = "Verify and stop the retained Maya session; this version keeps the quarantined Host Lock fail-closed."
+		if err := run.updateTerminalFailureEvidence(); err != nil {
+			return err
+		}
+		terminalEvents, err := readRunLedgerBytes(run.context.EventsPath)
+		if err != nil {
+			return err
+		}
+		outcome = run.currentOutcome()
+		terminalLedger, err = finalizeAcknowledgedHostAgentFailureUnlocked(
+			run.repoDir, outcome, run.manifest, run.ledgerPolicy, run.runtime.Now(),
+			acknowledgedEvents, terminalEvents, acknowledgedLog, diagnostic, nil,
+		)
+		return err
+	})
+	if transactionErr != nil {
+		return runOutcome{}, runErr, transactionErr
 	}
 	quarantined := assignment.record
 	quarantined.State = "quarantined"
@@ -1832,22 +1956,29 @@ func preserveAcknowledgedHostAgentFailure(repoDir string, runID string, acknowle
 func finalizeAcknowledgedHostAgentFailure(repoDir string, outcome runOutcome, manifest runManifest, policy runLedgerPolicy, now time.Time, acknowledged []byte, terminal []byte, acknowledgedLog []byte, diagnostic string, restore *runLedgerRecord) (runLedgerRecord, error) {
 	var terminalLedger runLedgerRecord
 	err := withRunLedgerLock(repoDir, manifest.RunID, func() error {
-		ledgerErr := finalizeRunLedgerUnlocked(repoDir, outcome, manifest, policy, now)
-		var preserveErr error
-		if ledgerErr == nil {
-			preserveErr = preserveAcknowledgedHostAgentFailureUnlocked(repoDir, manifest.RunID, acknowledged, terminal, acknowledgedLog, diagnostic, policy)
-		}
-		var terminalErr error
-		if ledgerErr == nil && preserveErr == nil {
-			terminalLedger, terminalErr = readRunLedgerRecord(repoDir, manifest.RunID)
-		}
-		var restoreErr error
-		if restore != nil {
-			restoreErr = writeRunLedgerRecord(repoDir, *restore)
-		}
-		return errors.Join(ledgerErr, preserveErr, terminalErr, restoreErr)
+		var err error
+		terminalLedger, err = finalizeAcknowledgedHostAgentFailureUnlocked(repoDir, outcome, manifest, policy, now, acknowledged, terminal, acknowledgedLog, diagnostic, restore)
+		return err
 	})
 	return terminalLedger, err
+}
+
+func finalizeAcknowledgedHostAgentFailureUnlocked(repoDir string, outcome runOutcome, manifest runManifest, policy runLedgerPolicy, now time.Time, acknowledged []byte, terminal []byte, acknowledgedLog []byte, diagnostic string, restore *runLedgerRecord) (runLedgerRecord, error) {
+	ledgerErr := finalizeRunLedgerUnlocked(repoDir, outcome, manifest, policy, now)
+	var preserveErr error
+	if ledgerErr == nil {
+		preserveErr = preserveAcknowledgedHostAgentFailureUnlocked(repoDir, manifest.RunID, acknowledged, terminal, acknowledgedLog, diagnostic, policy)
+	}
+	var terminalLedger runLedgerRecord
+	var terminalErr error
+	if ledgerErr == nil && preserveErr == nil {
+		terminalLedger, terminalErr = readRunLedgerRecord(repoDir, manifest.RunID)
+	}
+	var restoreErr error
+	if restore != nil {
+		restoreErr = writeRunLedgerRecord(repoDir, *restore)
+	}
+	return terminalLedger, errors.Join(ledgerErr, preserveErr, terminalErr, restoreErr)
 }
 
 func preserveAcknowledgedHostAgentFailureUnlocked(repoDir string, runID string, acknowledged []byte, terminal []byte, acknowledgedLog []byte, diagnostic string, policy runLedgerPolicy) error {
@@ -2285,7 +2416,9 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 		sessionExpired := agent != nil && agent.status.SessionID != "" && !now.Before(agent.sessionExpiresAt)
 		restartGraceExpired := agent != nil && agent.status.SessionID == "" && !now.Before(agent.takeoverNotBefore)
 		if assignment.record.State == "confirmed" && !assignment.finishing && (sessionExpired || restartGraceExpired) {
+			handler.mu.Unlock()
 			_, _, _ = handler.quarantineHostAgentAssignment(assignment, agent, "Windows Host Agent process-session lease expired before Maya shutdown was verified")
+			handler.mu.Lock()
 		}
 		done := assignment.done
 		handler.mu.Unlock()

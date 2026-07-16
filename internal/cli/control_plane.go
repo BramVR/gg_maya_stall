@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +26,9 @@ const maximumControlPlaneSubmissionBytes = 32 * 1024 * 1024
 const maximumControlPlaneSnapshotEstimateBytes = maximumControlPlaneSubmissionBytes - 64*1024
 const maximumControlPlaneDefaultResponseBytes = 8 * 1024 * 1024
 const maximumControlPlaneLedgerResponseBytes = 6*maximumRunLedgerMaxLogBytes + 1024*1024
+const controlPlaneEventPollInterval = 50 * time.Millisecond
+const maximumControlPlaneHistoryRuns = 1000
+const maximumControlPlaneHistoryScanRuns = 1000
 
 type controlPlaneSubmission struct {
 	Version         int                `json:"version"`
@@ -58,12 +62,27 @@ type controlPlaneStatusResponse struct {
 }
 
 type controlPlaneEventsResponse struct {
-	Version         int              `json:"version"`
-	Kind            string           `json:"kind"`
-	RunID           string           `json:"runId"`
-	Events          []map[string]any `json:"events"`
-	EventsOmitted   int              `json:"eventsOmitted"`
-	EventsTruncated bool             `json:"eventsTruncated"`
+	Version                int              `json:"version"`
+	Kind                   string           `json:"kind"`
+	RunID                  string           `json:"runId"`
+	Events                 []map[string]any `json:"events"`
+	RequestedSequence      int              `json:"requestedSequence,omitempty"`
+	FirstAvailableSequence int              `json:"firstAvailableSequence,omitempty"`
+	NextSequence           int              `json:"nextSequence,omitempty"`
+	EventsOmitted          int              `json:"eventsOmitted"`
+	EventsTruncated        bool             `json:"eventsTruncated"`
+}
+
+type controlPlaneEventStreamRecord struct {
+	Version         int            `json:"version"`
+	Kind            string         `json:"kind"`
+	RunID           string         `json:"runId"`
+	Sequence        int            `json:"sequence,omitempty"`
+	Event           map[string]any `json:"event,omitempty"`
+	EventsOmitted   int            `json:"eventsOmitted,omitempty"`
+	EventsTruncated bool           `json:"eventsTruncated,omitempty"`
+	NextSequence    int            `json:"nextSequence"`
+	State           string         `json:"state,omitempty"`
 }
 
 type controlPlaneLogsResponse struct {
@@ -99,6 +118,8 @@ type controlPlaneEvidenceResponse struct {
 type runReadOptions struct {
 	RunID                string
 	JSON                 bool
+	FromSequence         int
+	FromSequenceSet      bool
 	ControlPlane         string
 	ControlPlaneTokenEnv string
 }
@@ -198,6 +219,7 @@ type controlPlaneHandler struct {
 	mu          sync.Mutex
 	hostAgents  map[string]*controlPlaneHostAgent
 	assignments map[string]*controlPlaneHostAgentAssignment
+	runIDs      []string
 }
 
 func newControlPlaneHandler(dataDir string, token string, runtime runRuntime) (http.Handler, error) {
@@ -229,14 +251,33 @@ func newControlPlaneHandler(dataDir string, token string, runtime runRuntime) (h
 			return nil, err
 		}
 	}
+	runIDs, err := loadControlPlaneRunIndex(dataDir)
+	if err != nil {
+		return nil, err
+	}
 	handler := &controlPlaneHandler{
 		dataDir: dataDir, token: token, runtime: runtime,
-		hostAgents: make(map[string]*controlPlaneHostAgent), assignments: make(map[string]*controlPlaneHostAgentAssignment),
+		hostAgents: make(map[string]*controlPlaneHostAgent), assignments: make(map[string]*controlPlaneHostAgentAssignment), runIDs: runIDs,
 	}
 	if err := handler.loadHostAgentState(); err != nil {
 		return nil, err
 	}
 	return handler, nil
+}
+
+func loadControlPlaneRunIndex(dataDir string) ([]string, error) {
+	entries, err := os.ReadDir(filepath.Join(dataDir, "runs"))
+	if err != nil {
+		return nil, err
+	}
+	runIDs := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() && validateRunID(entry.Name()) == nil {
+			runIDs = append(runIDs, entry.Name())
+		}
+	}
+	sortControlPlaneRunIDsNewest(runIDs)
+	return runIDs, nil
 }
 
 func ensureControlPlaneRootDirectory(path string) error {
@@ -283,6 +324,10 @@ func (handler *controlPlaneHandler) ServeHTTP(response http.ResponseWriter, requ
 	provided, bearer := strings.CutPrefix(request.Header.Get("Authorization"), "Bearer ")
 	if !bearer || len(provided) != len(handler.token) || subtle.ConstantTimeCompare([]byte(provided), []byte(handler.token)) != 1 {
 		writeControlPlaneError(response, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if request.URL.Path == "/v1/runs" && request.Method == http.MethodGet {
+		handler.serveRunHistory(response, request)
 		return
 	}
 	if request.URL.Path != "/v1/runs" || request.Method != http.MethodPost {
@@ -335,6 +380,7 @@ func (handler *controlPlaneHandler) ServeHTTP(response http.ResponseWriter, requ
 	}
 	if err := materializeControlPlaneSubmission(repoDir, submission); err != nil {
 		_ = os.RemoveAll(filepath.Dir(repoDir))
+		handler.removeControlPlaneRunID(runID)
 		handler.mu.Unlock()
 		writeControlPlaneError(response, http.StatusBadRequest, "invalid submission files")
 		return
@@ -342,6 +388,9 @@ func (handler *controlPlaneHandler) ServeHTTP(response http.ResponseWriter, requ
 	handler.mu.Unlock()
 	if request.Context().Err() != nil {
 		_ = os.RemoveAll(filepath.Dir(repoDir))
+		handler.mu.Lock()
+		handler.removeControlPlaneRunID(runID)
+		handler.mu.Unlock()
 		return
 	}
 	targetProfile := submission.TargetProfile
@@ -357,7 +406,6 @@ func (handler *controlPlaneHandler) ServeHTTP(response http.ResponseWriter, requ
 	previousAcceptedCheck := serverRuntime.AcceptedCheck
 	acceptanceStarted := false
 	acceptedWritten := false
-	var acceptanceErr error
 	encoder := json.NewEncoder(response)
 	serverRuntime.Accepted = func(acceptedOutcome runOutcome) {
 		acceptanceStarted = true
@@ -368,12 +416,10 @@ func (handler *controlPlaneHandler) ServeHTTP(response http.ResponseWriter, requ
 		accepted.EvidenceDir = "/v1/runs/" + runID + "/evidence"
 		response.Header().Set("Content-Type", "application/x-ndjson")
 		response.WriteHeader(http.StatusCreated)
-		if err := encoder.Encode(accepted); err != nil {
-			acceptanceErr = fmt.Errorf("write Control Plane acceptance: %w", err)
-		} else if err := http.NewResponseController(response).Flush(); err != nil {
-			acceptanceErr = fmt.Errorf("flush Control Plane acceptance: %w", err)
-		} else {
-			acceptedWritten = true
+		if err := encoder.Encode(accepted); err == nil {
+			if err := http.NewResponseController(response).Flush(); err == nil {
+				acceptedWritten = true
+			}
 		}
 		if previousAccepted != nil {
 			previousAccepted(acceptedOutcome)
@@ -381,9 +427,9 @@ func (handler *controlPlaneHandler) ServeHTTP(response http.ResponseWriter, requ
 	}
 	serverRuntime.AcceptedCheck = func() error {
 		if previousAcceptedCheck != nil {
-			return errors.Join(acceptanceErr, previousAcceptedCheck())
+			return previousAcceptedCheck()
 		}
-		return acceptanceErr
+		return nil
 	}
 	var outcome runOutcome
 	var runErr error
@@ -402,6 +448,116 @@ func (handler *controlPlaneHandler) ServeHTTP(response http.ResponseWriter, requ
 	}
 	result := controlPlaneTerminalResponse(outcome, runErr, repoDir)
 	_ = json.NewEncoder(response).Encode(result)
+}
+
+func (handler *controlPlaneHandler) serveRunHistory(response http.ResponseWriter, request *http.Request) {
+	handler.mu.Lock()
+	indexedRunIDs := append([]string(nil), handler.runIDs...)
+	handler.mu.Unlock()
+	names, nextBeforeRunID, omittedAtLeast, err := boundedControlPlaneHistoryWindow(indexedRunIDs, request.URL.Query().Get("beforeRunId"))
+	if err != nil {
+		writeControlPlaneError(response, http.StatusBadRequest, "invalid run history cursor")
+		return
+	}
+	options := historyOptions{
+		Scenario: request.URL.Query().Get("scenario"), Host: request.URL.Query().Get("host"),
+		State: request.URL.Query().Get("state"), Since: request.URL.Query().Get("since"),
+	}
+	cutoff, err := historySinceCutoff(options.Since, handler.runtime.Now())
+	if err != nil {
+		writeControlPlaneError(response, http.StatusBadRequest, "invalid run history filter")
+		return
+	}
+	records := make([]runLedgerRecord, 0, maximumControlPlaneHistoryRuns)
+	for _, runID := range names {
+		repoDir := filepath.Join(handler.dataDir, "runs", runID, "repo")
+		if _, err := os.Lstat(filepath.Join(runLedgerDir(repoDir, runID), "run.json")); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			writeControlPlaneError(response, http.StatusInternalServerError, "read run history")
+			return
+		}
+		record, _, _, err := handler.readControlPlaneRunRecord(repoDir, runID)
+		if err != nil {
+			writeControlPlaneError(response, http.StatusInternalServerError, "read run history")
+			return
+		}
+		matches, err := runMatchesHistoryOptions(record, options, cutoff)
+		if err != nil {
+			writeControlPlaneError(response, http.StatusInternalServerError, "read run history")
+			return
+		}
+		if !matches {
+			continue
+		}
+		if !appendBoundedControlPlaneHistory(&records, record) {
+			if omittedAtLeast == 0 {
+				omittedAtLeast = 1
+			}
+			break
+		}
+	}
+	response.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(response).Encode(runHistoryResponse{
+		Version: controlPlaneAPIVersion, Kind: "history", Runs: records,
+		RunsOmittedAtLeast: omittedAtLeast, RunsTruncated: omittedAtLeast > 0, NextBeforeRunID: nextBeforeRunID,
+	})
+}
+
+func boundedControlPlaneHistoryWindow(runIDs []string, beforeRunID string) ([]string, string, int, error) {
+	start := 0
+	if beforeRunID != "" {
+		if validateRunID(beforeRunID) != nil {
+			return nil, "", 0, fmt.Errorf("invalid Run ID")
+		}
+		start = -1
+		for index, runID := range runIDs {
+			if runID == beforeRunID {
+				start = index + 1
+				break
+			}
+		}
+		if start < 0 {
+			return nil, "", 0, fmt.Errorf("unknown Run ID")
+		}
+	}
+	end := start + maximumControlPlaneHistoryScanRuns
+	if end > len(runIDs) {
+		end = len(runIDs)
+	}
+	window := append([]string(nil), runIDs[start:end]...)
+	if end == len(runIDs) {
+		return window, "", 0, nil
+	}
+	return window, window[len(window)-1], len(runIDs) - end, nil
+}
+
+func (handler *controlPlaneHandler) removeControlPlaneRunID(runID string) {
+	for index, indexedRunID := range handler.runIDs {
+		if indexedRunID == runID {
+			handler.runIDs = append(handler.runIDs[:index], handler.runIDs[index+1:]...)
+			return
+		}
+	}
+}
+
+func sortControlPlaneRunIDsNewest(runIDs []string) {
+	sort.Slice(runIDs, func(i int, j int) bool {
+		left, _ := acceptedAtFromRunID(runIDs[i])
+		right, _ := acceptedAtFromRunID(runIDs[j])
+		if left.Equal(right) {
+			return runIDCollisionOrdinal(runIDs[i]) > runIDCollisionOrdinal(runIDs[j])
+		}
+		return left.After(right)
+	})
+}
+
+func appendBoundedControlPlaneHistory(records *[]runLedgerRecord, record runLedgerRecord) bool {
+	if len(*records) >= maximumControlPlaneHistoryRuns {
+		return false
+	}
+	*records = append(*records, record)
+	return true
 }
 
 func controlPlaneTerminalResponse(outcome runOutcome, runErr error, repoDir string) runCommandJSON {
@@ -433,35 +589,11 @@ func (handler *controlPlaneHandler) serveRunRead(response http.ResponseWriter, r
 		writeControlPlaneError(response, http.StatusBadRequest, "invalid Run ID")
 		return
 	}
-	handler.mu.Lock()
-	assignment := handler.assignments[runID]
-	assignmentActive := assignment != nil && assignment.record.State != "quarantined"
-	var assignedRecord *runLedgerRecord
-	if assignment != nil && assignment.record.State == "quarantined" && assignment.record.TerminalLedger != nil {
-		copy := *assignment.record.TerminalLedger
-		assignedRecord = &copy
-	} else if assignment != nil && assignment.record.State == "finishing" && assignment.record.AssignedLedger != nil {
-		copy := *assignment.record.AssignedLedger
-		copy.State = "finishing"
-		copy.Status = ""
-		copy.CompletedAt = ""
-		assignedRecord = &copy
-	} else if assignmentActive && assignment.record.AssignedLedger != nil {
-		copy := *assignment.record.AssignedLedger
-		assignedRecord = &copy
-	}
-	handler.mu.Unlock()
-	if assignmentActive && parts[3] != "status" {
+	repoDir := filepath.Join(handler.dataDir, "runs", runID, "repo")
+	record, assignmentActive, assignmentBacked, err := handler.readControlPlaneRunRecord(repoDir, runID)
+	if assignmentActive && parts[3] == "evidence" {
 		writeControlPlaneError(response, http.StatusConflict, "run assignment is still active")
 		return
-	}
-	repoDir := filepath.Join(handler.dataDir, "runs", runID, "repo")
-	var record runLedgerRecord
-	var err error
-	if assignedRecord != nil {
-		record = *assignedRecord
-	} else {
-		record, err = readRunLedgerRecord(repoDir, runID)
 	}
 	if err != nil {
 		var usageErr *usageError
@@ -472,13 +604,45 @@ func (handler *controlPlaneHandler) serveRunRead(response http.ResponseWriter, r
 		writeControlPlaneError(response, http.StatusInternalServerError, "read run status")
 		return
 	}
+	followEvents := parts[3] == "events" && request.URL.Query().Get("follow") == "true"
+	if (parts[3] == "events" || parts[3] == "logs") && !assignmentBacked && !followEvents && !terminalRunLedgerRecord(record) {
+		if err := refreshRunLedgerArtifacts(repoDir, runID, handler.runtime.Now()); err != nil {
+			writeControlPlaneError(response, http.StatusInternalServerError, "refresh active run stream")
+			return
+		}
+		refreshed, _, _, err := handler.readControlPlaneRunRecord(repoDir, runID)
+		if err != nil {
+			writeControlPlaneError(response, http.StatusInternalServerError, "read active run stream")
+			return
+		}
+		record = refreshed
+	}
 	switch parts[3] {
 	case "status":
 		result := controlPlaneStatusFromRecord(repoDir, record, "/v1/runs/"+runID+"/evidence")
 		response.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(response).Encode(result)
 	case "events":
-		result, err := readControlPlaneEvents(repoDir, record)
+		fromSequence := 1
+		explicitSequence := false
+		if value := request.URL.Query().Get("fromSequence"); value != "" {
+			explicitSequence = true
+			fromSequence, err = strconv.Atoi(value)
+			if err != nil || fromSequence < 1 {
+				writeControlPlaneError(response, http.StatusBadRequest, "invalid event sequence")
+				return
+			}
+		}
+		if request.URL.Query().Get("follow") == "true" {
+			handler.serveControlPlaneEventStream(response, request, repoDir, record, fromSequence, shouldRefreshControlPlaneEventStream(assignmentBacked, record))
+			return
+		}
+		var result controlPlaneEventsResponse
+		if explicitSequence {
+			result, err = readControlPlaneEvents(repoDir, record, fromSequence)
+		} else {
+			result, err = readControlPlaneEvents(repoDir, record)
+		}
 		if err != nil {
 			writeControlPlaneError(response, http.StatusInternalServerError, "read run events")
 			return
@@ -512,6 +676,237 @@ func (handler *controlPlaneHandler) serveRunRead(response http.ResponseWriter, r
 	default:
 		http.NotFound(response, request)
 	}
+}
+
+func (handler *controlPlaneHandler) readControlPlaneRunRecord(repoDir string, runID string) (runLedgerRecord, bool, bool, error) {
+	handler.mu.Lock()
+	assignment := handler.assignments[runID]
+	assignmentActive := assignment != nil && assignment.record.State != "quarantined"
+	if assignment != nil && assignment.record.State == "quarantined" && assignment.record.TerminalLedger != nil {
+		record := *assignment.record.TerminalLedger
+		handler.mu.Unlock()
+		return record, false, true, nil
+	}
+	if assignment != nil && assignment.record.State == "finishing" && assignment.record.AssignedLedger != nil {
+		record := *assignment.record.AssignedLedger
+		record.State = "finishing"
+		record.Status = ""
+		record.CompletedAt = ""
+		handler.mu.Unlock()
+		return record, true, true, nil
+	}
+	if assignmentActive && assignment.record.AssignedLedger != nil {
+		record := *assignment.record.AssignedLedger
+		handler.mu.Unlock()
+		return record, true, true, nil
+	}
+	handler.mu.Unlock()
+	record, err := readRunLedgerRecord(repoDir, runID)
+	return record, assignmentActive, assignment != nil, err
+}
+
+func (handler *controlPlaneHandler) serveControlPlaneEventStream(response http.ResponseWriter, request *http.Request, repoDir string, record runLedgerRecord, fromSequence int, refreshTransient bool) {
+	response.Header().Set("Content-Type", "application/x-ndjson")
+	response.WriteHeader(http.StatusOK)
+	controller := http.NewResponseController(response)
+	lastSequence := fromSequence - 1
+	written := 0
+	var sourceStamp controlPlaneEventSourceStamp
+	var err error
+	if refreshTransient {
+		sourceStamp, err = refreshControlPlaneEventSource(repoDir, record.RunID, handler.runtime.Now())
+		if err != nil {
+			sourceStamp, _ = controlPlaneEventSourceStampForRun(repoDir, record.RunID)
+		}
+	}
+	record, _, _, err = handler.readControlPlaneRunRecord(repoDir, record.RunID)
+	if err != nil {
+		return
+	}
+	lastSnapshot := controlPlaneEventSnapshot(record)
+	firstSnapshot := true
+	writeRecord := func(streamRecord controlPlaneEventStreamRecord, reserve int) bool {
+		content, err := json.Marshal(streamRecord)
+		if err != nil || written+len(content)+1 > maximumRunLedgerMaxEventBytes-reserve {
+			return false
+		}
+		content = append(content, '\n')
+		if _, err := response.Write(content); err != nil {
+			return false
+		}
+		written += len(content)
+		return controller.Flush() == nil
+	}
+	for {
+		if !firstSnapshot {
+			if refreshTransient {
+				currentSource, err := controlPlaneEventSourceStampForRun(repoDir, record.RunID)
+				if err != nil {
+					return
+				}
+				if currentSource != sourceStamp {
+					refreshedSource, refreshErr := refreshControlPlaneEventSource(repoDir, record.RunID, handler.runtime.Now())
+					if refreshErr == nil {
+						sourceStamp = refreshedSource
+					}
+				}
+			}
+			refreshed, _, _, err := handler.readControlPlaneRunRecord(repoDir, record.RunID)
+			if err != nil {
+				return
+			}
+			currentSnapshot := controlPlaneEventSnapshot(refreshed)
+			if currentSnapshot == lastSnapshot {
+				if !waitForControlPlaneEventPoll(request) {
+					return
+				}
+				continue
+			}
+			record = refreshed
+			lastSnapshot = currentSnapshot
+		}
+		firstSnapshot = false
+		events, err := readControlPlaneEvents(repoDir, record, lastSequence+1)
+		if err != nil {
+			return
+		}
+		markerPending := events.EventsTruncated && events.EventsOmitted > 0 && events.FirstAvailableSequence > 0
+		writeGapMarker := func() bool {
+			if writeRecord(controlPlaneEventStreamRecord{
+				Version: controlPlaneAPIVersion, Kind: "events-truncated", RunID: record.RunID,
+				EventsOmitted: events.EventsOmitted, EventsTruncated: true, NextSequence: events.FirstAvailableSequence,
+			}, 512) {
+				if gapLastSequence := events.FirstAvailableSequence - 1; gapLastSequence > lastSequence {
+					lastSequence = gapLastSequence
+				}
+				return true
+			}
+			_ = writeRecord(controlPlaneEventStreamRecord{
+				Version: controlPlaneAPIVersion, Kind: "stream-truncated", RunID: record.RunID,
+				EventsTruncated: true, NextSequence: events.FirstAvailableSequence, State: record.State,
+			}, 0)
+			return false
+		}
+		for _, event := range events.Events {
+			if event["type"] == "run-ledger.events.truncated" {
+				continue
+			}
+			sequence := ledgerEventSequence(event)
+			if markerPending && sequence >= events.FirstAvailableSequence {
+				if !writeGapMarker() {
+					return
+				}
+				markerPending = false
+			}
+			// Sequence is the identity and cursor: replayed snapshots never re-emit acknowledged events.
+			if sequence <= lastSequence {
+				continue
+			}
+			if !writeRecord(controlPlaneEventStreamRecord{
+				Version: controlPlaneAPIVersion, Kind: "event", RunID: record.RunID,
+				Sequence: sequence, Event: event, NextSequence: sequence + 1,
+			}, 512) {
+				_ = writeRecord(controlPlaneEventStreamRecord{
+					Version: controlPlaneAPIVersion, Kind: "stream-truncated", RunID: record.RunID,
+					EventsTruncated: true, NextSequence: lastSequence + 1, State: record.State,
+				}, 0)
+				return
+			}
+			lastSequence = sequence
+		}
+		if markerPending {
+			if !writeGapMarker() {
+				return
+			}
+		}
+		if terminalRunLedgerRecord(record) {
+			_ = writeRecord(controlPlaneEventStreamRecord{
+				Version: controlPlaneAPIVersion, Kind: "stream-end", RunID: record.RunID,
+				NextSequence: lastSequence + 1, State: record.State,
+			}, 0)
+			return
+		}
+		if !waitForControlPlaneEventPoll(request) {
+			return
+		}
+	}
+}
+
+type controlPlaneEventSourceStamp struct {
+	Exists   bool
+	Size     int64
+	Modified int64
+}
+
+type controlPlaneEventSnapshotIdentity struct {
+	State           string
+	UpdatedAt       string
+	EventCount      int
+	EventBytes      int
+	EventsOmitted   int
+	EventsTruncated bool
+}
+
+func controlPlaneEventSourceStampForRun(repoDir string, runID string) (controlPlaneEventSourceStamp, error) {
+	path := filepath.Join(repoDir, ".maya-stall", "state", "runs", runID, "events.jsonl")
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return controlPlaneEventSourceStamp{}, nil
+	}
+	if err != nil {
+		return controlPlaneEventSourceStamp{}, err
+	}
+	return controlPlaneEventSourceStamp{Exists: true, Size: info.Size(), Modified: info.ModTime().UnixNano()}, nil
+}
+
+func refreshControlPlaneEventSource(repoDir string, runID string, now time.Time) (controlPlaneEventSourceStamp, error) {
+	before, err := controlPlaneEventSourceStampForRun(repoDir, runID)
+	if err != nil || !before.Exists {
+		return before, err
+	}
+	if err := refreshRunLedgerArtifacts(repoDir, runID, now); err != nil {
+		return controlPlaneEventSourceStamp{}, err
+	}
+	after, err := controlPlaneEventSourceStampForRun(repoDir, runID)
+	if err != nil {
+		return controlPlaneEventSourceStamp{}, err
+	}
+	if after != before {
+		// Preserve the pre-refresh stamp so a concurrent append forces another bounded refresh.
+		return before, nil
+	}
+	return after, nil
+}
+
+func controlPlaneEventSnapshot(record runLedgerRecord) controlPlaneEventSnapshotIdentity {
+	return controlPlaneEventSnapshotIdentity{
+		State: record.State, UpdatedAt: record.UpdatedAt, EventCount: record.EventCount,
+		EventBytes: record.EventBytes, EventsOmitted: record.EventsOmitted, EventsTruncated: record.EventsTruncated,
+	}
+}
+
+func waitForControlPlaneEventPoll(request *http.Request) bool {
+	timer := time.NewTimer(controlPlaneEventPollInterval)
+	defer timer.Stop()
+	select {
+	case <-request.Context().Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func terminalRunLedgerRecord(record runLedgerRecord) bool {
+	switch record.State {
+	case "completed", "failed", "kept", "cleanup-failed":
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldRefreshControlPlaneEventStream(assignmentBacked bool, record runLedgerRecord) bool {
+	return !assignmentBacked && !terminalRunLedgerRecord(record)
 }
 
 func readControlPlaneEvidence(repoDir string, record runLedgerRecord) (controlPlaneEvidenceResponse, error) {
@@ -612,6 +1007,22 @@ func readControlPlaneResult(repoDir string, record runLedgerRecord) (controlPlan
 }
 
 func readControlPlaneLogs(repoDir string, record runLedgerRecord) (controlPlaneLogsResponse, error) {
+	var result controlPlaneLogsResponse
+	err := withRunLedgerLock(repoDir, record.RunID, func() error {
+		current, err := readRunLedgerRecord(repoDir, record.RunID)
+		if err != nil {
+			return err
+		}
+		record.Log = current.Log
+		record.LogTruncated = current.LogTruncated
+		var readErr error
+		result, readErr = readControlPlaneLogsUnlocked(repoDir, record)
+		return readErr
+	})
+	return result, err
+}
+
+func readControlPlaneLogsUnlocked(repoDir string, record runLedgerRecord) (controlPlaneLogsResponse, error) {
 	if err := ensureWorkspacePathHasNoSymlinkAncestor(runLedgerDir(repoDir, record.RunID), filepath.FromSlash(record.Log)); err != nil {
 		return controlPlaneLogsResponse{}, err
 	}
@@ -626,7 +1037,17 @@ func readControlPlaneLogs(repoDir string, record runLedgerRecord) (controlPlaneL
 	}, nil
 }
 
-func readControlPlaneEvents(repoDir string, record runLedgerRecord) (controlPlaneEventsResponse, error) {
+func readControlPlaneEvents(repoDir string, record runLedgerRecord, requestedSequence ...int) (controlPlaneEventsResponse, error) {
+	var result controlPlaneEventsResponse
+	err := withRunLedgerLock(repoDir, record.RunID, func() error {
+		var readErr error
+		result, readErr = readControlPlaneEventsUnlocked(repoDir, record, requestedSequence...)
+		return readErr
+	})
+	return result, err
+}
+
+func readControlPlaneEventsUnlocked(repoDir string, record runLedgerRecord, requestedSequence ...int) (controlPlaneEventsResponse, error) {
 	if err := ensureWorkspacePathHasNoSymlinkAncestor(runLedgerDir(repoDir, record.RunID), filepath.FromSlash(record.Events)); err != nil {
 		return controlPlaneEventsResponse{}, err
 	}
@@ -634,7 +1055,15 @@ func readControlPlaneEvents(repoDir string, record runLedgerRecord) (controlPlan
 	if err != nil {
 		return controlPlaneEventsResponse{}, err
 	}
+	fromSequence := 1
+	includeCursors := len(requestedSequence) > 0
+	if includeCursors {
+		fromSequence = requestedSequence[0]
+	}
 	events := make([]map[string]any, 0, record.EventCount)
+	gapFirstSequence := 0
+	gapLastSequence := 0
+	contentTruncated := false
 	for index, line := range bytes.Split(bytes.TrimSpace(content), []byte{'\n'}) {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
@@ -644,12 +1073,47 @@ func readControlPlaneEvents(repoDir string, record runLedgerRecord) (controlPlan
 			return controlPlaneEventsResponse{}, fmt.Errorf("parse event %d: %w", index+1, err)
 		}
 		event = sanitizeControlPlaneValue(event, repoDir).(map[string]any)
-		events = append(events, event)
+		if event["type"] == "run-ledger.events.truncated" {
+			if omitted, ok := runLedgerOmittedEventCount(line); ok && omitted > 0 {
+				gapFirstSequence = ledgerEventSequence(event)
+				gapLastSequence = gapFirstSequence + omitted - 1
+			}
+			continue
+		}
+		if event["type"] == "run-ledger.event.truncated" && ledgerEventSequence(event) >= fromSequence {
+			contentTruncated = true
+		}
+		if ledgerEventSequence(event) >= fromSequence {
+			events = append(events, event)
+		}
 	}
-	return controlPlaneEventsResponse{
+	firstAvailable := 0
+	nextSequence := fromSequence
+	eventsOmitted := 0
+	eventsTruncated := gapLastSequence > 0 && fromSequence <= gapLastSequence
+	if eventsTruncated {
+		firstMissing := fromSequence
+		if firstMissing < gapFirstSequence {
+			firstMissing = gapFirstSequence
+		}
+		eventsOmitted = gapLastSequence - firstMissing + 1
+		firstAvailable = gapLastSequence + 1
+	} else if len(events) > 0 {
+		firstAvailable = ledgerEventSequence(events[0])
+	}
+	if len(events) > 0 {
+		nextSequence = ledgerEventSequence(events[len(events)-1]) + 1
+	}
+	response := controlPlaneEventsResponse{
 		Version: controlPlaneAPIVersion, Kind: "events", RunID: record.RunID, Events: events,
-		EventsOmitted: record.EventsOmitted, EventsTruncated: record.EventsTruncated,
-	}, nil
+		EventsOmitted: eventsOmitted, EventsTruncated: eventsTruncated || contentTruncated,
+	}
+	if includeCursors {
+		response.RequestedSequence = fromSequence
+		response.FirstAvailableSequence = firstAvailable
+		response.NextSequence = nextSequence
+	}
+	return response, nil
 }
 
 func controlPlaneCleanupState(repoDir string, record runLedgerRecord) string {
@@ -708,6 +1172,9 @@ func (handler *controlPlaneHandler) reserveRun(scenario string) (string, string,
 		if err := os.Mkdir(repoDir, 0o700); err != nil {
 			return "", "", err
 		}
+		// The submission path holds handler.mu across reservation and indexing.
+		handler.runIDs = append(handler.runIDs, runID)
+		sortControlPlaneRunIDsNewest(handler.runIDs)
 		return runID, repoDir, nil
 	}
 }
@@ -729,6 +1196,54 @@ func runScenarioThroughMode(repoDir string, options runOptions, runtime runRunti
 		return runScenario(repoDir, options, runtime)
 	}
 	return submitControlPlaneScenario(repoDir, options, runtime)
+}
+
+func printRunHistoryThroughMode(repoDir string, options historyOptions, now time.Time, stdout io.Writer, runtime runRuntime) error {
+	if options.ControlPlane == "" {
+		if options.ControlPlaneTokenEnv != "" {
+			return newUsageError("--control-plane-token-env requires --control-plane")
+		}
+		if options.BeforeRunID != "" {
+			return newUsageError("--before-run requires --control-plane")
+		}
+		return printRunHistory(repoDir, options, now, stdout)
+	}
+	var history runHistoryResponse
+	query := url.Values{}
+	query.Set("scenario", options.Scenario)
+	query.Set("host", options.Host)
+	query.Set("state", options.State)
+	query.Set("since", options.Since)
+	query.Set("beforeRunId", options.BeforeRunID)
+	path := "/v1/runs"
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	if err := getControlPlaneJSON(options.ControlPlane, options.ControlPlaneTokenEnv, path, runtime, &history); err != nil {
+		return err
+	}
+	if history.Version != controlPlaneAPIVersion || history.Kind != "history" {
+		return fmt.Errorf("control plane returned an unsupported history response")
+	}
+	if options.JSON {
+		return json.NewEncoder(stdout).Encode(history)
+	}
+	if len(history.Runs) == 0 {
+		if _, err := fmt.Fprintln(stdout, "state: no runs"); err != nil {
+			return err
+		}
+	} else {
+		for _, record := range history.Runs {
+			if _, err := fmt.Fprintf(stdout, "run: %s\nscenario: %s\nhost: %s\nstate: %s\nstatus: %s\nacceptedAt: %s\n", record.RunID, record.Scenario, record.Host, record.State, record.Status, record.AcceptedAt); err != nil {
+				return err
+			}
+		}
+	}
+	if history.RunsTruncated {
+		_, err := fmt.Fprintf(stdout, "historyTruncated: true\nrunsOmittedAtLeast: %d\nnextBeforeRunId: %s\n", history.RunsOmittedAtLeast, history.NextBeforeRunID)
+		return err
+	}
+	return nil
 }
 
 func failAcceptedSubmissionThroughMode(repoDir string, options runOptions, runtime runRuntime, submissionErr error) (runOutcome, error) {
@@ -823,20 +1338,31 @@ func readEmbeddedStatusResponse(repoDir string, runID string) (controlPlaneStatu
 }
 
 func parseRunReadArgs(command string, args []string) (runReadOptions, error) {
-	var options runReadOptions
+	options := runReadOptions{FromSequence: 1}
 	for index := 0; index < len(args); index++ {
 		switch args[index] {
 		case "--json":
 			options.JSON = true
-		case "--control-plane", "--control-plane-token-env":
+		case "--control-plane", "--control-plane-token-env", "--from-sequence":
 			flag := args[index]
 			index++
 			if index >= len(args) || args[index] == "" || strings.HasPrefix(args[index], "--") {
 				return runReadOptions{}, newUsageError("%s needs a value", flag)
 			}
-			if flag == "--control-plane" {
+			switch flag {
+			case "--from-sequence":
+				if command != "events" {
+					return runReadOptions{}, newUsageError("%s does not accept --from-sequence", command)
+				}
+				sequence, err := strconv.Atoi(args[index])
+				if err != nil || sequence < 1 {
+					return runReadOptions{}, newUsageError("--from-sequence needs a positive integer")
+				}
+				options.FromSequence = sequence
+				options.FromSequenceSet = true
+			case "--control-plane":
 				options.ControlPlane = args[index]
-			} else {
+			case "--control-plane-token-env":
 				options.ControlPlaneTokenEnv = args[index]
 			}
 		default:
@@ -863,7 +1389,11 @@ func printRunReadThroughMode(repoDir string, resource string, options runReadOpt
 	case "events":
 		var result controlPlaneEventsResponse
 		if options.ControlPlane != "" {
-			if err := getControlPlaneJSON(options.ControlPlane, options.ControlPlaneTokenEnv, "/v1/runs/"+options.RunID+"/events", runtime, &result); err != nil {
+			path := "/v1/runs/" + options.RunID + "/events"
+			if options.FromSequenceSet {
+				path += "?fromSequence=" + strconv.Itoa(options.FromSequence)
+			}
+			if err := getControlPlaneJSON(options.ControlPlane, options.ControlPlaneTokenEnv, path, runtime, &result); err != nil {
 				return err
 			}
 		} else {
@@ -871,7 +1401,11 @@ func printRunReadThroughMode(repoDir string, resource string, options runReadOpt
 			if err != nil {
 				return err
 			}
-			result, err = readControlPlaneEvents(repoDir, record)
+			if options.FromSequenceSet {
+				result, err = readControlPlaneEvents(repoDir, record, options.FromSequence)
+			} else {
+				result, err = readControlPlaneEvents(repoDir, record)
+			}
 			if err != nil {
 				return err
 			}
@@ -983,7 +1517,11 @@ func getControlPlaneJSON(rawURL string, tokenEnv string, path string, runtime ru
 		return fmt.Errorf("control plane read failed with HTTP %d", response.StatusCode)
 	}
 	limit := int64(maximumControlPlaneDefaultResponseBytes)
-	if strings.HasSuffix(path, "/events") || strings.HasSuffix(path, "/logs") {
+	resourcePath := path
+	if query := strings.IndexByte(resourcePath, '?'); query >= 0 {
+		resourcePath = resourcePath[:query]
+	}
+	if strings.HasSuffix(resourcePath, "/events") || strings.HasSuffix(resourcePath, "/logs") {
 		// JSON can expand each retained byte to a six-byte Unicode escape.
 		limit = int64(maximumControlPlaneLedgerResponseBytes)
 	}

@@ -93,7 +93,7 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 		if runtime.Now != nil {
 			now = runtime.Now
 		}
-		if err := printRunHistory(workDir, options, now(), stdout); err != nil {
+		if err := printRunHistoryThroughMode(workDir, options, now(), stdout, runtime); err != nil {
 			_, _ = fmt.Fprintf(stderr, "maya-stall history: %v\n", err)
 			var userErr *usageError
 			if errors.As(err, &userErr) {
@@ -400,7 +400,7 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 			fmt.Fprintf(stderr, "maya-stall attach: %v\n", err)
 			return 2
 		}
-		if err := runAttachAction(workDir, options, stdout); err != nil {
+		if err := runAttachAction(workDir, options, stdout, runtime); err != nil {
 			var userErr *usageError
 			if errors.As(err, &userErr) {
 				fmt.Fprintf(stderr, "maya-stall attach: %v\n", err)
@@ -569,10 +569,10 @@ Usage:
   maya-stall init
   maya-stall doctor [--host-config <path>] [--target-profile <name>] [--host <id>] [--scenario <name>] [--repair-trusted-plugin-allowlist]
   maya-stall plan [--json] [--host-config <path>] <scenario>
-  maya-stall history [--json] [--scenario <name>] [--host <id>] [--state <state>] [--since <duration-or-rfc3339>]
+	  maya-stall history [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] [--before-run <run-id>] [--scenario <name>] [--host <id>] [--state <state>] [--since <duration-or-rfc3339>]
   maya-stall run [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] [--host-config <path>] [--target-profile <name>] [--host <id>] [--host-lock-wait <duration>|--host-lock-fail-fast] [--keep-on-failure|--stop-after <success|failure|always|never>] <scenario>
   maya-stall status [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] --run <run-id>
-  maya-stall events [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] <run-id>
+  maya-stall events [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] [--from-sequence <number>] <run-id>
   maya-stall logs [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] <run-id>
   maya-stall result [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] <run-id>
   maya-stall control-plane serve --data-dir <path> --tls-cert <path> --tls-key <path> [--listen <host:port>] [--token-env <name>]
@@ -585,7 +585,7 @@ Usage:
   maya-stall evidence publish --destination <path> --base-url <url> <evidence-bundle-dir>
   maya-stall review-comment github --repo <owner/name> --pr <number> [--token-env <name>] [--api-url <url>] [--dry-run] <published-evidence-dir>
   maya-stall review-comment gitlab --project <path-or-id> --merge-request <iid> [--token-env <name>] [--base-url <url>] [--dry-run] <published-evidence-dir>
-  maya-stall attach <run-id>
+  maya-stall attach <run-id> [--control-plane <https-url>] [--control-plane-token-env <name>] [--from-sequence <number>]
   maya-stall attach <run-id> screenshot
   maya-stall attach <run-id> control click --x <pixels> --y <pixels>
   maya-stall stop <run-id>
@@ -601,7 +601,7 @@ Commands:
   events    read ordered durable events for one run
   init      write a repo-only sample .maya-stall.yaml
   logs      read bounded retained logs for one run
-  history   list durable embedded run history
+  history   list durable embedded or configured Control Plane run history
   host-agent run-once   execute one fake or Agent-configured real assignment through outbound HTTPS
   plan      inspect a normalized Scenario and optional host compatibility without host contact
   record   capture a Session Broker recording artifact

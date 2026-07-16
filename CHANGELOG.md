@@ -6,6 +6,7 @@ Release history starts with `v0.1.0`.
 
 ## Unreleased
 
+- Added submitter-independent Control Plane runs, authenticated Run ID reconnect with inclusive durable sequence cursors, bounded live event streaming and Agent progress checkpoints, configured history, and explicit event/log/stream truncation markers: https://github.com/BramVR/gg_maya_stall/issues/118.
 - Added real shared-path Scenario execution through the Control Plane and registered Windows Host Agent, with Agent-local live Host config, exact Maya UI Session binding on the shared Host Lock, transferred live evidence, fail-closed ownership, and protected zero-residue Maya proof: https://github.com/BramVR/gg_maya_stall/issues/117.
 - Added a scoped Windows Host Agent enrollment and outbound one-slot assignment path that completes one fake Scenario through a durable token-fenced Host Lock, transfers bounded Run Ledger and Evidence state, cleans the Agent workspace, and rejects unauthorized, stale-token, and concurrent assignment attempts without state mutation: https://github.com/BramVR/gg_maya_stall/issues/116.
 - Added an authenticated HTTPS Control Plane mode that snapshots a repo-owned Scenario, runs it through the existing fake lifecycle, persists durable events, bounded logs, Evidence, cleanup, and results by Run ID, and exposes matching JSON and human CLI reads while preserving embedded mode: https://github.com/BramVR/gg_maya_stall/issues/115.

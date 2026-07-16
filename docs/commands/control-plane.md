@@ -75,8 +75,9 @@ bytes outside the declared regular-file snapshot.
 The version 1 API uses bearer authentication and origin-only HTTPS client URLs:
 
 - `POST /v1/runs`
+- `GET /v1/runs`
 - `GET /v1/runs/<run-id>/status`
-- `GET /v1/runs/<run-id>/events`
+- `GET /v1/runs/<run-id>/events?fromSequence=<n>[&follow=true]`
 - `GET /v1/runs/<run-id>/logs`
 - `GET /v1/runs/<run-id>/result`
 - `GET /v1/runs/<run-id>/evidence`
@@ -87,23 +88,36 @@ The version 1 API uses bearer authentication and origin-only HTTPS client URLs:
 - `POST /v1/host-agents/<agent-id>/assignments/next`
 - `POST /v1/host-agents/<agent-id>/assignments/<run-id>/confirm`
 - `POST /v1/host-agents/<agent-id>/assignments/<run-id>/session`
+- `POST /v1/host-agents/<agent-id>/assignments/<run-id>/progress`
 - `POST /v1/host-agents/<agent-id>/assignments/<run-id>/complete`
 - `POST /v1/host-agents/<agent-id>/assignments/<run-id>/fail`
 
 Submission returns newline-delimited versioned records on the same HTTPS
 response. The first record returns the durable Run ID immediately after the
 Run Ledger accepts it; the second returns the terminal result. The CLI
-prints the same acceptance and terminal records with `run --json`.
+prints the same acceptance and terminal records with `run --json`. After
+acceptance, execution belongs to the Control Plane: a failed response write or
+submitter disconnect does not cancel or delete the run.
+
+An authenticated client can reconnect with `attach <run-id> --control-plane
+<url> --from-sequence <n>`. The follow response is bounded newline-delimited
+JSON. Durable sequence numbers are identical in live and historical reads;
+`events-truncated` exposes retention loss, `stream-truncated` exposes the next
+connection cursor, and `stream-end` reports terminal state. History is newest
+first and capped at 1,000 records with explicit truncation metadata.
 
 With no Agent enrollment, the server preserves the original in-process fake
-execution path. With an enrollment, it waits synchronously for the registered
-Agent to finish the assignment. Registered Agent runs require
+execution path. With an enrollment, a connected submitter may wait while the
+registered Agent finishes the assignment. During execution, the Agent sends
+bounded token-, session-, and Host-Lock-fenced Run Ledger checkpoints so a
+later client can observe the same event identities before terminal transfer.
+Registered Agent runs require
 `--stop-after always`; policies that could retain a session fail before an
 assignment is created. Real execution requires an Agent-local Host config;
 submitting clients cannot send Host config or silently fall back to
 embedded/direct-SSH ownership.
 
-Kept runs remain readable and are never reported as final success, but this
-first slice has no configured-mode attach or stop mutation. It therefore omits
-embedded-only follow-up commands. Remote active-run control and cleanup are a
-later Control Plane capability.
+Completed Run IDs remain readable through history, events, logs, result,
+Evidence metadata, and cleanup state. Active Evidence is unavailable until its
+bundle is durable. Configured attach is observational; configured stop and
+run-scoped desktop mutations remain later capabilities.

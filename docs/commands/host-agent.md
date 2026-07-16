@@ -56,6 +56,13 @@ Plane releases the shared Host Lock. Post-confirmation setup failures use the
 same token fence to finalize a failed run and release the slot. Unauthorized
 credentials and stale tokens are rejected without mutating durable state.
 
+While the Scenario runs, the Agent checkpoints the active Run Ledger over the
+same credential, process-session, and Host Lock token fences. Each checkpoint
+is bounded to 10,000 events, 4 MiB of event data, and 4 MiB of log data, with
+explicit retention markers. The Control Plane preserves already acknowledged
+event sequence identities when it merges the final transfer, so reconnecting
+clients see the same event payloads live and after completion.
+
 If Maya session shutdown cannot be verified, the Agent retains its workspace
 and reports the assignment as `quarantined`. The Control Plane keeps the Agent
 Host Lock and shared fake-host lock unavailable and rejects process takeover

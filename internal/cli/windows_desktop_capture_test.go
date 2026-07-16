@@ -129,6 +129,24 @@ func TestWindowsDesktopClickRejectsNegativeCoordinates(t *testing.T) {
 	}
 }
 
+func TestWriteRemotePowerShellScriptRedactsConfiguredEndpointFromFailure(t *testing.T) {
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "fake-ssh-private-recording-endpoint")
+	script := "#!/bin/sh\nprintf 'ssh: connect to host maya-private.example port 22: Operation timed out\\n' >&2\nexit 255\n"
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake SSH: %v", err)
+	}
+	host := mayaHostConfig{SSH: sshConfig{Host: "maya-private.example", Binary: sshPath}}
+
+	err := writeRemotePowerShellScript(host, "C:/maya-stall/record.ps1", "Write-Output ok", sshCommandTimeout)
+	if err == nil {
+		t.Fatal("failed recording-script upload returned no error")
+	}
+	if strings.Contains(err.Error(), host.SSH.Host) || !strings.Contains(err.Error(), "SSH operation reported an error") {
+		t.Fatalf("recording-script SSH error exposed configured endpoint: %v", err)
+	}
+}
+
 type fakeWindowsDesktopTransport struct {
 	scripts []string
 	writes  []string

@@ -172,7 +172,8 @@ func runSSHCommand(host mayaHostConfig, remoteCommand []string) error {
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("ssh command timed out after %s", sshCommandTimeout)
 		}
-		detail := firstUsefulStderrLine(stderr.String())
+		detail := sshFailureDetail(err, stderr.String())
+		err = sanitizedSSHExecutionErrorFor(err, stderr.String())
 		if detail != "" {
 			return fmt.Errorf("ssh command failed: %w: %s", err, detail)
 		}
@@ -611,13 +612,11 @@ func runSFTPBatch(host mayaHostConfig, batch string) error {
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
-		detail := firstUsefulStderrLine(stderr.String())
 		if timeout > 0 && ctx.Err() == context.DeadlineExceeded {
-			if detail != "" {
-				return fmt.Errorf("sftp command timed out after %s: %s", timeout, detail)
-			}
 			return fmt.Errorf("sftp command timed out after %s", timeout)
 		}
+		detail := sftpFailureDetail(stderr.String())
+		err = sanitizedSFTPExecutionErrorFor(err, stderr.String())
 		if detail != "" {
 			return fmt.Errorf("sftp command failed: %w: %s", err, detail)
 		}

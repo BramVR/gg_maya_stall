@@ -456,6 +456,30 @@ func TestPlanRejectsAmbiguousVersionRequirements(t *testing.T) {
 `,
 			want: "Scenario cannot combine mayaVersion with requirements.maya",
 		},
+		{
+			name: "malformed Maya minimum",
+			requirement: `    requirements:
+      maya:
+        minimum: "banana"
+`,
+			want: "Maya minimum version must be numeric",
+		},
+		{
+			name: "malformed Python minimum",
+			requirement: `    requirements:
+      python:
+        minimum: "3.x"
+`,
+			want: "Python minimum version must be numeric",
+		},
+		{
+			name: "malformed Session Broker minimum",
+			requirement: `    requirements:
+      sessionBroker:
+        minimum: "v2"
+`,
+			want: "Session Broker minimum version must be numeric",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

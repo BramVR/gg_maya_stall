@@ -110,7 +110,7 @@ func appendUniqueCapability(values []string, required string) []string {
 
 func validateScenarioRequirements(scenario scenarioConfig) error {
 	if strings.TrimSpace(scenario.MayaVersion) != "" && (strings.TrimSpace(scenario.Requirements.Maya.Exact) != "" || strings.TrimSpace(scenario.Requirements.Maya.Minimum) != "") {
-		return fmt.Errorf("Scenario cannot combine mayaVersion with requirements.maya")
+		return fmt.Errorf("Scenario cannot combine mayaVersion with requirements.maya") //nolint:staticcheck // Scenario is a product term.
 	}
 	for _, requirement := range []struct {
 		name    string
@@ -122,6 +122,11 @@ func validateScenarioRequirements(scenario scenarioConfig) error {
 	} {
 		if strings.TrimSpace(requirement.version.Exact) != "" && strings.TrimSpace(requirement.version.Minimum) != "" {
 			return fmt.Errorf("%s requirement cannot set both exact and minimum", requirement.name)
+		}
+		if minimum := strings.TrimSpace(requirement.version.Minimum); minimum != "" {
+			if _, valid := numericVersionParts(minimum); !valid {
+				return fmt.Errorf("%s minimum version must be numeric", requirement.name)
+			}
 		}
 	}
 	return nil
@@ -173,14 +178,17 @@ func hostAgentCapabilityRecord(options hostAgentRunOnceOptions, now time.Time) (
 			if selected == nil {
 				selected = &host
 			} else if !reflect.DeepEqual(*selected, host) {
-				return mayaHostCapabilityRecord{}, fmt.Errorf("Maya Host %q has conflicting definitions in Target Profile Host Pools", options.HostID)
+				return mayaHostCapabilityRecord{}, fmt.Errorf("Maya Host %q has conflicting definitions in Target Profile Host Pools", options.HostID) //nolint:staticcheck // Product terms start the user-facing diagnostic.
 			}
 			profiles = append(profiles, profileName)
 			break
 		}
 	}
 	if selected == nil {
-		return mayaHostCapabilityRecord{}, fmt.Errorf("Maya Host %q is not in any Target Profile Host Pool", options.HostID)
+		return mayaHostCapabilityRecord{}, fmt.Errorf("Maya Host %q is not in any Target Profile Host Pool", options.HostID) //nolint:staticcheck // Product terms start the user-facing diagnostic.
+	}
+	if _, err := resolveLiveHostAgentRuntime(*selected); err != nil {
+		return mayaHostCapabilityRecord{}, fmt.Errorf("validate Windows Host Agent runtime for capability reporting: %w", err) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	sort.Strings(profiles)
 	report := configuredMayaHostCapabilityRecord(*selected, now)

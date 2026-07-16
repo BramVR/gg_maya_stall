@@ -103,6 +103,15 @@ hostPools:
     hosts:
       - id: maya-win-01
         health: healthy
+        transport: ssh
+        ssh:
+          host: maya-win-01
+        workRoot: C:/maya-stall
+        broker:
+          type: gg-mayasessiond
+          stateDir: C:/maya-stall/sessiond-ui
+          python: C:/maya-stall/sessiond-venv/Scripts/python.exe
+          repo: C:/maya-stall/GG_MayaSessiond
         capabilities:
           mayaBuilds: ["2025.3"]
           python: "3.11.9"
@@ -157,6 +166,28 @@ hostPools:
 	_, err := hostAgentCapabilityRecord(hostAgentRunOnceOptions{HostID: "maya-win-01", HostConfig: path}, time.Now())
 	if err == nil || !strings.Contains(err.Error(), "conflicting definitions") {
 		t.Fatalf("duplicate Host definition error = %v", err)
+	}
+}
+
+func TestHostAgentCapabilityRecordRejectsUnusableRuntimeConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/hosts.yaml"
+	if err := os.WriteFile(path, []byte(`version: 1
+targetProfiles:
+  ci:
+    hostPool: fake
+hostPools:
+  fake:
+    hosts:
+      - id: maya-win-01
+        health: healthy
+        mayaVersions: ["2025"]
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := hostAgentCapabilityRecord(hostAgentRunOnceOptions{HostID: "maya-win-01", HostConfig: path}, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "live-proof-eligible Maya Host") {
+		t.Fatalf("unusable Host runtime error = %v", err)
 	}
 }
 

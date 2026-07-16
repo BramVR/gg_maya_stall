@@ -179,7 +179,7 @@ func decodeHostAgentExtensionJSON(content []byte, target any) error {
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		if err == nil {
-			return errors.New("Host Agent response contains multiple JSON values")
+			return errors.New("Host Agent response contains multiple JSON values") //nolint:staticcheck // Host Agent is a product term.
 		}
 		return err
 	}
@@ -3572,14 +3572,22 @@ func resolveHostAgentHostConfig(options hostAgentRunOnceOptions, assignment host
 	if err != nil {
 		return "", runtimeMetadata{}, err
 	}
-	resolved, err := resolveRuntimeForHost(hosts[0])
+	resolved, err := resolveLiveHostAgentRuntime(hosts[0])
 	if err != nil {
 		return "", runtimeMetadata{}, err
 	}
-	if !resolved.Metadata.LiveProofEligible {
-		return "", runtimeMetadata{}, fmt.Errorf("Windows Host Agent --host-config must select a live-proof-eligible Maya Host; refusing fake fallback") //nolint:staticcheck // Product term starts the user-facing diagnostic.
-	}
 	return snapshotPath, resolved.Metadata, nil
+}
+
+func resolveLiveHostAgentRuntime(host mayaHostConfig) (resolvedRuntime, error) {
+	resolved, err := resolveRuntimeForHost(host)
+	if err != nil {
+		return resolvedRuntime{}, err
+	}
+	if !resolved.Metadata.LiveProofEligible {
+		return resolvedRuntime{}, fmt.Errorf("Windows Host Agent --host-config must select a live-proof-eligible Maya Host; refusing fake fallback") //nolint:staticcheck // Product term starts the user-facing diagnostic.
+	}
+	return resolved, nil
 }
 
 func buildHostAgentResultFiles(repoDir string, runID string) ([]controlPlaneFile, error) {

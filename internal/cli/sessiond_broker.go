@@ -149,10 +149,10 @@ func (broker ggMayaSessiondBroker) VerifyMayaBuild(context runContext, session b
 	}
 	localPath := tempFile.Name()
 	if err := tempFile.Close(); err != nil {
-		os.Remove(localPath)
+		_ = os.Remove(localPath)
 		return err
 	}
-	defer os.Remove(localPath)
+	defer func() { _ = os.Remove(localPath) }()
 	batch := newSFTPBatch()
 	batch.get(resultPath, localPath, false)
 	if err := runSFTPBatch(broker.host, batch.String()); err != nil {

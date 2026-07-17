@@ -42,6 +42,7 @@ func TestIneligibleCapabilityReportsNeverQualify(t *testing.T) {
 		mutate func(*mayaHostCapabilityRecord)
 		want   string
 	}{
+		{name: "legacy schema", mutate: func(report *mayaHostCapabilityRecord) { report.Version = 1 }, want: "capability record version is 1; required version is 2"},
 		{name: "incomplete", mutate: func(report *mayaHostCapabilityRecord) { report.Capabilities.GPU = nil }, want: "capability record is incomplete: missing GPU"},
 		{name: "offline", mutate: func(report *mayaHostCapabilityRecord) { report.Online = false }, want: "Maya Host is offline"},
 		{name: "unhealthy", mutate: func(report *mayaHostCapabilityRecord) { report.Health = "unhealthy" }, want: "Maya Host health is unhealthy"},
@@ -57,6 +58,19 @@ func TestIneligibleCapabilityReportsNeverQualify(t *testing.T) {
 				t.Fatalf("eligibility decision = %+v, want %q", decision, test.want)
 			}
 		})
+	}
+}
+
+func TestVersionTwoCapabilityRequiresEveryTargetProfileHostPool(t *testing.T) {
+	report := configuredMayaHostCapabilityRecord(mayaHostConfig{ID: "maya-win-01", Health: "healthy"}, time.Now())
+	report.TargetProfiles = []string{"default", "render"}
+	report.TargetProfileHostPools = map[string]string{"default": "windows-maya"}
+	if completeTargetProfileHostPoolMapping(report) {
+		t.Fatal("version 2 capability accepted an incomplete Host Pool mapping")
+	}
+	report.TargetProfileHostPools["render"] = "render-pool"
+	if !completeTargetProfileHostPoolMapping(report) {
+		t.Fatal("version 2 capability rejected a complete Host Pool mapping")
 	}
 }
 
@@ -138,7 +152,7 @@ hostPools:
 	if report.Version != mayaHostCapabilityRecordVersion || report.ReportedAt != "2026-07-16T12:00:00Z" || !report.Online || report.Health != "healthy" {
 		t.Fatalf("capability record identity = %+v", report)
 	}
-	if len(report.TargetProfiles) != 2 || report.TargetProfiles[0] != "ci" || report.TargetProfiles[1] != "render" || report.Capabilities.Python != "3.11.9" || report.Capabilities.TrustedPluginArtifacts == nil || !*report.Capabilities.TrustedPluginArtifacts {
+	if len(report.TargetProfiles) != 2 || report.TargetProfiles[0] != "ci" || report.TargetProfiles[1] != "render" || report.TargetProfileHostPools["ci"] != "windows" || report.TargetProfileHostPools["render"] != "windows" || report.Capabilities.Python != "3.11.9" || report.Capabilities.TrustedPluginArtifacts == nil || !*report.Capabilities.TrustedPluginArtifacts {
 		t.Fatalf("capability record content = %+v", report)
 	}
 }

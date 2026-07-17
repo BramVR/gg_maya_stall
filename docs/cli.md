@@ -52,7 +52,7 @@ maya-stall host-agent run-once --control-plane <url> --agent-id <id> --host <id>
 maya-stall attach <run-id> [control-plane flags] [--from-sequence <number>]
 maya-stall attach <run-id> screenshot
 maya-stall attach <run-id> control click --x <pixels> --y <pixels>
-maya-stall stop <run-id>
+maya-stall stop [--control-plane <https-url>] [--control-plane-token-env <name>] <run-id>
 ```
 
 Control Plane flags:

@@ -16,6 +16,17 @@ origin-only HTTPS Control Plane URL. Authentication defaults to the token in
 `MAYA_STALL_CONTROL_PLANE_TOKEN`; `--control-plane-token-env <name>` selects a
 different environment variable.
 
+Queued configured Runs report `state: queued`, a one-based `queuePosition`,
+`hostPool`, normalized `requiredCapabilities`, and either
+`awaiting-host-assignment`, `compatible-hosts-busy`, or
+`waiting-for-compatible-host`. Position is computed
+from the durable acceptance-time/Run-ID order. No Host or cleanup ownership is
+reported until assignment starts.
+
+A durable cancellation intent that needs retry reports `state: canceling`, no
+queue position, and `cleanupState: pending` until cancellation completes or a
+durable cleanup failure is recorded.
+
 Use it after `--keep-on-failure` or `--stop-after never` to find sessions that
 still hold Host Locks. Kept run status includes the resolved runtime profile,
 host adapter, broker adapter, live-proof eligibility, retention reason, local
@@ -26,7 +37,7 @@ then asks the Session Broker whether the retained Maya UI Session still exists.
 If the broker session disappeared or changed, status reports `state: stale`
 instead of pretending local state is enough.
 
-Completed and failed Run IDs remain queryable from the embedded Run Ledger
+Completed, canceled, and failed Run IDs remain queryable from the Run Ledger
 after transient state is cleaned and until configured ledger retention expires
 them. Their status includes Scenario, Target Profile, Maya Host, result status,
 acceptance time, and Evidence Bundle path.

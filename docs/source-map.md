@@ -67,6 +67,9 @@ descriptive; code is the source-backed check when behavior claims disagree.
   Run Ledger checkpoints, durable Host Lock and Maya UI Session fencing,
   fake/real execution, result transfer, and restart recovery:
   `internal/cli/host_agent.go`, `internal/cli/host_agent_test.go`
+- Durable compatible-Run queueing, FIFO scheduling, queue status, cancellation,
+  and restart recovery: `internal/cli/run_queue.go`,
+  `internal/cli/run_queue_test.go`
 - Protected shared-path real Maya proof:
   `internal/cli/live_shared_agent_smoke_test.go`
 

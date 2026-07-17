@@ -119,7 +119,14 @@ first and capped at 1,000 records with explicit truncation metadata.
 
 With no Agent enrollment, the server preserves the original in-process fake
 execution path. With an enrollment, a connected submitter may wait while the
-registered Agent finishes the assignment. During execution, the Agent sends
+registered Agent finishes the assignment. Compatible Runs wait durably when
+all matching Hosts are busy. The scheduler orders Runs by acceptance time then
+Run ID, orders Hosts by Host ID then Agent ID, reevaluates fresh compatibility
+and availability, and creates exactly one assignment and Host Lock per freed
+slot. Queue records recover after restart and are removed only after the
+assignment transition becomes durable. At most 1,000 Runs may wait; another
+submission receives HTTP `429` before Run acceptance and leaves no Run state.
+During execution, the Agent sends
 bounded token-, session-, and Host-Lock-fenced Run Ledger checkpoints so a
 later client can observe the same event identities before terminal transfer.
 Registered Agent runs require
@@ -128,7 +135,12 @@ assignment is created. Real execution requires an Agent-local Host config;
 submitting clients cannot send Host config or silently fall back to
 embedded/direct-SSH ownership.
 
+Queued Runs expose position and wait metadata through status and retain the
+same bounded ordered event identity through Agent execution. Authenticated
+`stop --control-plane` cancels a queued Run without Host mutation; cancellation
+is rejected once dispatch begins.
+
 Completed Run IDs remain readable through history, events, logs, result,
 Evidence metadata, and cleanup state. Active Evidence is unavailable until its
-bundle is durable. Configured attach is observational; configured stop and
+bundle is durable. Configured attach is observational; assigned-run stop and
 run-scoped desktop mutations remain later capabilities.

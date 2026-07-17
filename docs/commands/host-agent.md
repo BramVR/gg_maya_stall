@@ -22,6 +22,10 @@ credential must contain at least 32 bytes and comes only from
 `--credential-env`; the value is never a command argument or Repo Run Config
 field. The Control Plane URL must be an origin-only HTTPS URL.
 
+Capability reports include each advertised Target Profile's Host Pool mapping.
+The Control Plane persists that identity with queued Runs so public queue status
+does not confuse a Target Profile name with its Host Pool.
+
 `--work-root` must be a private Agent-owned directory. On POSIX systems the CLI
 enforces `0700` or stricter permissions. On Windows it replaces inherited ACLs
 with full control for the current owner, SYSTEM, and Administrators, then
@@ -39,17 +43,17 @@ ASCII letters, digits, and interior hyphens, excluding Windows reserved device
 names. This prevents case, trailing-dot, and device-name aliases from sharing a
 state path on Windows.
 
-At registration the Agent reports a version 1 capability record for its fixed
+At registration the Agent reports a version 2 capability record for its fixed
 Maya Host. The record includes a timestamp, Target Profile membership,
 online/health/maintenance/quarantine state, Maya builds, the build started by
 the fixed Session Broker launcher, Python, Session Broker version/features,
 capture/control, renderer, GPU, display, licensing, and
 trusted Plugin Artifact support. Each heartbeat rebuilds and refreshes the
 record from the Agent-local Host config. An omitted category is incomplete;
-an explicitly empty feature list reports no support. The optional capability
-extension is omitted from legacy version 1 responses, allowing an assignment
-already in flight during a rolling upgrade to finish. An older Agent without a
-capability report never qualifies for new work. Reusing one Maya Host id across
+an explicitly empty feature list reports no support. Version 2 requires the
+Target Profile-to-Host Pool mapping; version 1 registration and heartbeat
+reports are rejected before status mutation, so Agent and Control Plane
+upgrades must be coordinated. Reusing one Maya Host id across
 Target Profiles requires identical Host definitions; conflicting definitions
 are rejected rather than merged nondeterministically.
 

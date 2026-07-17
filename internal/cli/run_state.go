@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,12 @@ import (
 type statusOptions struct {
 	RunID                string
 	JSON                 bool
+	ControlPlane         string
+	ControlPlaneTokenEnv string
+}
+
+type stopOptions struct {
+	RunID                string
 	ControlPlane         string
 	ControlPlaneTokenEnv string
 }
@@ -69,6 +76,61 @@ func parseRunIDArg(command string, args []string) (string, error) {
 		return "", err
 	}
 	return args[0], nil
+}
+
+func parseStopArgs(args []string) (stopOptions, error) {
+	var options stopOptions
+	for index := 0; index < len(args); index++ {
+		switch args[index] {
+		case "--control-plane":
+			index++
+			if index >= len(args) || args[index] == "" || strings.HasPrefix(args[index], "--") {
+				return stopOptions{}, newUsageError("--control-plane needs an HTTPS URL")
+			}
+			options.ControlPlane = args[index]
+		case "--control-plane-token-env":
+			index++
+			if index >= len(args) || args[index] == "" || strings.HasPrefix(args[index], "--") {
+				return stopOptions{}, newUsageError("--control-plane-token-env needs an environment variable name")
+			}
+			options.ControlPlaneTokenEnv = args[index]
+		default:
+			if options.RunID != "" {
+				return stopOptions{}, newUsageError("stop needs one run id")
+			}
+			if err := validateRunID(args[index]); err != nil {
+				return stopOptions{}, err
+			}
+			options.RunID = args[index]
+		}
+	}
+	if options.RunID == "" {
+		return stopOptions{}, newUsageError("stop needs one run id")
+	}
+	if options.ControlPlane == "" && options.ControlPlaneTokenEnv != "" {
+		return stopOptions{}, newUsageError("--control-plane-token-env requires --control-plane")
+	}
+	return options, nil
+}
+
+func stopRunThroughMode(repoDir string, options stopOptions, runtime runRuntime) error {
+	if options.ControlPlane != "" {
+		var status controlPlaneStatusResponse
+		if err := postControlPlaneJSON(options.ControlPlane, options.ControlPlaneTokenEnv, "/v1/runs/"+options.RunID+"/cancel", struct {
+			Version int `json:"version"`
+		}{Version: controlPlaneAPIVersion}, runtime, http.StatusOK, &status); err != nil {
+			return err
+		}
+		if status.Version != controlPlaneAPIVersion || status.Kind != "status" || status.RunID != options.RunID || status.State != "canceled" {
+			return errors.New("Control Plane did not confirm queued Run cancellation") //nolint:staticcheck // Product terms preserve the user-facing diagnostic.
+		}
+		return nil
+	}
+	now := time.Now
+	if runtime.Now != nil {
+		now = runtime.Now
+	}
+	return stopRun(repoDir, options.RunID, now)
 }
 
 func validateRunID(runID string) error {

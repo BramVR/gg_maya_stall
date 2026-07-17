@@ -38,12 +38,17 @@ its connection stays open. Once accepted, however, the Control Plane owns the
 run independently of that connection. A later authenticated client can attach
 by Run ID and inclusive event sequence while an in-process fake or registered
 Windows Host Agent Scenario is running. Configured stop and run-scoped desktop
-mutations are not exposed.
+mutations remain unavailable after assignment; `stop --control-plane` can
+cancel a Run while it is still queued.
 
 When registered Agents exist, the Control Plane matches the normalized Scenario
 requirements against fresh Agent capability reports before assignment, Host
 Lock acquisition, or Agent-side payload staging. A no-compatible-Host result is
-a durable `host-selection` failure that explains every candidate mismatch.
+a durable `host-selection` failure that explains every candidate mismatch. If
+at least one Host is compatible but all compatible Hosts are busy, the Run
+enters the durable queue instead. Queue order is acceptance time then Run ID;
+status exposes its current position, Host Pool, wait reason, and required
+capabilities. Compatibility is rechecked before every assignment.
 
 ## Behavior
 
@@ -58,7 +63,8 @@ state.
 Every accepted Run ID also receives a durable Run Ledger record before Scenario
 execution. Embedded Mode stores it in the checkout; Configured Control Plane
 Mode stores it in the server-owned run workspace. The record survives transient Run State cleanup and
-is updated to `completed`, `failed`, `kept`, or `cleanup-failed` with bounded
+is updated to `queued`, `canceled`, `completed`, `failed`, `kept`, or
+`cleanup-failed` with bounded
 ordered events and retained logs.
 
 Live and historical configured reads use the same durable event sequence as

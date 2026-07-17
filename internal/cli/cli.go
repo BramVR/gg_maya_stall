@@ -411,16 +411,12 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 		}
 		return 0
 	case "stop":
-		runID, err := parseRunIDArg("stop", args[1:])
+		options, err := parseStopArgs(args[1:])
 		if err != nil {
 			fmt.Fprintf(stderr, "maya-stall stop: %v\n", err)
 			return 2
 		}
-		now := time.Now
-		if runtime.Now != nil {
-			now = runtime.Now
-		}
-		if err := stopRun(workDir, runID, now); err != nil {
+		if err := stopRunThroughMode(workDir, options, runtime); err != nil {
 			var userErr *usageError
 			if errors.As(err, &userErr) {
 				fmt.Fprintf(stderr, "maya-stall stop: %v\n", err)
@@ -429,7 +425,7 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 			fmt.Fprintf(stderr, "maya-stall stop: %v\n", err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "stopped: %s\n", runID)
+		fmt.Fprintf(stdout, "stopped: %s\n", options.RunID)
 		return 0
 	default:
 		fmt.Fprintf(stderr, "maya-stall: unknown command %q\n\n", args[0])
@@ -588,7 +584,7 @@ Usage:
   maya-stall attach <run-id> [--control-plane <https-url>] [--control-plane-token-env <name>] [--from-sequence <number>]
   maya-stall attach <run-id> screenshot
   maya-stall attach <run-id> control click --x <pixels> --y <pixels>
-  maya-stall stop <run-id>
+  maya-stall stop [--control-plane <https-url>] [--control-plane-token-env <name>] <run-id>
 
 Commands:
   attach   observe a run or perform run-scoped screenshot/control
@@ -627,6 +623,7 @@ type runOptions struct {
 	ControlPlaneTokenEnv string
 	AssignedRunID        string
 	AssignedMayaBuild    string
+	AssignedEventPrefix  []byte
 	HostOptionsSet       bool
 	SharedFakeWorkRoot   string
 }

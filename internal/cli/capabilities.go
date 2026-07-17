@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const mayaHostCapabilityRecordVersion = 1
+const mayaHostCapabilityRecordVersion = 2
 const mayaHostCapabilityFreshness = time.Minute
 
 // Small forward skew keeps healthy Agents eligible without allowing them to extend freshness materially.
@@ -59,20 +59,33 @@ type mayaHostCapabilities struct {
 }
 
 type mayaHostCapabilityRecord struct {
-	Version        int                  `json:"version"`
-	ReportedAt     string               `json:"reportedAt"`
-	Online         bool                 `json:"online"`
-	Health         string               `json:"health"`
-	Maintenance    bool                 `json:"maintenance"`
-	Quarantined    bool                 `json:"quarantined"`
-	TargetProfiles []string             `json:"targetProfiles"`
-	Capabilities   mayaHostCapabilities `json:"capabilities"`
+	Version                int                  `json:"version"`
+	ReportedAt             string               `json:"reportedAt"`
+	Online                 bool                 `json:"online"`
+	Health                 string               `json:"health"`
+	Maintenance            bool                 `json:"maintenance"`
+	Quarantined            bool                 `json:"quarantined"`
+	TargetProfiles         []string             `json:"targetProfiles"`
+	TargetProfileHostPools map[string]string    `json:"targetProfileHostPools,omitempty"`
+	Capabilities           mayaHostCapabilities `json:"capabilities"`
 }
 
 type hostCompatibilityDecision struct {
 	Compatible        bool
 	Reasons           []string
 	SelectedMayaBuild string
+}
+
+func completeTargetProfileHostPoolMapping(report mayaHostCapabilityRecord) bool {
+	if len(report.TargetProfiles) == 0 {
+		return false
+	}
+	for _, profile := range report.TargetProfiles {
+		if strings.TrimSpace(profile) == "" || strings.TrimSpace(report.TargetProfileHostPools[profile]) == "" {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizedScenarioRequirements(scenario scenarioConfig) scenarioRequirements {
@@ -151,6 +164,7 @@ func hostAgentCapabilityRecord(options hostAgentRunOnceOptions, now time.Time) (
 	if options.HostConfig == "" {
 		report := configuredMayaHostCapabilityRecord(mayaHostConfig{ID: options.HostID, Health: "healthy"}, now)
 		report.TargetProfiles = []string{"default"}
+		report.TargetProfileHostPools = map[string]string{"default": "default"}
 		return report, nil
 	}
 	config, err := loadUserHostConfig(options.HostConfig)
@@ -159,6 +173,7 @@ func hostAgentCapabilityRecord(options hostAgentRunOnceOptions, now time.Time) (
 	}
 	var selected *mayaHostConfig
 	profiles := make([]string, 0)
+	profileHostPools := make(map[string]string)
 	profileNames := make([]string, 0, len(config.TargetProfiles))
 	for profileName := range config.TargetProfiles {
 		profileNames = append(profileNames, profileName)
@@ -181,6 +196,7 @@ func hostAgentCapabilityRecord(options hostAgentRunOnceOptions, now time.Time) (
 				return mayaHostCapabilityRecord{}, fmt.Errorf("Maya Host %q has conflicting definitions in Target Profile Host Pools", options.HostID) //nolint:staticcheck // Product terms start the user-facing diagnostic.
 			}
 			profiles = append(profiles, profileName)
+			profileHostPools[profileName] = profile.HostPool
 			break
 		}
 	}
@@ -193,6 +209,7 @@ func hostAgentCapabilityRecord(options hostAgentRunOnceOptions, now time.Time) (
 	sort.Strings(profiles)
 	report := configuredMayaHostCapabilityRecord(*selected, now)
 	report.TargetProfiles = profiles
+	report.TargetProfileHostPools = profileHostPools
 	return report, nil
 }
 
@@ -215,6 +232,12 @@ func configuredMayaHostCapabilityRecord(host mayaHostConfig, now time.Time) maya
 func snapshotMayaHostCapabilityRecord(report mayaHostCapabilityRecord) mayaHostCapabilityRecord {
 	snapshot := report
 	snapshot.TargetProfiles = append([]string(nil), report.TargetProfiles...)
+	if report.TargetProfileHostPools != nil {
+		snapshot.TargetProfileHostPools = make(map[string]string, len(report.TargetProfileHostPools))
+		for profile, pool := range report.TargetProfileHostPools {
+			snapshot.TargetProfileHostPools[profile] = pool
+		}
+	}
 	snapshot.Capabilities.MayaBuilds = append([]string(nil), report.Capabilities.MayaBuilds...)
 	snapshot.Capabilities.SessionBroker.Features = append([]string(nil), report.Capabilities.SessionBroker.Features...)
 	snapshot.Capabilities.Capture = append([]string(nil), report.Capabilities.Capture...)

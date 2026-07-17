@@ -30,6 +30,9 @@ Scenario through one registered Windows Host Agent over an outbound
 authenticated connection. Agents publish fresh versioned Host capability
 records so planning and Control Plane scheduling can apply the same exact or
 minimum version and required-feature compatibility decision before assignment.
+Compatible Runs wait in a durable FIFO queue while matching Hosts are busy;
+status exposes queue position, and operators can cancel before assignment
+without touching a Host Lock.
 
 ## Who Maya Stall Is For
 

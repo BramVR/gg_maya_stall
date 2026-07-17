@@ -256,6 +256,13 @@ func TestRunCompletesFakeScenarioThroughRegisteredWindowsHostAgent(t *testing.T)
 	if !result.Final || !result.Success || result.CleanupState != "completed" {
 		t.Fatalf("Host Agent result = %+v", result)
 	}
+	var events controlPlaneEventsResponse
+	if err := getControlPlaneJSON(server.URL, "", "/v1/runs/"+runID+"/events", runtime, &events); err != nil {
+		t.Fatalf("read immediate Host Agent events: %v", err)
+	}
+	if len(events.Events) < 2 || events.Events[1]["type"] != "run.queued" || events.Events[1]["detail"] != "awaiting-host-assignment" {
+		t.Fatalf("immediate Host Agent queue event = %+v", events.Events)
+	}
 	serverRepo := filepath.Join(dataDir, "runs", runID, "repo")
 	if _, err := os.Stat(filepath.Join(serverRepo, ".maya-stall", "state", "ledger", "runs", runID, "run.json")); err != nil {
 		t.Fatalf("transferred Run Ledger: %v", err)
@@ -1711,6 +1718,7 @@ func TestStaleCapabilityReportNeverReceivesAssignment(t *testing.T) {
 	enrollTestHostAgent(t, repoDir, server.URL, runtime)
 	report := configuredMayaHostCapabilityRecord(mayaHostConfig{ID: "maya-win-01", Health: "healthy"}, now.Add(-mayaHostCapabilityFreshness-time.Second))
 	report.TargetProfiles = []string{"default"}
+	report.TargetProfileHostPools = map[string]string{"default": "default"}
 	registration := hostAgentRegistrationRequest{
 		Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01", Slots: 1, SessionBinding: true,
 		Capabilities: report,
@@ -1734,7 +1742,7 @@ func TestStaleCapabilityReportNeverReceivesAssignment(t *testing.T) {
 	}
 }
 
-func TestSharedFakeHostLockBlocksAgentAssignment(t *testing.T) {
+func TestSharedFakeHostLockQueuesCompatibleRunWithoutAgentAssignment(t *testing.T) {
 	repoDir := writeRunConfigFixture(t)
 	dataDir := privateTempDir(t)
 	handler, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime())
@@ -1758,14 +1766,25 @@ func TestSharedFakeHostLockBlocksAgentAssignment(t *testing.T) {
 		t.Fatalf("acquire shared fake Host Lock fixture: locked=%t err=%v", locked, err)
 	}
 	defer func() { _ = release() }()
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	if code := RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &stdout, &stderr, repoDir, "test-version", runtime); code != 1 {
-		t.Fatalf("shared-lock Agent Scenario exit code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
-	}
+	done := make(chan int, 1)
+	go func() {
+		done <- RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, io.Discard, io.Discard, repoDir, "test-version", runtime)
+	}()
+	queuedRunID := waitForQueuedRunID(t, handler.(*controlPlaneHandler))
 	status = readHostAgentStatus(t, server.Client(), server.URL, "windows-agent-01")
 	if status.State != "ready" || status.RunID != "" {
 		t.Fatalf("Host Agent selected despite shared fake Host Lock: %+v", status)
+	}
+	if _, err := handler.(*controlPlaneHandler).cancelQueuedRun(queuedRunID); err != nil {
+		t.Fatalf("cancel shared-lock queued Run: %v", err)
+	}
+	select {
+	case code := <-done:
+		if code != 1 {
+			t.Fatalf("canceled shared-lock Run exit code = %d", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled shared-lock Run did not finish")
 	}
 }
 
@@ -1796,7 +1815,7 @@ func TestLegacyHostAgentWithoutSessionBindingDoesNotReceiveNewAssignment(t *test
 	}
 }
 
-func TestHostAgentAcceptanceReportingFailureFinalizesRun(t *testing.T) {
+func TestHostAgentAcceptanceReportingFailureDoesNotOrphanQueue(t *testing.T) {
 	repoDir := writeRunConfigFixture(t)
 	dataDir := privateTempDir(t)
 	runtime := defaultRunRuntime()
@@ -1809,35 +1828,70 @@ func TestHostAgentAcceptanceReportingFailureFinalizesRun(t *testing.T) {
 		enrollment: hostAgentEnrollmentRecord{Version: hostAgentAPIVersion, AgentID: "windows-agent-01", HostID: "maya-win-01"},
 		status: hostAgentStatusResponse{
 			Version: hostAgentAPIVersion, Kind: "host-agent-status", AgentID: "windows-agent-01", HostID: "maya-win-01",
-			Slots: 1, State: "ready", SessionID: strings.Repeat("a", 32), SessionBinding: true,
+			Slots: 1, State: "locked", RunID: "existing-run", SessionID: strings.Repeat("a", 32), SessionBinding: true,
 			Capabilities: testHostAgentCapabilityRecord("maya-win-01", runtime.Now()),
 		},
 		notify: make(chan struct{}), sessionExpiresAt: time.Now().Add(time.Minute),
 	}
-	runtime.AcceptedCheck = func() error { return errors.New("acceptance stream failed") }
-	outcome, runErr := handler.runScenarioThroughHostAgent(repoDir, controlPlaneSubmission{
-		Version: controlPlaneAPIVersion, Scenario: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways,
-	}, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime)
-	if runErr == nil || outcome.Result.Status != resultStatusFailed {
-		t.Fatalf("acceptance failure outcome = %+v, error = %v", outcome, runErr)
+	checked := make(chan struct{})
+	runtime.AcceptedCheck = func() error {
+		close(checked)
+		return errors.New("acceptance stream failed")
 	}
-	record, err := readRunLedgerRecord(repoDir, outcome.RunID)
+	type result struct {
+		outcome runOutcome
+		err     error
+	}
+	done := make(chan result, 1)
+	runID := "20260715T120000.000000000Z"
+	go func() {
+		outcome, runErr := handler.runScenarioThroughHostAgent(repoDir, controlPlaneSubmission{
+			Version: controlPlaneAPIVersion, Scenario: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways,
+		}, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways, AssignedRunID: runID}, runtime)
+		done <- result{outcome: outcome, err: runErr}
+	}()
+	if queuedRunID := waitForQueuedRunID(t, handler); queuedRunID != runID {
+		t.Fatalf("queued Run ID = %s, want %s", queuedRunID, runID)
+	}
+	<-checked
+	record, err := readRunLedgerRecord(repoDir, runID)
 	if err != nil {
 		t.Fatalf("read acceptance failure ledger: %v", err)
 	}
-	if record.State != "failed" || record.Status != resultStatusFailed {
+	if record.State != "queued" || record.Status != "" {
 		t.Fatalf("acceptance failure ledger = %+v", record)
 	}
 	agent := handler.hostAgents["windows-agent-01"]
-	if agent.status.State != "quarantined" || agent.status.RunID != outcome.RunID || handler.assignments[outcome.RunID] == nil {
+	if agent.status.State != "locked" || agent.status.RunID != "existing-run" || handler.assignments[runID] != nil {
 		t.Fatalf("Host Agent after acceptance failure = %+v", agent.status)
+	}
+	handler.mu.Lock()
+	queued := handler.queuedRuns[runID]
+	delete(handler.queuedRuns, runID)
+	close(queued.done)
+	handler.mu.Unlock()
+	finished := <-done
+	if !errors.Is(finished.err, errQueuedRunCanceled) {
+		t.Fatalf("stopped acceptance-failure queue error = %v", finished.err)
 	}
 }
 
-func TestHostAgentLeaseExpiryDuringAcceptanceRejectsAssignment(t *testing.T) {
-	repoDir := writeRunConfigFixture(t)
+func TestHostAgentLeaseExpiryAfterAcceptanceKeepsRunQueued(t *testing.T) {
+	fixtureRepo := writeRunConfigFixture(t)
 	dataDir := privateTempDir(t)
 	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	runID := now.Format("20060102T150405.000000000Z")
+	repoDir := filepath.Join(dataDir, "runs", runID, "repo")
+	if err := os.MkdirAll(repoDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config, err := os.ReadFile(filepath.Join(fixtureRepo, ".maya-stall.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, ".maya-stall.yaml"), config, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	runtime := defaultRunRuntime()
 	runtime.Now = func() time.Time { return now }
 	handlerValue, err := newControlPlaneHandler(dataDir, "operator-token", runtime)
@@ -1855,14 +1909,32 @@ func TestHostAgentLeaseExpiryDuringAcceptanceRejectsAssignment(t *testing.T) {
 		notify: make(chan struct{}), sessionExpiresAt: now.Add(hostAgentSessionLease),
 	}
 	runtime.Accepted = func(runOutcome) { now = now.Add(hostAgentSessionLease) }
-	outcome, runErr := handler.runScenarioThroughHostAgent(repoDir, controlPlaneSubmission{
-		Version: controlPlaneAPIVersion, Scenario: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways,
-	}, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime)
-	if runErr == nil || !strings.Contains(runErr.Error(), "lease expired during acceptance") || outcome.Result.Status != resultStatusFailed {
-		t.Fatalf("expired reservation outcome = %+v, error = %v", outcome, runErr)
+	type result struct {
+		outcome runOutcome
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		outcome, runErr := handler.runScenarioThroughHostAgent(repoDir, controlPlaneSubmission{
+			Version: controlPlaneAPIVersion, Scenario: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways,
+		}, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways, AssignedRunID: runID}, runtime)
+		done <- result{outcome: outcome, err: runErr}
+	}()
+	runID = waitForQueuedRunID(t, handler)
+	status := controlPlaneStatusResponse{RunID: runID}
+	handler.addControlPlaneQueueStatus(&status)
+	if status.WaitReason != "waiting-for-compatible-host" || status.QueuePosition != 1 {
+		t.Fatalf("expired Agent queue status = %+v", status)
+	}
+	if _, err := handler.cancelQueuedRun(runID); err != nil {
+		t.Fatalf("cancel queued Run after lease expiry: %v", err)
+	}
+	finished := <-done
+	if !errors.Is(finished.err, errQueuedRunCanceled) || finished.outcome.Result.Status != resultStatusFailed {
+		t.Fatalf("canceled expired-agent outcome = %+v, error = %v", finished.outcome, finished.err)
 	}
 	agent := handler.hostAgents["windows-agent-01"]
-	if agent.status.State != "quarantined" || agent.status.RunID != outcome.RunID || agent.status.SessionID != "" || len(handler.assignments) != 1 {
+	if agent.status.State != "offline" || agent.status.RunID != "" || agent.status.SessionID != "" || len(handler.assignments) != 0 {
 		t.Fatalf("Host Agent after expired reservation = %+v assignments=%d", agent.status, len(handler.assignments))
 	}
 }
@@ -1914,7 +1986,7 @@ scenarios:
 	}
 	outcome, runErr := handler.runScenarioThroughHostAgent(repoDir, controlPlaneSubmission{
 		Version: controlPlaneAPIVersion, Scenario: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways,
-	}, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways}, runtime)
+	}, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways, AssignedRunID: runID}, runtime)
 	if runErr == nil || !strings.Contains(runErr.Error(), "slot quarantined") || outcome.Result.Status != resultStatusFailed {
 		t.Fatalf("partial transition outcome = %+v, error = %v", outcome, runErr)
 	}
@@ -2360,6 +2432,7 @@ func TestStaleHostLockTokenIsRejectedWithoutMutation(t *testing.T) {
 		t.Fatalf("read confirmed assignment: %v", err)
 	}
 	staleSession := strings.Repeat("9", len(status.SessionID))
+	staleHeartbeat := hostAgentHeartbeatRequest{Version: hostAgentAPIVersion, SessionID: staleSession, Capabilities: status.Capabilities}
 	requests := []struct {
 		name       string
 		path       string
@@ -2368,7 +2441,7 @@ func TestStaleHostLockTokenIsRejectedWithoutMutation(t *testing.T) {
 		want       int
 	}{
 		{"heartbeat-wrong-credential", "/v1/host-agents/windows-agent-01/heartbeat", hostAgentNextRequest{Version: hostAgentAPIVersion, SessionID: status.SessionID}, "wrong", http.StatusUnauthorized},
-		{"heartbeat-stale-session", "/v1/host-agents/windows-agent-01/heartbeat", hostAgentNextRequest{Version: hostAgentAPIVersion, SessionID: staleSession}, testHostAgentCredential, http.StatusConflict},
+		{"heartbeat-stale-session", "/v1/host-agents/windows-agent-01/heartbeat", staleHeartbeat, testHostAgentCredential, http.StatusConflict},
 		{"next-wrong-credential", "/v1/host-agents/windows-agent-01/assignments/next", hostAgentNextRequest{Version: hostAgentAPIVersion, SessionID: status.SessionID}, "wrong", http.StatusUnauthorized},
 		{"next-stale-session", "/v1/host-agents/windows-agent-01/assignments/next", hostAgentNextRequest{Version: hostAgentAPIVersion, SessionID: staleSession}, testHostAgentCredential, http.StatusConflict},
 		{"bind-wrong-credential", "/v1/host-agents/windows-agent-01/assignments/" + assignment.RunID + "/session", hostAgentSessionRequest{Version: hostAgentAPIVersion, RunID: assignment.RunID, LockToken: assignment.LockToken, SessionID: status.SessionID, BrokerSession: brokerSessionIdentity{BrokerAdapter: "gg-mayasessiond", SessionID: "maya-session-01"}}, "wrong", http.StatusUnauthorized},
@@ -2436,7 +2509,7 @@ func TestStaleHostLockTokenIsRejectedWithoutMutation(t *testing.T) {
 	}
 }
 
-func TestSecondAssignmentToSameMayaHostIsRejectedWithoutMutation(t *testing.T) {
+func TestSecondAssignmentToSameMayaHostQueuesWithoutMutation(t *testing.T) {
 	repoDir := writeRunConfigFixture(t)
 	dataDir := privateTempDir(t)
 	agentWorkRoot := privateTempDir(t)
@@ -2478,14 +2551,11 @@ func TestSecondAssignmentToSameMayaHostIsRejectedWithoutMutation(t *testing.T) {
 
 	var secondStdout bytes.Buffer
 	var secondStderr bytes.Buffer
-	secondCode := RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &secondStdout, &secondStderr, repoDir, "test-version", runtime)
-	if secondCode != 1 {
-		t.Fatalf("second assignment exit code = %d, want 1; stdout: %s stderr: %s", secondCode, secondStdout.String(), secondStderr.String())
-	}
-	second := decodeRunJSONLines(t, secondStdout.Bytes())
-	if len(second) != 2 || second[1].FailedLayer != string(failureLayerHostSelection) {
-		t.Fatalf("second assignment result = %+v, want host-selection failure", second)
-	}
+	secondDone := make(chan int, 1)
+	go func() {
+		secondDone <- RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, &secondStdout, &secondStderr, repoDir, "test-version", runtime)
+	}()
+	queuedRunID := waitForQueuedRunID(t, handler.(*controlPlaneHandler))
 	lockAfter, err := os.ReadFile(lockPath)
 	if err != nil {
 		t.Fatalf("read first Host Lock after contention: %v", err)
@@ -2500,6 +2570,17 @@ func TestSecondAssignmentToSameMayaHostIsRejectedWithoutMutation(t *testing.T) {
 	stillLocked := readHostAgentStatus(t, server.Client(), server.URL, "windows-agent-01")
 	if stillLocked.State != "locked" || stillLocked.RunID != locked.RunID {
 		t.Fatalf("Host Agent after second assignment = %+v, want first lock unchanged", stillLocked)
+	}
+	if _, err := handler.(*controlPlaneHandler).cancelQueuedRun(queuedRunID); err != nil {
+		t.Fatalf("cancel second queued Run: %v", err)
+	}
+	select {
+	case code := <-secondDone:
+		if code != 1 {
+			t.Fatalf("canceled second Run exit code = %d; stdout: %s stderr: %s", code, secondStdout.String(), secondStderr.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled second Run did not finish")
 	}
 	simulateHostAgentProcessExit(t, handler, "windows-agent-01")
 
@@ -2526,6 +2607,101 @@ func TestSecondAssignmentToSameMayaHostIsRejectedWithoutMutation(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Control Plane did not finish first assignment")
+	}
+}
+
+func TestCompatibleRunWaitsInDurableQueueWhileHostIsBusy(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	dataDir := privateTempDir(t)
+	agentWorkRoot := privateTempDir(t)
+	handler, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime())
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv(defaultControlPlaneTokenEnv, "operator-token")
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	runtime := defaultRunRuntime()
+	runtime.ControlPlaneHTTPClient = server.Client()
+	enrollTestHostAgent(t, repoDir, server.URL, runtime)
+	registration := testHostAgentRegistration("windows-agent-01", "maya-win-01", runtime.Now())
+	var registered hostAgentStatusResponse
+	if err := postControlPlaneJSON(server.URL, "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", "/v1/host-agents/windows-agent-01/register", registration, runtime, http.StatusOK, &registered); err != nil {
+		t.Fatalf("register Windows Host Agent: %v", err)
+	}
+
+	firstDone := make(chan int, 1)
+	go func() {
+		firstDone <- RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, io.Discard, io.Discard, repoDir, "test-version", runtime)
+	}()
+	waitForHostAgentState(t, server.Client(), server.URL, "windows-agent-01", "locked")
+
+	secondDone := make(chan int, 1)
+	go func() {
+		secondDone <- RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, io.Discard, io.Discard, repoDir, "test-version", runtime)
+	}()
+
+	var queuedRunID string
+	queuedObserved := false
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		concrete := handler.(*controlPlaneHandler)
+		concrete.mu.Lock()
+		for runID := range concrete.queuedRuns {
+			queuedRunID = runID
+		}
+		concrete.mu.Unlock()
+		if queuedRunID != "" {
+			var status map[string]any
+			if err := getControlPlaneJSON(server.URL, "", "/v1/runs/"+queuedRunID+"/status", runtime, &status); err == nil && status["state"] == "queued" {
+				if status["queuePosition"] != float64(1) || status["waitReason"] != "compatible-hosts-busy" || status["hostPool"] != "default" {
+					t.Fatalf("queued status = %+v", status)
+				}
+				if host, ok := status["host"]; ok && host != "" {
+					t.Fatalf("queued Run acquired Host %v", host)
+				}
+				if requirements, ok := status["requiredCapabilities"].(map[string]any); !ok || len(requirements) == 0 {
+					t.Fatalf("queued requirements = %#v", status["requiredCapabilities"])
+				}
+				select {
+				case code := <-secondDone:
+					t.Fatalf("queued Run returned early with exit code %d", code)
+				default:
+				}
+				queuedObserved = true
+				break
+			}
+		}
+		if queuedObserved {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !queuedObserved {
+		t.Fatalf("compatible Run %q never entered durable queue", queuedRunID)
+	}
+
+	simulateHostAgentProcessExit(t, handler, "windows-agent-01")
+	for index := 0; index < 2; index++ {
+		var agentStderr bytes.Buffer
+		if code := RunWithRuntime([]string{
+			"host-agent", "run-once", "--control-plane", server.URL,
+			"--agent-id", "windows-agent-01", "--host", "maya-win-01",
+			"--work-root", agentWorkRoot, "--credential-env", "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL",
+		}, io.Discard, &agentStderr, repoDir, "test-version", runtime); code != 0 {
+			t.Fatalf("Windows Host Agent run %d exit code = %d; stderr: %s", index+1, code, agentStderr.String())
+		}
+	}
+	for name, done := range map[string]<-chan int{"first": firstDone, "queued": secondDone} {
+		select {
+		case code := <-done:
+			if code != 0 {
+				t.Fatalf("%s Scenario exit code = %d", name, code)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s Scenario did not finish", name)
+		}
 	}
 }
 
@@ -2621,6 +2797,7 @@ func testHostAgentCapabilityRecord(hostID string, now time.Time) mayaHostCapabil
 	report := configuredMayaHostCapabilityRecord(mayaHostConfig{ID: hostID, Health: "healthy"}, now)
 	report.Capabilities.SessionMayaBuild = report.Capabilities.MayaBuilds[0]
 	report.TargetProfiles = []string{"default"}
+	report.TargetProfileHostPools = map[string]string{"default": "default"}
 	return report
 }
 

@@ -584,6 +584,11 @@ func (run *freshRunLifecycle) accept() error {
 	if err := appendEvent(run.context.EventsPath, "run.accepted", run.options.ScenarioName); err != nil {
 		return err
 	}
+	if len(run.options.AssignedEventPrefix) > 0 {
+		if err := installAssignedEventPrefix(run.context.EventsPath, run.options.AssignedEventPrefix); err != nil {
+			return err
+		}
+	}
 	if err := initializeRunLedger(run.repoDir, run.manifest, run.acceptedAt, run.context.EventsPath); err != nil {
 		return errors.Join(fmt.Errorf("initialize embedded run ledger: %w", err), cleanupRunLedgerRecord(run.repoDir, run.manifest.RunID))
 	}

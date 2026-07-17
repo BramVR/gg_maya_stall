@@ -109,6 +109,7 @@ type hostAgentAssignmentResponse struct {
 	HostID            string                   `json:"hostId"`
 	LockToken         string                   `json:"lockToken"`
 	Submission        controlPlaneSubmission   `json:"submission"`
+	EventPrefix       []byte                   `json:"eventPrefix,omitempty"`
 	Capabilities      mayaHostCapabilityRecord `json:"-"`
 	SelectedMayaBuild string                   `json:"selectedMayaBuild,omitempty"`
 }
@@ -251,6 +252,7 @@ type hostAgentAssignmentRecord struct {
 	State                  string                   `json:"state"`
 	CreatedAt              string                   `json:"createdAt"`
 	Submission             controlPlaneSubmission   `json:"submission"`
+	EventPrefix            []byte                   `json:"eventPrefix,omitempty"`
 	Capabilities           mayaHostCapabilityRecord `json:"capabilities"`
 	SelectedMayaBuild      string                   `json:"selectedMayaBuild,omitempty"`
 	SessionBindingRequired bool                     `json:"sessionBindingRequired,omitempty"`
@@ -287,9 +289,13 @@ type controlPlaneHostAgentAssignment struct {
 
 type controlPlaneHTTPStatusError struct {
 	StatusCode int
+	Message    string
 }
 
 func (err *controlPlaneHTTPStatusError) Error() string {
+	if err.Message != "" {
+		return fmt.Sprintf("Control Plane request failed with HTTP %d: %s", err.StatusCode, err.Message)
+	}
 	return fmt.Sprintf("Control Plane request failed with HTTP %d", err.StatusCode)
 }
 
@@ -466,7 +472,11 @@ func postControlPlaneJSONWithLimitContext(ctx context.Context, rawURL string, to
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != wantStatus {
-		return &controlPlaneHTTPStatusError{StatusCode: response.StatusCode}
+		var failure struct {
+			Error string `json:"error"`
+		}
+		_ = decodeBoundedControlPlaneJSON(response.Body, 4096, &failure)
+		return &controlPlaneHTTPStatusError{StatusCode: response.StatusCode, Message: failure.Error}
 	}
 	if target == nil || response.StatusCode == http.StatusNoContent {
 		return nil
@@ -1060,7 +1070,7 @@ func (handler *controlPlaneHandler) serveHostAgentRegistration(response http.Res
 		writeControlPlaneError(response, http.StatusUnauthorized, "Windows Host Agent authentication changed")
 		return
 	}
-	if agent == nil || registration.Version != hostAgentAPIVersion || registration.AgentID != agentID || registration.HostID != agent.enrollment.HostID || registration.Slots != 1 {
+	if agent == nil || registration.Version != hostAgentAPIVersion || registration.AgentID != agentID || registration.HostID != agent.enrollment.HostID || registration.Slots != 1 || registration.Capabilities.Version != mayaHostCapabilityRecordVersion || !completeTargetProfileHostPoolMapping(registration.Capabilities) {
 		writeControlPlaneError(response, http.StatusBadRequest, "invalid Windows Host Agent registration")
 		return
 	}
@@ -1134,7 +1144,7 @@ func (handler *controlPlaneHandler) serveHostAgentRegistration(response http.Res
 
 func (handler *controlPlaneHandler) serveHostAgentHeartbeat(response http.ResponseWriter, request *http.Request, agentID string) {
 	var heartbeat hostAgentHeartbeatRequest
-	if err := decodeHostAgentRequest(request, &heartbeat); err != nil || heartbeat.Version != hostAgentAPIVersion || heartbeat.SessionID == "" {
+	if err := decodeHostAgentRequest(request, &heartbeat); err != nil || heartbeat.Version != hostAgentAPIVersion || heartbeat.SessionID == "" || heartbeat.Capabilities.Version != mayaHostCapabilityRecordVersion || !completeTargetProfileHostPoolMapping(heartbeat.Capabilities) {
 		writeControlPlaneError(response, http.StatusBadRequest, "invalid Windows Host Agent heartbeat")
 		return
 	}
@@ -1247,7 +1257,7 @@ func (handler *controlPlaneHandler) disconnectHostAgentSession(agentID string, s
 func assignmentResponse(record hostAgentAssignmentRecord) hostAgentAssignmentResponse {
 	return hostAgentAssignmentResponse{
 		Version: hostAgentAPIVersion, Kind: "host-agent-assignment", RunID: record.RunID,
-		AgentID: record.AgentID, HostID: record.HostID, LockToken: record.LockToken, Submission: record.Submission, Capabilities: record.Capabilities, SelectedMayaBuild: record.SelectedMayaBuild,
+		AgentID: record.AgentID, HostID: record.HostID, LockToken: record.LockToken, Submission: record.Submission, EventPrefix: record.EventPrefix, Capabilities: record.Capabilities, SelectedMayaBuild: record.SelectedMayaBuild,
 	}
 }
 
@@ -2325,65 +2335,42 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 	if err != nil {
 		return failHostAgentSelection(repoDir, options, runtime, err)
 	}
-	handler.mu.Lock()
-	var selected *controlPlaneHostAgent
-	var selectedCapabilities mayaHostCapabilityRecord
-	var selectedMayaBuild string
-	var sharedFakeHostRelease func() error
-	for _, agent := range handler.hostAgents {
-		if agent.status.State == "ready" && agent.status.SessionID != "" && !handler.runtime.Now().Before(agent.sessionExpiresAt) {
-			agent.status.State = "offline"
-			agent.status.SessionID = ""
-			agent.sessionExpiresAt = time.Time{}
-			_ = handler.persistHostAgentStatus(agent)
+	run, selected, selectedCapabilities, selectedMayaBuild, sharedFakeHostRelease, err := handler.queueHostAgentRun(repoDir, submission, options, requirements, runtime)
+	if err != nil {
+		if errors.Is(err, errControlPlaneQueueFull) {
+			return runOutcome{}, err
 		}
+		if errors.Is(err, errQueuedRunCanceled) && run != nil {
+			return run.currentOutcome(), err
+		}
+		if run != nil && run.accepted {
+			run.failedLayer = failureLayerHostSelection
+			outcome, finishErr := run.finishEarlyFailure(err)
+			ledgerErr := finalizeRunLedger(run.repoDir, outcome, run.manifest, run.ledgerPolicy, run.runtime.Now())
+			var queueErr error
+			if ledgerErr == nil {
+				handler.mu.Lock()
+				queueErr = handler.removeQueuedRunLocked(run.manifest.RunID)
+				handler.mu.Unlock()
+			}
+			return outcome, errors.Join(finishErr, ledgerErr, queueErr)
+		}
+		return failHostAgentSelection(repoDir, options, runtime, err)
 	}
-	selectionNow := handler.runtime.Now()
-	candidates, selectionReasons := compatibleHostAgentCandidates(handler.hostAgents, targetProfile, requirements, selectionNow)
-	for _, agent := range candidates {
-		release, locked, err := acquireHostLock(filepath.Join(handler.dataDir, "fake-host"), agent.status.HostID)
-		if err != nil {
-			selectionReasons = append(selectionReasons, fmt.Sprintf("Maya Host %s Host Lock check failed", agent.status.HostID))
-			continue
-		}
-		if locked {
-			selectionReasons = append(selectionReasons, fmt.Sprintf("Maya Host %s is locked", agent.status.HostID))
-			continue
-		}
-		selected = agent
-		selectedCapabilities = snapshotMayaHostCapabilityRecord(agent.status.Capabilities)
-		selectedMayaBuild = decideMayaHostCompatibility(requirements, selectedCapabilities, selectionNow).SelectedMayaBuild
-		sharedFakeHostRelease = release
-		agent.status.State = "reserving"
-		break
-	}
-	handler.mu.Unlock()
-	if selected == nil {
-		reason := "no registered ready Windows Host Agent is compatible"
-		if len(selectionReasons) > 0 {
-			reason += ": " + strings.Join(selectionReasons, "; ")
-		}
-		return failHostAgentSelection(repoDir, options, runtime, errors.New(reason))
-	}
-
-	acceptedCallback := runtime.Accepted
-	acceptedCheck := runtime.AcceptedCheck
-	deferredAcceptanceRuntime := runtime
-	deferredAcceptanceRuntime.Accepted = nil
-	deferredAcceptanceRuntime.AcceptedCheck = nil
-	run := newFreshRun(repoDir, options, deferredAcceptanceRuntime).(*freshRunLifecycle)
-	if err := run.accept(); err != nil {
-		sharedLockErr := sharedFakeHostRelease()
-		if run.accepted {
-			return handler.finishAcceptedHostAgentFailure(run, selected, errors.Join(err, sharedLockErr))
-		}
-		handler.mu.Lock()
-		selected.status.State = "ready"
-		handler.mu.Unlock()
-		return runOutcome{}, errors.Join(err, sharedLockErr, run.cleanupUnacceptedOwnership())
-	}
+	acceptedCallback := func(runOutcome) {}
+	acceptedCheck := func() error { return nil }
 	failBeforeTransition := func(runErr error) (runOutcome, error) {
-		return handler.finishAcceptedHostAgentFailure(run, selected, errors.Join(runErr, sharedFakeHostRelease()))
+		outcome, finishErr := handler.finishAcceptedHostAgentFailure(run, selected, errors.Join(runErr, sharedFakeHostRelease()))
+		terminalLedger, terminalErr := readRunLedgerRecord(run.repoDir, run.manifest.RunID)
+		var queueErr error
+		if terminalErr == nil && terminalRunLedgerRecord(terminalLedger) {
+			handler.mu.Lock()
+			queueErr = handler.removeQueuedRunLocked(run.manifest.RunID)
+			handler.mu.Unlock()
+		} else {
+			queueErr = errors.Join(errors.New("retain queued Run ownership until terminal failure is durable"), terminalErr)
+		}
+		return outcome, errors.Join(finishErr, queueErr)
 	}
 	runID := run.manifest.RunID
 	sharedFakeRepo := filepath.Join(handler.dataDir, "fake-host")
@@ -2402,10 +2389,15 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 	if err != nil {
 		return failBeforeTransition(err)
 	}
+	assignedLedger.State = "submitted"
 	assignedLedger.Host = selected.status.HostID
+	eventPrefix, err := os.ReadFile(filepath.Join(runLedgerDir(repoDir, runID), runLedgerEventsFileName))
+	if err != nil {
+		return failBeforeTransition(err)
+	}
 	record := hostAgentAssignmentRecord{
 		Version: hostAgentAPIVersion, RunID: runID, AgentID: selected.status.AgentID, HostID: selected.status.HostID,
-		LockToken: lockToken, State: "assigned", CreatedAt: createdAt, Submission: submission,
+		LockToken: lockToken, State: "assigned", CreatedAt: createdAt, Submission: submission, EventPrefix: eventPrefix,
 		Capabilities: selectedCapabilities, SelectedMayaBuild: selectedMayaBuild, SessionBindingRequired: selected.status.SessionBinding, AssignedLedger: &assignedLedger,
 	}
 	targetProfile = record.Submission.TargetProfile
@@ -2420,16 +2412,26 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 
 	handler.mu.Lock()
 	if handler.hostAgents[selected.status.AgentID] != selected || selected.status.State != "reserving" || selected.status.RunID != "" {
+		handler.resetQueuedDispatchLocked(runID)
 		handler.mu.Unlock()
-		return failBeforeTransition(errors.New("Windows Host Agent reservation changed")) //nolint:staticcheck // Product term starts the user-facing diagnostic.
+		if releaseErr := sharedFakeHostRelease(); releaseErr != nil {
+			sharedFakeHostRelease = func() error { return nil }
+			return failBeforeTransition(errors.Join(errors.New("Windows Host Agent reservation changed"), releaseErr)) //nolint:staticcheck // Product term starts the user-facing diagnostic.
+		}
+		return handler.runScenarioThroughHostAgent(repoDir, submission, options, runtime)
 	}
 	if selected.status.SessionID == "" || !handler.runtime.Now().Before(selected.sessionExpiresAt) {
 		selected.status.State = "offline"
 		selected.status.SessionID = ""
 		selected.sessionExpiresAt = time.Time{}
-		persistErr := handler.persistHostAgentStatus(selected)
+		_ = handler.persistHostAgentStatus(selected)
+		handler.resetQueuedDispatchLocked(runID)
 		handler.mu.Unlock()
-		return failBeforeTransition(errors.Join(errors.New("Windows Host Agent process-session lease expired during reservation"), persistErr)) //nolint:staticcheck // Product term starts the user-facing diagnostic.
+		if releaseErr := sharedFakeHostRelease(); releaseErr != nil {
+			sharedFakeHostRelease = func() error { return nil }
+			return failBeforeTransition(errors.Join(errors.New("Windows Host Agent process-session lease expired during reservation"), releaseErr)) //nolint:staticcheck // Product term starts the user-facing diagnostic.
+		}
+		return handler.runScenarioThroughHostAgent(repoDir, submission, options, runtime)
 	}
 	quarantineMarkerPath := handler.hostAgentQuarantinePath(record.AgentID)
 	quarantineIntent := record
@@ -2443,18 +2445,63 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 		acceptedCallback(run.currentOutcome())
 	}
 	var transitionErr error
+	var eligibilityErr error
 	if acceptedCheck != nil {
 		transitionErr = acceptedCheck()
 	}
 	handler.mu.Lock()
 	if handler.hostAgents[selected.status.AgentID] != selected || selected.status.State != "reserving" || selected.status.RunID != "" {
-		transitionErr = errors.Join(transitionErr, errors.New("Windows Host Agent reservation changed during acceptance")) //nolint:staticcheck // Product term starts the user-facing diagnostic.
+		eligibilityErr = errors.Join(eligibilityErr, errors.New("Windows Host Agent reservation changed during acceptance")) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	if selected.status.SessionID == "" || !handler.runtime.Now().Before(selected.sessionExpiresAt) {
-		transitionErr = errors.Join(transitionErr, errors.New("Windows Host Agent process-session lease expired during acceptance")) //nolint:staticcheck // Product term starts the user-facing diagnostic.
+		eligibilityErr = errors.Join(eligibilityErr, errors.New("Windows Host Agent process-session lease expired during acceptance")) //nolint:staticcheck // Product term starts the user-facing diagnostic.
+	}
+	if transitionErr == nil && eligibilityErr == nil {
+		eligibilityErr = handler.refreshQueuedReservationCapabilitiesLocked(runID, targetProfile, requirements, selected, &record)
+	}
+	if eligibilityErr != nil {
+		handler.mu.Unlock()
+		markerCleanupErr := os.Remove(quarantineMarkerPath)
+		if errors.Is(markerCleanupErr, os.ErrNotExist) {
+			markerCleanupErr = nil
+		} else if markerCleanupErr == nil {
+			markerCleanupErr = syncRunLedgerDirectory(filepath.Dir(quarantineMarkerPath))
+		}
+		releaseErr := sharedFakeHostRelease()
+		if releaseErr == nil {
+			sharedFakeHostRelease = func() error { return nil }
+		}
+		if markerCleanupErr == nil && releaseErr == nil {
+			handler.mu.Lock()
+			var statusErr error
+			if handler.hostAgents[selected.status.AgentID] != selected || selected.status.State != "reserving" || selected.status.RunID != "" {
+				statusErr = errors.New("Windows Host Agent reservation changed during rollback") //nolint:staticcheck // Product term starts the user-facing diagnostic.
+			} else {
+				if selected.status.SessionID == "" || !handler.runtime.Now().Before(selected.sessionExpiresAt) {
+					selected.status.State = "offline"
+					selected.status.SessionID = ""
+					selected.sessionExpiresAt = time.Time{}
+				} else {
+					selected.status.State = "ready"
+				}
+				statusErr = handler.persistHostAgentStatus(selected)
+			}
+			if statusErr == nil {
+				handler.resetQueuedDispatchLocked(runID)
+			}
+			handler.mu.Unlock()
+			if statusErr != nil {
+				return failBeforeTransition(errors.Join(eligibilityErr, statusErr))
+			}
+			return handler.runScenarioThroughHostAgent(repoDir, submission, options, runtime)
+		}
+		return failBeforeTransition(errors.Join(eligibilityErr, markerCleanupErr, releaseErr))
 	}
 	if transitionErr == nil {
 		transitionErr = handler.ensureHostAgentTransition(record)
+	}
+	if transitionErr == nil {
+		transitionErr = handler.removeQueuedRunLocked(runID)
 	}
 	if transitionErr == nil {
 		if err := os.Remove(quarantineMarkerPath); err != nil {
@@ -2482,6 +2529,7 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 		terminalLedger, terminalLedgerErr := readRunLedgerRecord(repoDir, runID)
 		var quarantineTransitionErr error
 		var markerCleanupErr error
+		var queueErr error
 		if terminalLedgerErr == nil {
 			terminal := controlPlaneTerminalResponse(outcome, failureErr, repoDir)
 			record.AssignedLedger = &terminalLedger
@@ -2491,6 +2539,7 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 			if quarantineTransitionErr == nil {
 				assignment.record = record
 				assignment.terminalLedger = &terminalLedger
+				queueErr = handler.removeQueuedRunLocked(runID)
 				if err := os.Remove(quarantineMarkerPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 					markerCleanupErr = err
 				} else if err == nil {
@@ -2498,7 +2547,7 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 				}
 			}
 		}
-		failureErr = errors.Join(failureErr, terminalLedgerErr, quarantineTransitionErr, markerCleanupErr)
+		failureErr = errors.Join(failureErr, terminalLedgerErr, quarantineTransitionErr, queueErr, markerCleanupErr)
 		assignment.outcome = outcome
 		assignment.err = failureErr
 		assignment.finished = true
@@ -3073,6 +3122,7 @@ func runHostAgentOnce(options hostAgentRunOnceOptions, runtime runRuntime, stdou
 	outcome, runErr := runScenario(repoDir, runOptions{
 		ScenarioName: assignment.Submission.Scenario, TargetProfile: targetProfile, HostPin: assignment.HostID,
 		HostConfig: hostConfigPath, StopAfter: assignment.Submission.StopAfter, AssignedRunID: assignment.RunID, AssignedMayaBuild: assignment.SelectedMayaBuild,
+		AssignedEventPrefix: assignment.EventPrefix,
 	}, agentRuntime)
 	progressErr := stopProgress()
 	operationalErr := errors.Join(runErr, progressErr)

@@ -48,17 +48,21 @@ type controlPlaneFile struct {
 }
 
 type controlPlaneStatusResponse struct {
-	Version       int    `json:"version"`
-	Kind          string `json:"kind"`
-	RunID         string `json:"runId"`
-	Scenario      string `json:"scenario"`
-	TargetProfile string `json:"targetProfile,omitempty"`
-	Host          string `json:"host,omitempty"`
-	State         string `json:"state"`
-	Status        string `json:"status,omitempty"`
-	CleanupState  string `json:"cleanupState"`
-	AcceptedAt    string `json:"acceptedAt"`
-	Evidence      string `json:"evidence"`
+	Version       int                   `json:"version"`
+	Kind          string                `json:"kind"`
+	RunID         string                `json:"runId"`
+	Scenario      string                `json:"scenario"`
+	TargetProfile string                `json:"targetProfile,omitempty"`
+	Host          string                `json:"host,omitempty"`
+	State         string                `json:"state"`
+	Status        string                `json:"status,omitempty"`
+	CleanupState  string                `json:"cleanupState"`
+	AcceptedAt    string                `json:"acceptedAt"`
+	Evidence      string                `json:"evidence"`
+	QueuePosition int                   `json:"queuePosition,omitempty"`
+	WaitReason    string                `json:"waitReason,omitempty"`
+	HostPool      string                `json:"hostPool,omitempty"`
+	Requirements  *scenarioRequirements `json:"requiredCapabilities,omitempty"`
 }
 
 type controlPlaneEventsResponse struct {
@@ -213,13 +217,21 @@ func runControlPlaneServer(options controlPlaneServeOptions, runtime runRuntime,
 }
 
 type controlPlaneHandler struct {
-	dataDir     string
-	token       string
-	runtime     runRuntime
-	mu          sync.Mutex
-	hostAgents  map[string]*controlPlaneHostAgent
-	assignments map[string]*controlPlaneHostAgentAssignment
-	runIDs      []string
+	dataDir               string
+	token                 string
+	runtime               runRuntime
+	mu                    sync.Mutex
+	queueAdmissionMu      sync.Mutex
+	queueDispatchMu       sync.Mutex
+	hostAgents            map[string]*controlPlaneHostAgent
+	assignments           map[string]*controlPlaneHostAgentAssignment
+	queuedRuns            map[string]*controlPlaneQueuedRun
+	queueAdmissions       int
+	queueSchedulerRunning bool
+	queueDispatchCycles   uint64
+	queueAcquireHostLock  func(string, string) (func() error, bool, error)
+	removeRejectedRunRoot func(string) error
+	runIDs                []string
 }
 
 func newControlPlaneHandler(dataDir string, token string, runtime runRuntime) (http.Handler, error) {
@@ -246,7 +258,7 @@ func newControlPlaneHandler(dataDir string, token string, runtime runRuntime) (h
 	if err := ensurePrivateControlPlaneDirectory(filepath.Join(dataDir, "fake-host")); err != nil {
 		return nil, err
 	}
-	for _, child := range []string{"host-agents", "host-locks", "assignments", "assignment-transactions", "incoming"} {
+	for _, child := range []string{"host-agents", "host-locks", "assignments", "assignment-transactions", "queued-runs", "incoming"} {
 		if err := ensurePrivateControlPlaneDirectory(filepath.Join(dataDir, child)); err != nil {
 			return nil, err
 		}
@@ -257,11 +269,16 @@ func newControlPlaneHandler(dataDir string, token string, runtime runRuntime) (h
 	}
 	handler := &controlPlaneHandler{
 		dataDir: dataDir, token: token, runtime: runtime,
-		hostAgents: make(map[string]*controlPlaneHostAgent), assignments: make(map[string]*controlPlaneHostAgentAssignment), runIDs: runIDs,
+		hostAgents: make(map[string]*controlPlaneHostAgent), assignments: make(map[string]*controlPlaneHostAgentAssignment), queuedRuns: make(map[string]*controlPlaneQueuedRun),
+		queueAcquireHostLock: acquireHostLock, removeRejectedRunRoot: os.RemoveAll, runIDs: runIDs,
 	}
 	if err := handler.loadHostAgentState(); err != nil {
 		return nil, err
 	}
+	if err := handler.loadControlPlaneQueue(); err != nil {
+		return nil, err
+	}
+	handler.resumeControlPlaneQueue()
 	return handler, nil
 }
 
@@ -328,6 +345,9 @@ func (handler *controlPlaneHandler) ServeHTTP(response http.ResponseWriter, requ
 	}
 	if request.URL.Path == "/v1/runs" && request.Method == http.MethodGet {
 		handler.serveRunHistory(response, request)
+		return
+	}
+	if handler.serveQueuedRunCancel(response, request) {
 		return
 	}
 	if request.URL.Path != "/v1/runs" || request.Method != http.MethodPost {
@@ -441,6 +461,17 @@ func (handler *controlPlaneHandler) ServeHTTP(response http.ResponseWriter, requ
 		outcome, runErr = runScenario(repoDir, options, serverRuntime)
 	}
 	if !acceptedWritten {
+		if !acceptanceStarted && errors.Is(runErr, errControlPlaneQueueFull) {
+			if err := handler.removeRejectedRunRoot(filepath.Dir(repoDir)); err != nil {
+				writeControlPlaneError(response, http.StatusInternalServerError, "clean up rejected run")
+				return
+			}
+			handler.mu.Lock()
+			handler.removeControlPlaneRunID(runID)
+			handler.mu.Unlock()
+			writeControlPlaneError(response, http.StatusTooManyRequests, "run queue is full")
+			return
+		}
 		if !acceptanceStarted {
 			writeControlPlaneError(response, http.StatusInternalServerError, "accept run")
 		}
@@ -591,10 +622,6 @@ func (handler *controlPlaneHandler) serveRunRead(response http.ResponseWriter, r
 	}
 	repoDir := filepath.Join(handler.dataDir, "runs", runID, "repo")
 	record, assignmentActive, assignmentBacked, err := handler.readControlPlaneRunRecord(repoDir, runID)
-	if assignmentActive && parts[3] == "evidence" {
-		writeControlPlaneError(response, http.StatusConflict, "run assignment is still active")
-		return
-	}
 	if err != nil {
 		var usageErr *usageError
 		if errors.As(err, &usageErr) {
@@ -602,6 +629,10 @@ func (handler *controlPlaneHandler) serveRunRead(response http.ResponseWriter, r
 			return
 		}
 		writeControlPlaneError(response, http.StatusInternalServerError, "read run status")
+		return
+	}
+	if parts[3] == "evidence" && (assignmentActive || record.State == "submitted" || record.State == "queued") {
+		writeControlPlaneError(response, http.StatusConflict, "run evidence is not yet durable")
 		return
 	}
 	followEvents := parts[3] == "events" && request.URL.Query().Get("follow") == "true"
@@ -620,6 +651,7 @@ func (handler *controlPlaneHandler) serveRunRead(response http.ResponseWriter, r
 	switch parts[3] {
 	case "status":
 		result := controlPlaneStatusFromRecord(repoDir, record, "/v1/runs/"+runID+"/evidence")
+		handler.addControlPlaneQueueStatus(&result)
 		response.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(response).Encode(result)
 	case "events":
@@ -898,7 +930,7 @@ func waitForControlPlaneEventPoll(request *http.Request) bool {
 
 func terminalRunLedgerRecord(record runLedgerRecord) bool {
 	switch record.State {
-	case "completed", "failed", "kept", "cleanup-failed":
+	case "completed", "failed", "canceled", "kept", "cleanup-failed":
 		return true
 	default:
 		return false
@@ -950,7 +982,7 @@ func controlPlaneStatusFromRecord(repoDir string, record runLedgerRecord, eviden
 
 func readControlPlaneResult(repoDir string, record runLedgerRecord) (controlPlaneResultResponse, error) {
 	switch record.State {
-	case "completed", "failed", "cleanup-failed", "kept":
+	case "completed", "failed", "canceled", "cleanup-failed", "kept":
 	default:
 		return controlPlaneResultResponse{
 			Version: controlPlaneAPIVersion, Kind: "result", RunID: record.RunID,
@@ -996,7 +1028,7 @@ func readControlPlaneResult(repoDir string, record runLedgerRecord) (controlPlan
 	result.Summary = sanitizeControlPlaneText(result.Summary, repoDir)
 	sanitizeControlPlaneValidators(bundle.Validators, repoDir)
 	cleanupState := controlPlaneCleanupState(repoDir, record)
-	final := record.State == "completed" || record.State == "failed" || record.State == "cleanup-failed"
+	final := record.State == "completed" || record.State == "failed" || record.State == "canceled" || record.State == "cleanup-failed"
 	success := record.State == "completed" && record.Status == resultStatusPassed && result.Status == resultStatusPassed && cleanupState == "completed"
 	return controlPlaneResultResponse{
 		Version: controlPlaneAPIVersion, Kind: "result", RunID: record.RunID,
@@ -1118,7 +1150,7 @@ func readControlPlaneEventsUnlocked(repoDir string, record runLedgerRecord, requ
 
 func controlPlaneCleanupState(repoDir string, record runLedgerRecord) string {
 	switch record.State {
-	case "completed", "failed":
+	case "completed", "failed", "canceled":
 		evidenceDir, err := safeControlPlaneEvidenceDir(repoDir, record)
 		if err != nil {
 			return "unresolved"
@@ -1291,6 +1323,9 @@ func printStatusThroughMode(repoDir string, options statusOptions, stdout io.Wri
 	}
 	_, err := fmt.Fprintf(stdout, "run: %s\nstate: %s\nscenario: %s\ntargetProfile: %s\nhost: %s\nstatus: %s\ncleanupState: %s\nacceptedAt: %s\nevidence: %s\n",
 		result.RunID, result.State, result.Scenario, result.TargetProfile, result.Host, result.Status, result.CleanupState, result.AcceptedAt, result.Evidence)
+	if err == nil && result.State == "queued" {
+		_, err = fmt.Fprintf(stdout, "queuePosition: %d\nwaitReason: %s\nhostPool: %s\n", result.QueuePosition, result.WaitReason, result.HostPool)
+	}
 	return err
 }
 

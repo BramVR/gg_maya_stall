@@ -6,6 +6,7 @@ Release history starts with `v0.1.0`.
 
 ## Unreleased
 
+- Added durable FIFO queueing for compatible Control Plane Runs when matching Maya Hosts are busy, dynamic queue position and wait metadata, restart-safe advancement, and queued cancellation without Host Lock or Maya Host mutation: https://github.com/BramVR/gg_maya_stall/issues/120.
 - Added fresh versioned Windows Host Agent capability reports, exact/minimum Scenario requirements, shared planning/scheduling compatibility reasons, deterministic compatible Maya Host selection within Target Profile Host Pools, and public-safe SSH/SFTP failure diagnostics: https://github.com/BramVR/gg_maya_stall/issues/119.
 - Added submitter-independent Control Plane runs, authenticated Run ID reconnect with inclusive durable sequence cursors, bounded live event streaming and Agent progress checkpoints, configured history, and explicit event/log/stream truncation markers: https://github.com/BramVR/gg_maya_stall/issues/118.
 - Added real shared-path Scenario execution through the Control Plane and registered Windows Host Agent, with Agent-local live Host config, exact Maya UI Session binding on the shared Host Lock, transferred live evidence, fail-closed ownership, and protected zero-residue Maya proof: https://github.com/BramVR/gg_maya_stall/issues/117.

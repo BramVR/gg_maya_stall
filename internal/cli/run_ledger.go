@@ -1172,7 +1172,7 @@ func pruneRunLedgerUnlocked(repoDir string, policy runLedgerPolicy, now time.Tim
 	}
 	cutoff := now.UTC().Add(-policy.Retention)
 	for _, record := range records {
-		if record.RunID == currentRunID || record.State != "completed" && record.State != "failed" {
+		if record.RunID == currentRunID || record.State != "completed" && record.State != "failed" && record.State != "canceled" {
 			continue
 		}
 		retainedAt := record.CompletedAt

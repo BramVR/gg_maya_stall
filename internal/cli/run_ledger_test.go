@@ -559,6 +559,32 @@ func TestHistoryAppliesEmbeddedRunLedgerRetentionWithoutAnotherRun(t *testing.T)
 	}
 }
 
+func TestRunLedgerRetentionRemovesCanceledRuns(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	base := time.Date(2026, time.July, 14, 6, 0, 0, 0, time.UTC)
+	runID := "20260714T060000.000000000Z"
+	run := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways, AssignedRunID: runID}, runRuntime{Now: func() time.Time { return base }}).(*freshRunLifecycle)
+	if err := run.accept(); err != nil {
+		t.Fatal(err)
+	}
+	record, err := readRunLedgerRecord(dir, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.State = "canceled"
+	record.Status = resultStatusFailed
+	record.CompletedAt = base.Format(time.RFC3339Nano)
+	if err := writeRunLedgerRecord(dir, record); err != nil {
+		t.Fatal(err)
+	}
+	if err := pruneRunLedger(dir, runLedgerPolicy{Retention: time.Hour}, base.Add(2*time.Hour), ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(runLedgerDir(dir, runID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired canceled ledger remains: %v", err)
+	}
+}
+
 func TestHistoryIgnoresIncompleteLedgerInitialization(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	orphanID := "20260714T050000.000000000Z"

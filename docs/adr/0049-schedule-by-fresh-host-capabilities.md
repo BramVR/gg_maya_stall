@@ -1,9 +1,9 @@
 # Schedule By Fresh Maya Host Capabilities
 
 Registered Windows Host Agents report one versioned Maya Host capability record
-at registration and refresh it with each process-session heartbeat. Version 1
+at registration and refresh it with each process-session heartbeat. Version 2
 records contain the report time, online/health/maintenance/quarantine state,
-Target Profile membership, Maya builds, Python, Session Broker version and
+Target Profile membership with its Host Pool mapping, Maya builds, Python, Session Broker version and
 features, capture and control features, renderers, GPU, display, licensing, and
 trusted Plugin Artifact support.
 
@@ -35,10 +35,10 @@ binds the fresh Maya UI Session first, then verifies that build before payload
 staging or Scenario execution. Conflicting Host
 definitions that reuse one Host id across Target Profile pools are rejected.
 
-The version 1 wire response omits the optional extension when an older Agent
-has not reported capabilities. This preserves an already-active assignment
-during a Control Plane-first rolling upgrade, while the incomplete legacy
-report cannot qualify for a new assignment.
+Version 2 makes the Target Profile-to-Host Pool mapping mandatory for new work.
+The Control Plane rejects version 1 registration and heartbeat reports before
+status mutation; operators must upgrade the Agent and Control Plane together.
+No legacy report is reinterpreted by guessing a Host Pool.
 
 This extends [ADR 0013](0013-select-first-healthy-unlocked-host.md),
 [ADR 0014](0014-use-layered-host-health-checks.md),

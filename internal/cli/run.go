@@ -1141,6 +1141,38 @@ func appendEventRecord(path string, record map[string]string) error {
 	return err
 }
 
+func installAssignedEventPrefix(path string, content []byte) error {
+	if len(content) > maximumHostAgentProgressEventBytes || runLedgerEventLineCount(content) > maximumHostAgentProgressEvents {
+		return errors.New("assigned event prefix exceeds Windows Host Agent limits")
+	}
+	sequence := 0
+	lastType := ""
+	for _, line := range bytes.Split(bytes.TrimSpace(content), []byte{'\n'}) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var event map[string]any
+		if err := json.Unmarshal(line, &event); err != nil {
+			return errors.New("assigned event prefix is invalid")
+		}
+		sequence++
+		if ledgerEventSequence(event) != sequence {
+			return errors.New("assigned event prefix sequence is invalid")
+		}
+		if sequence == 1 && event["type"] != "run.accepted" {
+			return errors.New("assigned event prefix does not begin with run.accepted")
+		}
+		lastType = fmt.Sprint(event["type"])
+	}
+	if sequence == 0 {
+		return errors.New("assigned event prefix is empty")
+	}
+	if lastType != "run.queued" {
+		return errors.New("assigned event prefix does not end with run.queued")
+	}
+	return writeRunLedgerBytes(path, append(bytes.TrimSpace(content), '\n'))
+}
+
 func newRunEventRecord(record map[string]string) map[string]any {
 	eventType := record["event"]
 	details := make(map[string]any)
@@ -1170,6 +1202,10 @@ func runEventPhase(eventType string) string {
 	switch {
 	case strings.HasPrefix(eventType, "run.accepted"):
 		return "submission"
+	case strings.HasPrefix(eventType, "run.queued"):
+		return "queuing"
+	case strings.HasPrefix(eventType, "run.canceled"):
+		return "finalizing"
 	case strings.HasPrefix(eventType, "run.started"), strings.HasPrefix(eventType, "broker.session.fresh"):
 		return "launching"
 	case strings.HasPrefix(eventType, "broker.session.started"):

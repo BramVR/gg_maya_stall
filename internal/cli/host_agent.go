@@ -2357,8 +2357,6 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 		}
 		return failHostAgentSelection(repoDir, options, runtime, err)
 	}
-	acceptedCallback := func(runOutcome) {}
-	acceptedCheck := func() error { return nil }
 	failBeforeTransition := func(runErr error) (runOutcome, error) {
 		outcome, finishErr := handler.finishAcceptedHostAgentFailure(run, selected, errors.Join(runErr, sharedFakeHostRelease()))
 		terminalLedger, terminalErr := readRunLedgerRecord(run.repoDir, run.manifest.RunID)
@@ -2441,14 +2439,8 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 		return failBeforeTransition(fmt.Errorf("persist Windows Host Agent assignment write-ahead marker: %w", err))
 	}
 	handler.mu.Unlock()
-	if acceptedCallback != nil {
-		acceptedCallback(run.currentOutcome())
-	}
 	var transitionErr error
 	var eligibilityErr error
-	if acceptedCheck != nil {
-		transitionErr = acceptedCheck()
-	}
 	handler.mu.Lock()
 	if handler.hostAgents[selected.status.AgentID] != selected || selected.status.State != "reserving" || selected.status.RunID != "" {
 		eligibilityErr = errors.Join(eligibilityErr, errors.New("Windows Host Agent reservation changed during acceptance")) //nolint:staticcheck // Product term starts the user-facing diagnostic.

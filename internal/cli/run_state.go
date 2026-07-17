@@ -122,7 +122,7 @@ func stopRunThroughMode(repoDir string, options stopOptions, runtime runRuntime)
 			return err
 		}
 		if status.Version != controlPlaneAPIVersion || status.Kind != "status" || status.RunID != options.RunID || status.State != "canceled" {
-			return errors.New("Control Plane did not confirm queued Run cancellation")
+			return errors.New("Control Plane did not confirm queued Run cancellation") //nolint:staticcheck // Product terms preserve the user-facing diagnostic.
 		}
 		return nil
 	}

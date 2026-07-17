@@ -51,7 +51,7 @@ type controlPlaneQueuedRun struct {
 }
 
 var errQueuedRunCanceled = errors.New("Run canceled while queued")
-var errControlPlaneQueueFull = errors.New("Control Plane Run queue is full")
+var errControlPlaneQueueFull = errors.New("Control Plane Run queue is full") //nolint:staticcheck // Product terms preserve the user-facing diagnostic.
 
 func (handler *controlPlaneHandler) loadControlPlaneQueue() error {
 	root := filepath.Join(handler.dataDir, "queued-runs")
@@ -187,7 +187,7 @@ func (handler *controlPlaneHandler) loadControlPlaneQueue() error {
 			}
 		}
 		if handler.waitingQueueCountLocked() >= maximumControlPlaneQueuedRuns {
-			return fmt.Errorf("Control Plane Run queue exceeds %d durable entries", maximumControlPlaneQueuedRuns)
+			return fmt.Errorf("Control Plane Run queue exceeds %d durable entries", maximumControlPlaneQueuedRuns) //nolint:staticcheck // Product terms preserve the user-facing diagnostic.
 		}
 		handler.queuedRuns[record.RunID] = &controlPlaneQueuedRun{record: record, done: make(chan struct{}), ready: make(chan struct{}, 1)}
 	}
@@ -410,7 +410,7 @@ func (handler *controlPlaneHandler) queueAdmissionLocked(targetProfile string, r
 			pools = append(pools, pool)
 		}
 		sort.Strings(pools)
-		return "", fmt.Errorf("Target Profile %s has conflicting Host Pool reports: %s", targetProfile, strings.Join(pools, ", "))
+		return "", fmt.Errorf("Target Profile %s has conflicting Host Pool reports: %s", targetProfile, strings.Join(pools, ", ")) //nolint:staticcheck // Product terms preserve the user-facing diagnostic.
 	}
 	_, reasons := compatibleHostAgentCandidates(handler.hostAgents, targetProfile, requirements, now)
 	reason := "no registered ready Windows Host Agent is compatible"

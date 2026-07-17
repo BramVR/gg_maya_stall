@@ -425,7 +425,7 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 			fmt.Fprintf(stderr, "maya-stall stop: %v\n", err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "stopped: %s\n", options.RunID)
+		_, _ = fmt.Fprintf(stdout, "stopped: %s\n", options.RunID)
 		return 0
 	default:
 		fmt.Fprintf(stderr, "maya-stall: unknown command %q\n\n", args[0])

@@ -1044,8 +1044,8 @@ func TestQueueHostLockIODoesNotBlockControlPlaneState(t *testing.T) {
 	stateAvailable := make(chan struct{})
 	go func() {
 		handler.mu.Lock()
-		handler.mu.Unlock()
 		close(stateAvailable)
+		handler.mu.Unlock()
 	}()
 	select {
 	case <-stateAvailable:

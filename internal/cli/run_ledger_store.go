@@ -23,6 +23,21 @@ type runLedgerSnapshot struct {
 	Log    []byte
 }
 
+func (store runLedgerStore) validateRunDir(runID string) error {
+	if err := validateRunID(runID); err != nil {
+		return err
+	}
+	return ensureOutputPathHasNoSymlinkParent(store.repoDir, filepath.Join(".maya-stall", "state", "ledger", "runs", runID))
+}
+
+func (store runLedgerStore) artifactPath(record runLedgerRecord, relativePath string) (string, error) {
+	ledgerDir := runLedgerDir(store.repoDir, record.RunID)
+	if err := ensureWorkspacePathHasNoSymlinkAncestor(ledgerDir, filepath.FromSlash(relativePath)); err != nil {
+		return "", err
+	}
+	return filepath.Join(ledgerDir, filepath.FromSlash(relativePath)), nil
+}
+
 func (store runLedgerStore) readArtifact(runID string, selectPath func(runLedgerRecord) string) (runLedgerRecord, []byte, error) {
 	var record runLedgerRecord
 	var content []byte
@@ -32,11 +47,11 @@ func (store runLedgerStore) readArtifact(runID string, selectPath func(runLedger
 		if err != nil {
 			return err
 		}
-		relativePath := selectPath(record)
-		if err := ensureWorkspacePathHasNoSymlinkAncestor(runLedgerDir(store.repoDir, runID), filepath.FromSlash(relativePath)); err != nil {
+		path, err := store.artifactPath(record, selectPath(record))
+		if err != nil {
 			return err
 		}
-		content, err = readRunLedgerBytes(filepath.Join(runLedgerDir(store.repoDir, runID), filepath.FromSlash(relativePath)))
+		content, err = readRunLedgerBytes(path)
 		return err
 	})
 	return record, content, err
@@ -59,6 +74,9 @@ func (store runLedgerStore) Read(runID string) (runLedgerRecord, error) {
 }
 
 func (store runLedgerStore) HasRecord(runID string) (bool, error) {
+	if err := store.validateRunDir(runID); err != nil {
+		return false, err
+	}
 	_, err := os.Lstat(filepath.Join(runLedgerDir(store.repoDir, runID), "run.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -69,6 +87,9 @@ func (store runLedgerStore) HasRecord(runID string) (bool, error) {
 // Occupied reports whether durable state has claimed the Run ID, including an
 // interrupted initialization that has not published run.json yet.
 func (store runLedgerStore) Occupied(runID string) (bool, error) {
+	if err := store.validateRunDir(runID); err != nil {
+		return false, err
+	}
 	_, err := os.Lstat(runLedgerDir(store.repoDir, runID))
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -111,11 +132,19 @@ func (store runLedgerStore) Snapshot(runID string) (runLedgerSnapshot, error) {
 		if err != nil {
 			return err
 		}
-		events, err := readRunLedgerBytes(filepath.Join(runLedgerDir(store.repoDir, runID), filepath.FromSlash(record.Events)))
+		eventsPath, err := store.artifactPath(record, record.Events)
 		if err != nil {
 			return err
 		}
-		logContent, err := readRunLedgerBytes(filepath.Join(runLedgerDir(store.repoDir, runID), filepath.FromSlash(record.Log)))
+		logPath, err := store.artifactPath(record, record.Log)
+		if err != nil {
+			return err
+		}
+		events, err := readRunLedgerBytes(eventsPath)
+		if err != nil {
+			return err
+		}
+		logContent, err := readRunLedgerBytes(logPath)
 		if err != nil {
 			return err
 		}
@@ -131,8 +160,14 @@ func (store runLedgerStore) UpdateSnapshot(runID string, mutate func(*runLedgerS
 		if err != nil {
 			return err
 		}
-		eventsPath := filepath.Join(runLedgerDir(store.repoDir, runID), filepath.FromSlash(record.Events))
-		logPath := filepath.Join(runLedgerDir(store.repoDir, runID), filepath.FromSlash(record.Log))
+		eventsPath, err := store.artifactPath(record, record.Events)
+		if err != nil {
+			return err
+		}
+		logPath, err := store.artifactPath(record, record.Log)
+		if err != nil {
+			return err
+		}
 		events, err := readRunLedgerBytes(eventsPath)
 		if err != nil {
 			return err
@@ -168,11 +203,17 @@ func (store runLedgerStore) SyncArtifacts(record *runLedgerRecord, policy runLed
 }
 
 func (store runLedgerStore) ReplaceEvents(runID string, content []byte) error {
-	record, err := store.Read(runID)
-	if err != nil {
-		return err
-	}
-	return writeRunLedgerBytes(filepath.Join(runLedgerDir(store.repoDir, runID), filepath.FromSlash(record.Events)), content)
+	return withRunLedgerLock(store.repoDir, runID, func() error {
+		record, err := store.Read(runID)
+		if err != nil {
+			return err
+		}
+		path, err := store.artifactPath(record, record.Events)
+		if err != nil {
+			return err
+		}
+		return writeRunLedgerBytes(path, content)
+	})
 }
 
 func (store runLedgerStore) Initialize(manifest runManifest, acceptedAt time.Time, sourceEventsPath string) error {

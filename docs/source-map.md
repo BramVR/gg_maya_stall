@@ -55,6 +55,7 @@ descriptive; code is the source-backed check when behavior claims disagree.
 - Kept run state, `status`, `attach`, and `stop`: `internal/cli/run_state.go`
 - Embedded Run Ledger, `history`, retention, bounded events/logs, and terminal
   status/attach: `internal/cli/run_ledger.go`,
+  `internal/cli/run_ledger_store.go`,
   `internal/cli/run_ledger_test.go`
 - Run-scoped attach screenshot/control helpers:
   `internal/cli/run_scoped_ops.go`
@@ -66,7 +67,9 @@ descriptive; code is the source-backed check when behavior claims disagree.
 - Windows Host Agent enrollment, outbound assignment polling, bounded active
   Run Ledger checkpoints, durable Host Lock and Maya UI Session fencing,
   fake/real execution, result transfer, and restart recovery:
-  `internal/cli/host_agent.go`, `internal/cli/host_agent_test.go`
+  `internal/cli/host_agent.go`,
+  `internal/cli/host_agent_transition_store.go`,
+  `internal/cli/host_agent_test.go`
 - Durable compatible-Run queueing, FIFO scheduling, queue status, cancellation,
   and restart recovery: `internal/cli/run_queue.go`,
   `internal/cli/run_queue_test.go`

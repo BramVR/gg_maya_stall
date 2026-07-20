@@ -395,7 +395,16 @@ func readRetainedRunLedgerEventMetadata(path string) (int, int, bool, int, error
 	if err != nil {
 		return 0, 0, false, 0, err
 	}
-	reader := bufio.NewReaderSize(file, 64*1024)
+	content, err := io.ReadAll(file)
+	if err != nil {
+		return 0, 0, false, 0, err
+	}
+	count, omitted, truncated, err := retainedRunLedgerEventMetadata(content)
+	return count, omitted, truncated, int(info.Size()), err
+}
+
+func retainedRunLedgerEventMetadata(content []byte) (int, int, bool, error) {
+	reader := bufio.NewReaderSize(bytes.NewReader(content), 64*1024)
 	count := 0
 	omitted := 0
 	truncated := false
@@ -406,7 +415,7 @@ func readRetainedRunLedgerEventMetadata(path string) (int, int, bool, int, error
 			count++
 			var event map[string]any
 			if err := json.Unmarshal(trimmed, &event); err != nil {
-				return 0, 0, false, 0, err
+				return 0, 0, false, err
 			}
 			eventType, _ := event["type"].(string)
 			if eventType == "run-ledger.event.truncated" {
@@ -429,10 +438,10 @@ func readRetainedRunLedgerEventMetadata(path string) (int, int, bool, int, error
 			break
 		}
 		if readErr != nil {
-			return 0, 0, false, 0, readErr
+			return 0, 0, false, readErr
 		}
 	}
-	return count, omitted, truncated, int(info.Size()), nil
+	return count, omitted, truncated, nil
 }
 
 func selectRunLedgerArtifactSource(repoDir string, primary string, fallback string, destination string, kind string) (string, bool, error) {

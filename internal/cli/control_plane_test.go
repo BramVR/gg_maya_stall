@@ -715,7 +715,14 @@ func TestEventsReconnectAfterOversizedMarkerDoesNotRepeatTruncation(t *testing.T
 	if err := writeRunLedgerBytes(eventsPath, []byte("{\"sequence\":1,\"type\":\"run-ledger.event.truncated\"}\n{\"sequence\":2,\"type\":\"run.completed\"}\n")); err != nil {
 		t.Fatalf("write retained events: %v", err)
 	}
-	record := runLedgerRecord{RunID: runID, Events: runLedgerEventsFileName, EventCount: 2}
+	record := runLedgerRecord{
+		Version: runLedgerSchemaVersion, RunID: runID, AcceptedAt: "2026-07-16T12:00:00Z",
+		EvidenceDir: filepath.ToSlash(filepath.Join("artifacts", "maya-stall", runID)),
+		Events:      runLedgerEventsFileName, Log: runLedgerLogPath, EventCount: 2,
+	}
+	if err := newRunLedgerStore(repoDir).Replace(record); err != nil {
+		t.Fatalf("write retained Run Ledger: %v", err)
+	}
 
 	response, err := readControlPlaneEvents(repoDir, record, 2)
 
@@ -787,7 +794,14 @@ func TestControlPlaneEventReadWaitsForLedgerTransaction(t *testing.T) {
 	if err := writeRunLedgerBytes(eventsPath, []byte("{\"sequence\":1,\"type\":\"run.accepted\"}\n")); err != nil {
 		t.Fatalf("write retained events: %v", err)
 	}
-	record := runLedgerRecord{RunID: runID, Events: runLedgerEventsFileName, EventCount: 1}
+	record := runLedgerRecord{
+		Version: runLedgerSchemaVersion, RunID: runID, AcceptedAt: "2026-07-16T12:00:00Z",
+		EvidenceDir: filepath.ToSlash(filepath.Join("artifacts", "maya-stall", runID)),
+		Events:      runLedgerEventsFileName, Log: runLedgerLogPath, EventCount: 1,
+	}
+	if err := newRunLedgerStore(repoDir).Replace(record); err != nil {
+		t.Fatalf("write retained Run Ledger: %v", err)
+	}
 	locked := make(chan struct{})
 	release := make(chan struct{})
 	transactionDone := make(chan error, 1)

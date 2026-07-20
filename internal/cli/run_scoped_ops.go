@@ -259,7 +259,7 @@ func captureRunScopedScreenshot(repoDir string, runID string) (runOutcome, visua
 	if err := appendRunScopedVisualEvidence(repoDir, runID, artifact, context.EventsPath); err != nil {
 		durabilityWarnings = append(durabilityWarnings, fmt.Sprintf("refresh Evidence visual metadata: %v", err))
 	}
-	if err := refreshRunLedgerArtifacts(repoDir, runID, time.Now()); err != nil {
+	if err := newRunLedgerStore(repoDir).Refresh(runID, time.Now()); err != nil {
 		durabilityWarnings = append(durabilityWarnings, fmt.Sprintf("refresh embedded run ledger: %v", err))
 	}
 	outcome := runScopedOutcome(run, context)
@@ -301,7 +301,7 @@ func clickRunScopedDesktop(repoDir string, options attachOptions) (desktopContro
 	if err := appendRunScopedEvidenceEvents(context.EventsPath, filepath.Join(context.EvidenceDir, evidenceEventsFileName)); err != nil {
 		durabilityWarnings = append(durabilityWarnings, fmt.Sprintf("refresh Evidence events: %v", err))
 	}
-	if refreshErr := refreshRunLedgerArtifacts(repoDir, options.RunID, time.Now()); refreshErr != nil {
+	if refreshErr := newRunLedgerStore(repoDir).Refresh(options.RunID, time.Now()); refreshErr != nil {
 		durabilityWarnings = append(durabilityWarnings, fmt.Sprintf("refresh embedded run ledger: %v", refreshErr))
 	}
 	durabilityWarning := ""

@@ -148,7 +148,7 @@ func validateRunID(runID string) error {
 
 func printStatus(repoDir string, options statusOptions, stdout io.Writer) error {
 	if options.RunID != "" {
-		ledgerRecord, ledgerErr := readRunLedgerRecord(repoDir, options.RunID)
+		ledgerRecord, ledgerErr := newRunLedgerStore(repoDir).Read(options.RunID)
 		if ledgerErr == nil {
 			retained, err := runLedgerUsesRetainedState(repoDir, ledgerRecord)
 			if err != nil {
@@ -253,7 +253,7 @@ func attachRun(repoDir string, runID string, stdout io.Writer) error {
 	if err := validateRunID(runID); err != nil {
 		return err
 	}
-	ledgerRecord, ledgerErr := readRunLedgerRecord(repoDir, runID)
+	ledgerRecord, ledgerErr := newRunLedgerStore(repoDir).Read(runID)
 	if ledgerErr == nil {
 		retained, err := runLedgerUsesRetainedState(repoDir, ledgerRecord)
 		if err != nil {
@@ -352,7 +352,7 @@ func stopKeptRun(repoDir string, runID string, now time.Time) error {
 		return err
 	}
 	if !found {
-		record, ledgerErr := readRunLedgerRecord(repoDir, runID)
+		record, ledgerErr := newRunLedgerStore(repoDir).Read(runID)
 		if ledgerErr == nil && record.StopPhase == "host-lock-released" {
 			return cleanupRunState(repoDir, runID)
 		}
@@ -368,7 +368,7 @@ func stopKeptRun(repoDir string, runID string, now time.Time) error {
 	if err != nil {
 		return err
 	}
-	ledgerRecord, ledgerErr := readRunLedgerRecord(repoDir, runID)
+	ledgerRecord, ledgerErr := newRunLedgerStore(repoDir).Read(runID)
 	if ledgerErr == nil && record.StopPhase == "" {
 		switch ledgerRecord.StopPhase {
 		case "session-stopped", "broker-cleaned", "host-lock-released":
@@ -414,7 +414,7 @@ func stopKeptRun(repoDir string, runID string, now time.Time) error {
 		}
 	}
 	if record.LegacyMissingRecord && manifest.Runtime.BrokerAdapter != "fake" {
-		if _, ledgerErr := readRunLedgerRecord(repoDir, runID); ledgerErr == nil {
+		if _, ledgerErr := newRunLedgerStore(repoDir).Read(runID); ledgerErr == nil {
 			return fmt.Errorf("kept run %q is missing its durable Run Record; refusing to stop the broker session or release the authoritative Host Lock", runID)
 		} else {
 			var usageErr *usageError

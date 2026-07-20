@@ -84,13 +84,13 @@ func failAcceptedSubmission(repoDir string, options runOptions, runtime runRunti
 	}
 	if policy, available := availableRunLedgerPolicy(repoDir); available {
 		run.ledgerPolicy = policy
-		if retentionErr := pruneRunLedger(run.repoDir, policy, run.acceptedAt, run.manifest.RunID); retentionErr != nil {
+		if retentionErr := newRunLedgerStore(run.repoDir).Prune(policy, run.acceptedAt, run.manifest.RunID); retentionErr != nil {
 			submissionErr = errors.Join(submissionErr, fmt.Errorf("apply embedded run ledger retention: %w", retentionErr))
 		}
 	}
 	run.failedLayer = failureLayerSubmission
 	outcome, runErr := run.finishEarlyFailure(submissionErr)
-	ledgerErr := finalizeRunLedger(run.repoDir, outcome, run.manifest, run.ledgerPolicy, run.runtime.Now())
+	ledgerErr := newRunLedgerStore(run.repoDir).Finalize(outcome, run.manifest, run.ledgerPolicy, run.runtime.Now())
 	if ledgerErr != nil {
 		ledgerErr = fmt.Errorf("finalize embedded run ledger for %s: %w", run.manifest.RunID, ledgerErr)
 	}
@@ -197,7 +197,7 @@ func (run *freshRunLifecycle) Run() (outcome runOutcome, err error) {
 			outcome = run.currentOutcome()
 		}
 		if run.accepted {
-			if ledgerErr := finalizeRunLedger(run.repoDir, outcome, run.manifest, run.ledgerPolicy, run.runtime.Now()); ledgerErr != nil {
+			if ledgerErr := newRunLedgerStore(run.repoDir).Finalize(outcome, run.manifest, run.ledgerPolicy, run.runtime.Now()); ledgerErr != nil {
 				err = errors.Join(err, fmt.Errorf("finalize embedded run ledger for %s: %w", run.manifest.RunID, ledgerErr))
 			}
 		}
@@ -369,7 +369,7 @@ func (run *freshRunLifecycle) setup() error {
 		return err
 	}
 	run.ledgerPolicy = ledgerPolicy
-	if err := pruneRunLedger(run.repoDir, run.ledgerPolicy, run.acceptedAt, run.manifest.RunID); err != nil {
+	if err := newRunLedgerStore(run.repoDir).Prune(run.ledgerPolicy, run.acceptedAt, run.manifest.RunID); err != nil {
 		return fmt.Errorf("apply embedded run ledger retention: %w", err)
 	}
 	run.configPath = configPath
@@ -545,10 +545,12 @@ func (run *freshRunLifecycle) accept() error {
 				scenarioResultEnvVar: workspace.LocalScenarioResultPath(),
 			},
 		}
-		if _, err := os.Lstat(runLedgerDir(run.repoDir, runID)); err == nil {
-			continue
-		} else if !errors.Is(err, os.ErrNotExist) {
+		exists, err := newRunLedgerStore(run.repoDir).Occupied(runID)
+		if err != nil {
 			return err
+		}
+		if exists {
+			continue
 		}
 		if _, err := os.Lstat(context.EvidenceDir); err == nil {
 			continue
@@ -589,8 +591,9 @@ func (run *freshRunLifecycle) accept() error {
 			return err
 		}
 	}
-	if err := initializeRunLedger(run.repoDir, run.manifest, run.acceptedAt, run.context.EventsPath); err != nil {
-		return errors.Join(fmt.Errorf("initialize embedded run ledger: %w", err), cleanupRunLedgerRecord(run.repoDir, run.manifest.RunID))
+	ledger := newRunLedgerStore(run.repoDir)
+	if err := ledger.Initialize(run.manifest, run.acceptedAt, run.context.EventsPath); err != nil {
+		return errors.Join(fmt.Errorf("initialize embedded run ledger: %w", err), ledger.Remove(run.manifest.RunID))
 	}
 	run.accepted = true
 	if run.runtime.Accepted != nil {

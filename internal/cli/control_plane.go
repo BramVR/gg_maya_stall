@@ -502,7 +502,8 @@ func (handler *controlPlaneHandler) serveRunHistory(response http.ResponseWriter
 	records := make([]runLedgerRecord, 0, maximumControlPlaneHistoryRuns)
 	for _, runID := range names {
 		repoDir := filepath.Join(handler.dataDir, "runs", runID, "repo")
-		if _, err := os.Lstat(filepath.Join(runLedgerDir(repoDir, runID), "run.json")); errors.Is(err, os.ErrNotExist) {
+		exists, err := newRunLedgerStore(repoDir).HasRecord(runID)
+		if err == nil && !exists {
 			continue
 		} else if err != nil {
 			writeControlPlaneError(response, http.StatusInternalServerError, "read run history")
@@ -637,7 +638,7 @@ func (handler *controlPlaneHandler) serveRunRead(response http.ResponseWriter, r
 	}
 	followEvents := parts[3] == "events" && request.URL.Query().Get("follow") == "true"
 	if (parts[3] == "events" || parts[3] == "logs") && !assignmentBacked && !followEvents && !terminalRunLedgerRecord(record) {
-		if err := refreshRunLedgerArtifacts(repoDir, runID, handler.runtime.Now()); err != nil {
+		if err := newRunLedgerStore(repoDir).Refresh(runID, handler.runtime.Now()); err != nil {
 			writeControlPlaneError(response, http.StatusInternalServerError, "refresh active run stream")
 			return
 		}
@@ -733,7 +734,7 @@ func (handler *controlPlaneHandler) readControlPlaneRunRecord(repoDir string, ru
 		return record, true, true, nil
 	}
 	handler.mu.Unlock()
-	record, err := readRunLedgerRecord(repoDir, runID)
+	record, err := newRunLedgerStore(repoDir).Read(runID)
 	return record, assignmentActive, assignment != nil, err
 }
 
@@ -896,7 +897,7 @@ func refreshControlPlaneEventSource(repoDir string, runID string, now time.Time)
 	if err != nil || !before.Exists {
 		return before, err
 	}
-	if err := refreshRunLedgerArtifacts(repoDir, runID, now); err != nil {
+	if err := newRunLedgerStore(repoDir).Refresh(runID, now); err != nil {
 		return controlPlaneEventSourceStamp{}, err
 	}
 	after, err := controlPlaneEventSourceStampForRun(repoDir, runID)
@@ -1039,29 +1040,11 @@ func readControlPlaneResult(repoDir string, record runLedgerRecord) (controlPlan
 }
 
 func readControlPlaneLogs(repoDir string, record runLedgerRecord) (controlPlaneLogsResponse, error) {
-	var result controlPlaneLogsResponse
-	err := withRunLedgerLock(repoDir, record.RunID, func() error {
-		current, err := readRunLedgerRecord(repoDir, record.RunID)
-		if err != nil {
-			return err
-		}
-		record.Log = current.Log
-		record.LogTruncated = current.LogTruncated
-		var readErr error
-		result, readErr = readControlPlaneLogsUnlocked(repoDir, record)
-		return readErr
-	})
-	return result, err
-}
-
-func readControlPlaneLogsUnlocked(repoDir string, record runLedgerRecord) (controlPlaneLogsResponse, error) {
-	if err := ensureWorkspacePathHasNoSymlinkAncestor(runLedgerDir(repoDir, record.RunID), filepath.FromSlash(record.Log)); err != nil {
-		return controlPlaneLogsResponse{}, err
-	}
-	content, err := readRunLedgerBytes(filepath.Join(runLedgerDir(repoDir, record.RunID), filepath.FromSlash(record.Log)))
+	current, content, err := newRunLedgerStore(repoDir).ReadLog(record.RunID)
 	if err != nil {
 		return controlPlaneLogsResponse{}, err
 	}
+	record.LogTruncated = current.LogTruncated
 	sanitized := sanitizeControlPlaneText(string(content), repoDir)
 	return controlPlaneLogsResponse{
 		Version: controlPlaneAPIVersion, Kind: "logs", RunID: record.RunID,
@@ -1070,23 +1053,13 @@ func readControlPlaneLogsUnlocked(repoDir string, record runLedgerRecord) (contr
 }
 
 func readControlPlaneEvents(repoDir string, record runLedgerRecord, requestedSequence ...int) (controlPlaneEventsResponse, error) {
-	var result controlPlaneEventsResponse
-	err := withRunLedgerLock(repoDir, record.RunID, func() error {
-		var readErr error
-		result, readErr = readControlPlaneEventsUnlocked(repoDir, record, requestedSequence...)
-		return readErr
-	})
-	return result, err
-}
-
-func readControlPlaneEventsUnlocked(repoDir string, record runLedgerRecord, requestedSequence ...int) (controlPlaneEventsResponse, error) {
-	if err := ensureWorkspacePathHasNoSymlinkAncestor(runLedgerDir(repoDir, record.RunID), filepath.FromSlash(record.Events)); err != nil {
-		return controlPlaneEventsResponse{}, err
-	}
-	content, err := readRunLedgerBytes(filepath.Join(runLedgerDir(repoDir, record.RunID), filepath.FromSlash(record.Events)))
+	current, content, err := newRunLedgerStore(repoDir).ReadEvents(record.RunID)
 	if err != nil {
 		return controlPlaneEventsResponse{}, err
 	}
+	record.EventCount = current.EventCount
+	record.EventsOmitted = current.EventsOmitted
+	record.EventsTruncated = current.EventsTruncated
 	fromSequence := 1
 	includeCursors := len(requestedSequence) > 0
 	if includeCursors {
@@ -1330,7 +1303,7 @@ func printStatusThroughMode(repoDir string, options statusOptions, stdout io.Wri
 }
 
 func readEmbeddedStatusResponse(repoDir string, runID string) (controlPlaneStatusResponse, error) {
-	record, err := readRunLedgerRecord(repoDir, runID)
+	record, err := newRunLedgerStore(repoDir).Read(runID)
 	if err != nil {
 		return controlPlaneStatusResponse{}, err
 	}
@@ -1432,7 +1405,7 @@ func printRunReadThroughMode(repoDir string, resource string, options runReadOpt
 				return err
 			}
 		} else {
-			record, err := readRunLedgerRecord(repoDir, options.RunID)
+			record, err := newRunLedgerStore(repoDir).Read(options.RunID)
 			if err != nil {
 				return err
 			}
@@ -1475,7 +1448,7 @@ func printRunReadThroughMode(repoDir string, resource string, options runReadOpt
 				return err
 			}
 		} else {
-			record, err := readRunLedgerRecord(repoDir, options.RunID)
+			record, err := newRunLedgerStore(repoDir).Read(options.RunID)
 			if err != nil {
 				return err
 			}
@@ -1502,7 +1475,7 @@ func printRunReadThroughMode(repoDir string, resource string, options runReadOpt
 				return err
 			}
 		} else {
-			record, err := readRunLedgerRecord(repoDir, options.RunID)
+			record, err := newRunLedgerStore(repoDir).Read(options.RunID)
 			if err != nil {
 				return err
 			}

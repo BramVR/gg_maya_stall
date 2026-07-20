@@ -703,7 +703,7 @@ func TestHostAgentFailurePreservationAppendsExactTerminalFailureEvent(t *testing
 	acknowledged := []byte("{\"sequence\":1,\"type\":\"run.accepted\"}\n{\"sequence\":2,\"type\":\"run.failed-before-result-collection\"}\n")
 	terminal := []byte("{\"sequence\":2,\"type\":\"run.failed\"}\n")
 
-	if err := preserveAcknowledgedHostAgentFailure(repoDir, runID, acknowledged, terminal, nil, "Agent failed", defaultRunLedgerPolicy()); err != nil {
+	if err := newRunLedgerStore(repoDir).PreserveAcknowledgedFailure(runID, acknowledged, terminal, nil, "Agent failed", defaultRunLedgerPolicy()); err != nil {
 		t.Fatalf("preserve Host Agent failure: %v", err)
 	}
 	retained, err := os.ReadFile(filepath.Join(runLedgerDir(repoDir, runID), runLedgerEventsFileName))
@@ -729,7 +729,7 @@ func TestHostAgentFailureSequenceAdvancesPastRetainedGap(t *testing.T) {
 	acknowledged := []byte("{\"sequence\":1,\"type\":\"run.accepted\"}\n" +
 		"{\"details\":{\"firstOmittedSequence\":2,\"lastOmittedSequence\":6,\"omittedCount\":5},\"sequence\":2,\"type\":\"run-ledger.events.truncated\"}\n")
 
-	if err := preserveAcknowledgedHostAgentFailure(repoDir, runID, acknowledged, []byte("{\"sequence\":2,\"type\":\"run.failed\"}\n"), nil, "Agent failed", defaultRunLedgerPolicy()); err != nil {
+	if err := newRunLedgerStore(repoDir).PreserveAcknowledgedFailure(runID, acknowledged, []byte("{\"sequence\":2,\"type\":\"run.failed\"}\n"), nil, "Agent failed", defaultRunLedgerPolicy()); err != nil {
 		t.Fatalf("preserve Host Agent failure: %v", err)
 	}
 	retained, err := os.ReadFile(filepath.Join(runLedgerDir(repoDir, runID), runLedgerEventsFileName))
@@ -2192,19 +2192,19 @@ func TestControlPlaneRecoversEachPartialHostAgentTransitionWrite(t *testing.T) {
 			if err := writePrivateJSON(transactionPath, record); err != nil {
 				t.Fatalf("write active transaction: %v", err)
 			}
-			concrete := handler.(*controlPlaneHandler)
+			transitionStore := newHostAgentTransitionStore(dataDir)
 			if stage == "ledger" || stage == "host-lock" || stage == "assignment" {
-				if err := writeRunLedgerRecord(repoDir, assigned); err != nil {
+				if err := newRunLedgerStore(repoDir).Replace(assigned); err != nil {
 					t.Fatalf("write partial assigned ledger: %v", err)
 				}
 			}
 			if stage == "host-lock" || stage == "assignment" {
-				if err := concrete.persistHostLock(record, record.State); err != nil {
+				if err := transitionStore.persistHostLock(record, record.State); err != nil {
 					t.Fatalf("write partial Host Lock: %v", err)
 				}
 			}
 			if stage == "assignment" {
-				if err := concrete.persistAssignment(record); err != nil {
+				if err := transitionStore.SaveAssignment(record); err != nil {
 					t.Fatalf("write partial assignment: %v", err)
 				}
 			}
@@ -2255,7 +2255,8 @@ func TestControlPlaneRecoversEachPartialHostAgentTransitionWrite(t *testing.T) {
 			assigned.Host = record.HostID
 			record.AssignedLedger = &assigned
 			concrete := handler.(*controlPlaneHandler)
-			if err := concrete.applyHostAgentTransition(record); err != nil {
+			transitionStore := newHostAgentTransitionStore(dataDir)
+			if err := transitionStore.Commit(record, concrete.prepareRecoveredHostAgentTransition); err != nil {
 				t.Fatalf("persist active transition fixture: %v", err)
 			}
 			terminalLedger := assigned
@@ -2270,12 +2271,12 @@ func TestControlPlaneRecoversEachPartialHostAgentTransitionWrite(t *testing.T) {
 				t.Fatalf("write completed transaction: %v", err)
 			}
 			if stage == "assignment" || stage == "terminal-ledger" || stage == "lock-removal" {
-				if err := concrete.persistAssignment(completed); err != nil {
+				if err := transitionStore.SaveAssignment(completed); err != nil {
 					t.Fatalf("write partial completed assignment: %v", err)
 				}
 			}
 			if stage == "terminal-ledger" || stage == "lock-removal" {
-				if err := writeRunLedgerRecord(repoDir, terminalLedger); err != nil {
+				if err := newRunLedgerStore(repoDir).Replace(terminalLedger); err != nil {
 					t.Fatalf("write partial terminal ledger: %v", err)
 				}
 			}

@@ -11,8 +11,118 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 )
+
+func TestRetainedRunLedgerEventMetadataStreamsInput(t *testing.T) {
+	events := strings.Join([]string{
+		`{"sequence":1,"type":"scenario.started"}`,
+		`{"sequence":2,"type":"run-ledger.events.truncated","details":{"omittedCount":3}}`,
+	}, "\n") + "\n"
+
+	count, omitted, truncated, err := retainedRunLedgerEventMetadata(iotest.OneByteReader(strings.NewReader(events)))
+	if err != nil {
+		t.Fatalf("read retained event metadata: %v", err)
+	}
+	if count != 2 || omitted != 3 || !truncated {
+		t.Fatalf("retained event metadata = count %d, omitted %d, truncated %t", count, omitted, truncated)
+	}
+}
+
+func TestFreshRunDoesNotReuseInterruptedLedgerRunID(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	runID := "20260720T120000.000000000Z"
+	partialPath := filepath.Join(runLedgerDir(dir, runID), runLedgerEventsFileName)
+	if err := os.MkdirAll(filepath.Dir(partialPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(partialPath, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways, AssignedRunID: runID}, defaultRunRuntime()).(*freshRunLifecycle)
+
+	err := run.accept()
+	if err == nil || !strings.Contains(err.Error(), "assigned Run ID "+runID+" already exists") {
+		t.Fatalf("accept with occupied Run ID error = %v", err)
+	}
+	if content, readErr := os.ReadFile(partialPath); readErr != nil || string(content) != "partial" {
+		t.Fatalf("interrupted ledger changed: content %q, error %v", content, readErr)
+	}
+}
+
+func TestRunLedgerStoreRejectsSymlinkedArtifactPaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not consistently available on Windows test runners")
+	}
+	dir := writeRunConfigFixture(t)
+	runID := "20260720T120000.000000000Z"
+	run := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways, AssignedRunID: runID}, defaultRunRuntime()).(*freshRunLifecycle)
+	if err := run.accept(); err != nil {
+		t.Fatal(err)
+	}
+	store := newRunLedgerStore(dir)
+	eventsPath := filepath.Join(runLedgerDir(dir, runID), runLedgerEventsFileName)
+	externalPath := filepath.Join(t.TempDir(), "events.jsonl")
+	if err := os.WriteFile(externalPath, []byte("external\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(eventsPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalPath, eventsPath); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, operation := range map[string]func() error{
+		"snapshot": func() error {
+			_, err := store.Snapshot(runID)
+			return err
+		},
+		"update snapshot": func() error {
+			return store.UpdateSnapshot(runID, func(*runLedgerSnapshot) error { return nil })
+		},
+		"replace events": func() error {
+			return store.ReplaceEvents(runID, []byte("replacement\n"))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := operation(); err == nil || !strings.Contains(err.Error(), "symlink") {
+				t.Fatalf("symlinked artifact error = %v", err)
+			}
+		})
+	}
+	if content, err := os.ReadFile(externalPath); err != nil || string(content) != "external\n" {
+		t.Fatalf("external artifact changed: content %q, error %v", content, err)
+	}
+}
+
+func TestRunLedgerStoreExistenceChecksRejectSymlinkedParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not consistently available on Windows test runners")
+	}
+	dir := t.TempDir()
+	if err := os.Symlink(t.TempDir(), filepath.Join(dir, ".maya-stall")); err != nil {
+		t.Fatal(err)
+	}
+	store := newRunLedgerStore(dir)
+	for name, operation := range map[string]func() error{
+		"has record": func() error {
+			_, err := store.HasRecord("20260720T120000.000000000Z")
+			return err
+		},
+		"occupied": func() error {
+			_, err := store.Occupied("20260720T120000.000000000Z")
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := operation(); err == nil || !strings.Contains(err.Error(), "symlink") {
+				t.Fatalf("symlinked parent error = %v", err)
+			}
+		})
+	}
+}
 
 func TestCompletedRunRemainsInEmbeddedHistoryAfterRunStateCleanup(t *testing.T) {
 	dir := writeRunConfigFixture(t)

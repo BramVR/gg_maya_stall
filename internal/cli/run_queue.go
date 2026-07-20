@@ -78,17 +78,18 @@ func (handler *controlPlaneHandler) loadControlPlaneQueue() error {
 		if record.Version != controlPlaneQueueVersion || validateRunID(record.RunID) != nil || entry.Name() != record.RunID+".json" || (record.State != "admitting" && record.State != "queued" && record.State != "canceling") || record.Submission.Version != controlPlaneAPIVersion || record.Submission.Scenario == "" || record.HostPool == "" {
 			return fmt.Errorf("invalid queued Run %s", entry.Name())
 		}
-		ledger, err := readRunLedgerRecord(filepath.Join(handler.dataDir, "runs", record.RunID, "repo"), record.RunID)
+		repoDir := filepath.Join(handler.dataDir, "runs", record.RunID, "repo")
+		ledgerStore := newRunLedgerStore(repoDir)
+		ledger, err := ledgerStore.Read(record.RunID)
 		if handler.assignments[record.RunID] != nil {
 			if err := handler.removeQueueIntent(record.RunID); err != nil {
 				return err
 			}
 			continue
 		}
-		repoDir := filepath.Join(handler.dataDir, "runs", record.RunID, "repo")
 		if record.State == "admitting" {
-			_, ledgerPathErr := os.Lstat(runLedgerDir(repoDir, record.RunID))
-			if err != nil && errors.Is(ledgerPathErr, os.ErrNotExist) {
+			ledgerExists, ledgerPathErr := ledgerStore.Occupied(record.RunID)
+			if err != nil && ledgerPathErr == nil && !ledgerExists {
 				if cleanupErr := cleanupAbandonedQueueAdmission(repoDir, record.RunID); cleanupErr != nil {
 					return cleanupErr
 				}
@@ -767,14 +768,19 @@ func targetProfileForSubmission(submission controlPlaneSubmission) string {
 
 func ensureQueuedEvent(repoDir string, runID string) error {
 	stateEvents := filepath.Join(repoDir, ".maya-stall", "state", "runs", runID, "events.jsonl")
-	for _, path := range []string{stateEvents, filepath.Join(runLedgerDir(repoDir, runID), runLedgerEventsFileName)} {
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		if bytes.Contains(content, []byte(`"type":"run.queued"`)) {
-			return nil
-		}
+	content, err := os.ReadFile(stateEvents)
+	if err != nil {
+		return err
+	}
+	if bytes.Contains(content, []byte(`"type":"run.queued"`)) {
+		return nil
+	}
+	_, content, err = newRunLedgerStore(repoDir).ReadEvents(runID)
+	if err != nil {
+		return err
+	}
+	if bytes.Contains(content, []byte(`"type":"run.queued"`)) {
+		return nil
 	}
 	return appendEvent(stateEvents, "run.queued", "awaiting-host-assignment")
 }
@@ -804,17 +810,11 @@ func (handler *controlPlaneHandler) queueWaitReasonLocked(queued *controlPlaneQu
 }
 
 func markControlPlaneRunQueued(repoDir string, runID string, now time.Time) error {
-	return withRunLedgerLock(repoDir, runID, func() error {
-		record, err := readRunLedgerRecord(repoDir, runID)
-		if err != nil {
-			return err
-		}
-		if err := syncRunLedgerArtifacts(repoDir, &record, fallbackRunLedgerPolicy(record)); err != nil {
-			return err
-		}
+	store := newRunLedgerStore(repoDir)
+	return store.UpdateWithArtifacts(runID, func(record *runLedgerRecord) error {
 		record.State = "queued"
 		record.UpdatedAt = now.UTC().Format(time.RFC3339Nano)
-		return writeRunLedgerRecord(repoDir, record)
+		return nil
 	})
 }
 
@@ -847,7 +847,7 @@ func cleanupAbandonedQueueAdmission(repoDir string, runID string) error {
 	if err := os.Remove(evidenceDir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		cleanupErr = errors.Join(cleanupErr, err)
 	}
-	cleanupErr = errors.Join(cleanupErr, cleanupRunLedgerRecord(repoDir, runID))
+	cleanupErr = errors.Join(cleanupErr, newRunLedgerStore(repoDir).Remove(runID))
 	if cleanupErr != nil {
 		return cleanupErr
 	}
@@ -859,14 +859,12 @@ func cleanupAbandonedQueueAdmission(repoDir string, runID string) error {
 }
 
 func ensureDurableQueuedRunState(repoDir string, queue controlPlaneQueueRecord, durable *runLedgerRecord) error {
-	ledger := runLedgerRecord{}
-	if durable == nil {
-		loaded, err := readRunLedgerRecord(repoDir, queue.RunID)
-		if err != nil {
-			return err
-		}
-		ledger = loaded
-	} else {
+	snapshot, err := newRunLedgerStore(repoDir).Snapshot(queue.RunID)
+	if err != nil {
+		return err
+	}
+	ledger := snapshot.Record
+	if durable != nil {
 		ledger = *durable
 	}
 	manifest, stateDir, found, err := readStopRunManifest(repoDir, queue.RunID)
@@ -882,22 +880,18 @@ func ensureDurableQueuedRunState(repoDir string, queue controlPlaneQueueRecord, 
 		return fmt.Errorf("queued Run transient manifest does not match durable ledger")
 	}
 	for _, artifact := range []struct {
-		source string
-		target string
+		content []byte
+		target  string
 	}{
-		{filepath.Join(runLedgerDir(repoDir, queue.RunID), runLedgerEventsFileName), filepath.Join(stateDir, runLedgerEventsFileName)},
-		{filepath.Join(runLedgerDir(repoDir, queue.RunID), filepath.FromSlash(runLedgerLogPath)), filepath.Join(stateDir, filepath.FromSlash(evidenceLogPath))},
+		{snapshot.Events, filepath.Join(stateDir, runLedgerEventsFileName)},
+		{snapshot.Log, filepath.Join(stateDir, filepath.FromSlash(evidenceLogPath))},
 	} {
 		info, err := os.Lstat(artifact.target)
 		if errors.Is(err, os.ErrNotExist) {
-			content, readErr := os.ReadFile(artifact.source)
-			if readErr != nil {
-				return readErr
-			}
 			if err := os.MkdirAll(filepath.Dir(artifact.target), 0o755); err != nil {
 				return err
 			}
-			if err := os.WriteFile(artifact.target, content, 0o644); err != nil {
+			if err := os.WriteFile(artifact.target, artifact.content, 0o644); err != nil {
 				return err
 			}
 		} else if err != nil {
@@ -999,7 +993,7 @@ func (handler *controlPlaneHandler) cancelQueuedRun(runID string) (controlPlaneS
 	repoDir := filepath.Join(handler.dataDir, "runs", runID, "repo")
 	err := handler.completeQueuedRunCancellation(repoDir, record, run)
 	if err != nil {
-		ledger, ledgerErr := readRunLedgerRecord(repoDir, runID)
+		ledger, ledgerErr := newRunLedgerStore(repoDir).Read(runID)
 		terminalCancellation := ledgerErr == nil && (ledger.State == "canceled" || ledger.State == "cleanup-failed")
 		handler.mu.Lock()
 		queued.cancellationActive = false
@@ -1023,7 +1017,7 @@ func (handler *controlPlaneHandler) cancelQueuedRun(runID string) (controlPlaneS
 	if removeErr != nil {
 		return controlPlaneStatusResponse{}, removeErr
 	}
-	ledger, err := readRunLedgerRecord(repoDir, runID)
+	ledger, err := newRunLedgerStore(repoDir).Read(runID)
 	if err != nil {
 		return controlPlaneStatusResponse{}, err
 	}
@@ -1039,7 +1033,7 @@ func (handler *controlPlaneHandler) releaseQueuedWaiterLocked(queued *controlPla
 }
 
 func (handler *controlPlaneHandler) completeQueuedRunCancellation(repoDir string, record controlPlaneQueueRecord, run *freshRunLifecycle) error {
-	ledger, err := readRunLedgerRecord(repoDir, record.RunID)
+	ledger, err := newRunLedgerStore(repoDir).Read(record.RunID)
 	if err != nil {
 		return err
 	}
@@ -1082,20 +1076,13 @@ func prepareQueuedRunCancellation(run *freshRunLifecycle) error {
 	if err := writeMinimalEvidenceBundle(run.context, run.manifest, run.result, run.failure); err != nil {
 		return err
 	}
-	if err := withRunLedgerLock(run.repoDir, run.manifest.RunID, func() error {
-		record, err := readRunLedgerRecord(run.repoDir, run.manifest.RunID)
-		if err != nil {
-			return err
-		}
-		if err := syncRunLedgerArtifacts(run.repoDir, &record, fallbackRunLedgerPolicy(record)); err != nil {
-			return err
-		}
+	if err := newRunLedgerStore(run.repoDir).UpdateWithArtifacts(run.manifest.RunID, func(record *runLedgerRecord) error {
 		now := run.runtime.Now().UTC().Format(time.RFC3339Nano)
 		record.State = "canceling"
 		record.Status = resultStatusFailed
 		record.UpdatedAt = now
 		record.CompletedAt = ""
-		return writeRunLedgerRecord(run.repoDir, record)
+		return nil
 	}); err != nil {
 		return err
 	}
@@ -1111,18 +1098,14 @@ func cleanupQueuedRunCancellation(repoDir string, runID string, now time.Time) e
 }
 
 func updateQueuedCancellationLedgerState(repoDir string, runID string, state string, now time.Time) error {
-	return withRunLedgerLock(repoDir, runID, func() error {
-		record, err := readRunLedgerRecord(repoDir, runID)
-		if err != nil {
-			return err
-		}
+	return newRunLedgerStore(repoDir).Update(runID, func(record *runLedgerRecord) error {
 		record.State = state
 		record.Status = resultStatusFailed
 		record.UpdatedAt = now.UTC().Format(time.RFC3339Nano)
 		if record.CompletedAt == "" {
 			record.CompletedAt = record.UpdatedAt
 		}
-		return writeRunLedgerRecord(repoDir, record)
+		return nil
 	})
 }
 

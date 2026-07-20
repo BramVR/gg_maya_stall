@@ -549,7 +549,7 @@ func (handler *controlPlaneHandler) loadHostAgentState() error {
 	if err := handler.recoverHostAgentQuarantineMarkers(); err != nil {
 		return err
 	}
-	if err := handler.recoverHostAgentTransactions(); err != nil {
+	if err := newHostAgentTransitionStore(handler.dataDir).Recover(handler.prepareRecoveredHostAgentTransition); err != nil {
 		return err
 	}
 	lockEntries, err := os.ReadDir(filepath.Join(handler.dataDir, "host-locks"))
@@ -599,7 +599,7 @@ func (handler *controlPlaneHandler) loadHostAgentState() error {
 			}
 			completed := assignment
 			completed.State = "completed"
-			if err := handler.ensureHostAgentTransition(completed); err != nil {
+			if err := newHostAgentTransitionStore(handler.dataDir).Commit(completed, handler.prepareRecoveredHostAgentTransition); err != nil {
 				return fmt.Errorf("resume completed Host Agent transition: %w", err)
 			}
 			continue
@@ -752,55 +752,32 @@ func (handler *controlPlaneHandler) recoverHostAgentQuarantineMarkers() error {
 	return nil
 }
 
-func (handler *controlPlaneHandler) recoverHostAgentTransactions() error {
-	root := filepath.Join(handler.dataDir, "assignment-transactions")
-	entries, err := os.ReadDir(root)
+func (handler *controlPlaneHandler) prepareRecoveredHostAgentTransition(record hostAgentAssignmentRecord, entryName string) (hostAgentAssignmentRecord, error) {
+	agent := handler.hostAgents[record.AgentID]
+	if record.Version != hostAgentAPIVersion || validateRunID(record.RunID) != nil || entryName != record.RunID+".json" || agent == nil || agent.enrollment.HostID != record.HostID || record.LockToken == "" || record.State != "assigned" && record.State != "confirmed" && record.State != "finishing" && record.State != "quarantined" && record.State != "completed" {
+		return hostAgentAssignmentRecord{}, fmt.Errorf("invalid Host Agent transaction %s", entryName)
+	}
+	if agent.status.State != "quarantined" || agent.status.RunID != record.RunID || record.State == "completed" {
+		return record, nil
+	}
+	terminalLedger, err := newRunLedgerStore(filepath.Join(handler.dataDir, "runs", record.RunID, "repo")).Read(record.RunID)
 	if err != nil {
-		return err
+		return hostAgentAssignmentRecord{}, fmt.Errorf("recover quarantined Host Agent transaction: %w", err)
 	}
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			return fmt.Errorf("invalid Host Agent transaction path %s", entry.Name())
-		}
-		var record hostAgentAssignmentRecord
-		path := filepath.Join(root, entry.Name())
-		if err := readPrivateJSON(path, &record); err != nil {
-			return err
-		}
-		agent := handler.hostAgents[record.AgentID]
-		if record.Version != hostAgentAPIVersion || validateRunID(record.RunID) != nil || entry.Name() != record.RunID+".json" || agent == nil || agent.enrollment.HostID != record.HostID || record.LockToken == "" || record.State != "assigned" && record.State != "confirmed" && record.State != "finishing" && record.State != "quarantined" && record.State != "completed" {
-			return fmt.Errorf("invalid Host Agent transaction %s", entry.Name())
-		}
-		if agent.status.State == "quarantined" && agent.status.RunID == record.RunID && record.State != "completed" {
-			terminalLedger, err := readRunLedgerRecord(filepath.Join(handler.dataDir, "runs", record.RunID, "repo"), record.RunID)
-			if err != nil {
-				return fmt.Errorf("recover quarantined Host Agent transaction: %w", err)
-			}
-			targetProfile := record.Submission.TargetProfile
-			if targetProfile == "" {
-				targetProfile = "default"
-			}
-			terminal := runCommandJSON{
-				Version: controlPlaneAPIVersion, Kind: "run", Accepted: true, RunID: record.RunID,
-				Scenario: record.Submission.Scenario, TargetProfile: targetProfile, Host: record.HostID,
-				Status: terminalLedger.Status, StopPolicy: "unresolved",
-			}
-			record.State = "quarantined"
-			record.AssignedLedger = &terminalLedger
-			record.TerminalLedger = &terminalLedger
-			record.Terminal = &terminal
-		}
-		if err := handler.applyHostAgentTransition(record); err != nil {
-			return err
-		}
-		if err := os.Remove(path); err != nil {
-			return err
-		}
-		if err := syncRunLedgerDirectory(root); err != nil {
-			return err
-		}
+	targetProfile := record.Submission.TargetProfile
+	if targetProfile == "" {
+		targetProfile = "default"
 	}
-	return nil
+	terminal := runCommandJSON{
+		Version: controlPlaneAPIVersion, Kind: "run", Accepted: true, RunID: record.RunID,
+		Scenario: record.Submission.Scenario, TargetProfile: targetProfile, Host: record.HostID,
+		Status: terminalLedger.Status, StopPolicy: "unresolved",
+	}
+	record.State = "quarantined"
+	record.AssignedLedger = &terminalLedger
+	record.TerminalLedger = &terminalLedger
+	record.Terminal = &terminal
+	return record, nil
 }
 
 func loadAcceptedHostAgentRun(repoDir string, record hostAgentAssignmentRecord, runtime runRuntime) (*freshRunLifecycle, error) {
@@ -826,7 +803,7 @@ func loadAcceptedHostAgentRun(repoDir string, record hostAgentAssignmentRecord, 
 		policy = available
 	}
 	acceptedAt := runtime.Now()
-	if ledger, ledgerErr := readRunLedgerRecord(repoDir, record.RunID); ledgerErr == nil {
+	if ledger, ledgerErr := newRunLedgerStore(repoDir).Read(record.RunID); ledgerErr == nil {
 		if parsed, parseErr := time.Parse(time.RFC3339Nano, ledger.AcceptedAt); parseErr == nil {
 			acceptedAt = parsed
 		}
@@ -1302,7 +1279,7 @@ func (handler *controlPlaneHandler) serveHostAgentConfirm(response http.Response
 	previousState := assignment.record.State
 	assignment.record.State = "confirmed"
 	agent.status.State = "running"
-	if err := handler.ensureHostAgentTransition(assignment.record); err != nil {
+	if err := newHostAgentTransitionStore(handler.dataDir).Commit(assignment.record, handler.prepareRecoveredHostAgentTransition); err != nil {
 		assignment.record.State = previousState
 		agent.status.State = "locked"
 		writeControlPlaneError(response, http.StatusInternalServerError, "persist Host Lock confirmation")
@@ -1363,7 +1340,7 @@ func (handler *controlPlaneHandler) serveHostAgentSession(response http.Response
 	previous := assignment.record
 	bound := binding.BrokerSession
 	assignment.record.BrokerSession = &bound
-	if err := handler.ensureHostAgentTransition(assignment.record); err != nil {
+	if err := newHostAgentTransitionStore(handler.dataDir).Commit(assignment.record, handler.prepareRecoveredHostAgentTransition); err != nil {
 		assignment.record = previous
 		writeControlPlaneError(response, http.StatusInternalServerError, "persist Maya UI Session binding")
 		return
@@ -1447,48 +1424,36 @@ func (handler *controlPlaneHandler) serveHostAgentProgress(response http.Respons
 
 	updatedAssignment := previousAssignment
 	var identityErr error
-	persistErr := withRunLedgerLock(repoDir, runID, func() error {
-		current, err := readRunLedgerRecord(repoDir, runID)
-		if err != nil {
-			return err
-		}
-		ledgerDir := runLedgerDir(repoDir, runID)
-		currentEvents, err := readRunLedgerBytes(filepath.Join(ledgerDir, filepath.FromSlash(current.Events)))
-		if err != nil {
-			return err
-		}
-		mergedEvents, err := mergeHostAgentProgressEvents(currentEvents, progress.Events)
+	ledgerStore := newRunLedgerStore(repoDir)
+	persistErr := ledgerStore.UpdateSnapshot(runID, func(snapshot *runLedgerSnapshot) error {
+		mergedEvents, err := mergeHostAgentProgressEvents(snapshot.Events, progress.Events)
 		if err != nil {
 			identityErr = err
 			return err
 		}
-		if err := writeRunLedgerBytes(filepath.Join(ledgerDir, filepath.FromSlash(current.Events)), mergedEvents); err != nil {
-			return err
-		}
-		if err := writeRunLedgerBytes(filepath.Join(ledgerDir, filepath.FromSlash(current.Log)), progress.Log); err != nil {
-			return err
-		}
-		eventCount, eventsOmitted, eventsTruncated, eventBytes, err := readRetainedRunLedgerEventMetadata(filepath.Join(ledgerDir, filepath.FromSlash(current.Events)))
+		eventCount, eventsOmitted, eventsTruncated, err := retainedRunLedgerEventMetadata(bytes.NewReader(mergedEvents))
 		if err != nil {
 			return err
 		}
-		current.EventCount = eventCount
-		current.EventsOmitted = eventsOmitted
-		current.EventsTruncated = eventsTruncated
-		current.EventBytes = eventBytes
-		current.LogBytes = len(progress.Log)
-		current.LogTruncated = progress.Ledger.LogTruncated
-		current.Host = previousAssignment.HostID
-		current.UpdatedAt = handler.runtime.Now().UTC().Format(time.RFC3339Nano)
-		if err := writeRunLedgerRecord(repoDir, current); err != nil {
-			return err
-		}
-		copy := current
+		snapshot.Events = mergedEvents
+		snapshot.Log = progress.Log
+		snapshot.Record.EventCount = eventCount
+		snapshot.Record.EventsOmitted = eventsOmitted
+		snapshot.Record.EventsTruncated = eventsTruncated
+		snapshot.Record.EventBytes = len(mergedEvents)
+		snapshot.Record.LogBytes = len(progress.Log)
+		snapshot.Record.LogTruncated = progress.Ledger.LogTruncated
+		snapshot.Record.Host = previousAssignment.HostID
+		snapshot.Record.UpdatedAt = handler.runtime.Now().UTC().Format(time.RFC3339Nano)
+		copy := snapshot.Record
 		updatedAssignment.AssignedLedger = &copy
 		updatedAssignment.ProgressSequence = progress.Checkpoint
 		updatedAssignment.ProgressDigest = digest
-		return handler.persistAssignment(updatedAssignment)
+		return nil
 	})
+	if persistErr == nil {
+		persistErr = newHostAgentTransitionStore(handler.dataDir).SaveAssignment(updatedAssignment)
+	}
 	// The per-run lock is released before taking handler.mu; quarantine may wait
 	// on the ledger while fenced by handler.mu without creating a lock cycle.
 	if identityErr != nil {
@@ -1897,24 +1862,15 @@ func (handler *controlPlaneHandler) serveHostAgentFail(response http.ResponseWri
 		}
 		assignment.run = run
 	}
-	originalLedger, err := readRunLedgerRecord(run.repoDir, run.manifest.RunID)
+	ledgerSnapshot, err := newRunLedgerStore(run.repoDir).Snapshot(run.manifest.RunID)
 	if err != nil {
 		_ = handler.resetHostAgentFinishing(assignment)
 		writeControlPlaneError(response, http.StatusInternalServerError, "read durable Windows Host Agent run")
 		return
 	}
-	acknowledgedEvents, err := readRunLedgerBytes(filepath.Join(runLedgerDir(run.repoDir, run.manifest.RunID), filepath.FromSlash(originalLedger.Events)))
-	if err != nil {
-		_ = handler.resetHostAgentFinishing(assignment)
-		writeControlPlaneError(response, http.StatusInternalServerError, "read acknowledged Host Agent events")
-		return
-	}
-	acknowledgedLog, err := readRunLedgerBytes(filepath.Join(runLedgerDir(run.repoDir, run.manifest.RunID), filepath.FromSlash(originalLedger.Log)))
-	if err != nil {
-		_ = handler.resetHostAgentFinishing(assignment)
-		writeControlPlaneError(response, http.StatusInternalServerError, "read acknowledged Host Agent log")
-		return
-	}
+	originalLedger := ledgerSnapshot.Record
+	acknowledgedEvents := ledgerSnapshot.Events
+	acknowledgedLog := ledgerSnapshot.Log
 	targetProfile := assignment.record.Submission.TargetProfile
 	if targetProfile == "" {
 		targetProfile = "default"
@@ -1926,8 +1882,8 @@ func (handler *controlPlaneHandler) serveHostAgentFail(response http.ResponseWri
 	run.failedLayer = failureLayerRunState
 	outcome, finishErr := run.finishEarlyFailure(runErr)
 	terminalEvents, terminalEventsErr := readRunLedgerBytes(run.context.EventsPath)
-	terminalLedger, transactionErr := finalizeAcknowledgedHostAgentFailure(
-		run.repoDir, outcome, run.manifest, run.ledgerPolicy, run.runtime.Now(),
+	terminalLedger, transactionErr := newRunLedgerStore(run.repoDir).FinalizeAcknowledgedFailure(
+		outcome, run.manifest, run.ledgerPolicy, run.runtime.Now(),
 		acknowledgedEvents, terminalEvents, acknowledgedLog, failure.Diagnostic, &originalLedger,
 	)
 	runErr = errors.Join(finishErr, terminalEventsErr, transactionErr)
@@ -1970,57 +1926,46 @@ func (handler *controlPlaneHandler) quarantineHostAgentAssignment(assignment *co
 func (handler *controlPlaneHandler) quarantineHostAgentAssignmentLocked(assignment *controlPlaneHostAgentAssignment, agent *controlPlaneHostAgent, diagnostic string) (runOutcome, error, error) {
 	runErr := errors.New(diagnostic)
 	var outcome runOutcome
-	var terminalLedger runLedgerRecord
-	transactionErr := withRunLedgerLock(assignment.repoDir, assignment.record.RunID, func() error {
-		run := assignment.run
-		if run == nil {
-			var err error
-			run, err = loadAcceptedHostAgentRun(assignment.repoDir, assignment.record, handler.runtime)
-			if err != nil {
-				return err
-			}
-			assignment.run = run
-		}
-		currentLedger, err := readRunLedgerRecord(run.repoDir, assignment.record.RunID)
+	run := assignment.run
+	if run == nil {
+		var err error
+		run, err = loadAcceptedHostAgentRun(assignment.repoDir, assignment.record, handler.runtime)
 		if err != nil {
-			return err
+			return runOutcome{}, runErr, err
 		}
-		acknowledgedEvents, err := readRunLedgerBytes(filepath.Join(runLedgerDir(run.repoDir, assignment.record.RunID), filepath.FromSlash(currentLedger.Events)))
-		if err != nil {
-			return err
-		}
-		acknowledgedLog, err := readRunLedgerBytes(filepath.Join(runLedgerDir(run.repoDir, assignment.record.RunID), filepath.FromSlash(currentLedger.Log)))
-		if err != nil {
-			return err
-		}
-		targetProfile := assignment.record.Submission.TargetProfile
-		if targetProfile == "" {
-			targetProfile = "default"
-		}
-		run.host.HostID = assignment.record.HostID
-		run.host.TargetProfile = targetProfile
-		run.manifest.Host = assignment.record.HostID
-		run.manifest.TargetProfile = targetProfile
-		run.stopPolicy = "unresolved"
-		if err := run.ensureAcceptedFailureEvidence(runErr); err != nil {
-			return err
-		}
-		run.failure.CleanupState = "failed"
-		run.failure.RemediationHint = "Verify and stop the retained Maya session; this version keeps the quarantined Host Lock fail-closed."
-		if err := run.updateTerminalFailureEvidence(); err != nil {
-			return err
-		}
-		terminalEvents, err := readRunLedgerBytes(run.context.EventsPath)
-		if err != nil {
-			return err
-		}
-		outcome = run.currentOutcome()
-		terminalLedger, err = finalizeAcknowledgedHostAgentFailureUnlocked(
-			run.repoDir, outcome, run.manifest, run.ledgerPolicy, run.runtime.Now(),
-			acknowledgedEvents, terminalEvents, acknowledgedLog, diagnostic, nil,
-		)
-		return err
-	})
+		assignment.run = run
+	}
+	ledgerStore := newRunLedgerStore(run.repoDir)
+	acknowledged, transactionErr := ledgerStore.Snapshot(assignment.record.RunID)
+	if transactionErr != nil {
+		return runOutcome{}, runErr, transactionErr
+	}
+	targetProfile := assignment.record.Submission.TargetProfile
+	if targetProfile == "" {
+		targetProfile = "default"
+	}
+	run.host.HostID = assignment.record.HostID
+	run.host.TargetProfile = targetProfile
+	run.manifest.Host = assignment.record.HostID
+	run.manifest.TargetProfile = targetProfile
+	run.stopPolicy = "unresolved"
+	if err := run.ensureAcceptedFailureEvidence(runErr); err != nil {
+		return runOutcome{}, runErr, err
+	}
+	run.failure.CleanupState = "failed"
+	run.failure.RemediationHint = "Verify and stop the retained Maya session; this version keeps the quarantined Host Lock fail-closed."
+	if err := run.updateTerminalFailureEvidence(); err != nil {
+		return runOutcome{}, runErr, err
+	}
+	terminalEvents, transactionErr := readRunLedgerBytes(run.context.EventsPath)
+	if transactionErr != nil {
+		return runOutcome{}, runErr, transactionErr
+	}
+	outcome = run.currentOutcome()
+	terminalLedger, transactionErr := ledgerStore.FinalizeAcknowledgedFailure(
+		outcome, run.manifest, run.ledgerPolicy, run.runtime.Now(),
+		acknowledged.Events, terminalEvents, acknowledged.Log, diagnostic, nil,
+	)
 	if transactionErr != nil {
 		return runOutcome{}, runErr, transactionErr
 	}
@@ -2030,7 +1975,7 @@ func (handler *controlPlaneHandler) quarantineHostAgentAssignmentLocked(assignme
 	quarantined.TerminalLedger = &terminalLedger
 	terminal := controlPlaneTerminalResponse(outcome, runErr, assignment.repoDir)
 	quarantined.Terminal = &terminal
-	if err := handler.ensureHostAgentTransition(quarantined); err != nil {
+	if err := newHostAgentTransitionStore(handler.dataDir).Commit(quarantined, handler.prepareRecoveredHostAgentTransition); err != nil {
 		return runOutcome{}, runErr, err
 	}
 	assignment.record = quarantined
@@ -2049,121 +1994,12 @@ func (handler *controlPlaneHandler) quarantineHostAgentAssignmentLocked(assignme
 	return outcome, runErr, nil
 }
 
-func preserveAcknowledgedHostAgentFailure(repoDir string, runID string, acknowledged []byte, terminal []byte, acknowledgedLog []byte, diagnostic string, policy runLedgerPolicy) error {
-	return withRunLedgerLock(repoDir, runID, func() error {
-		return preserveAcknowledgedHostAgentFailureUnlocked(repoDir, runID, acknowledged, terminal, acknowledgedLog, diagnostic, policy)
-	})
-}
-
-func finalizeAcknowledgedHostAgentFailure(repoDir string, outcome runOutcome, manifest runManifest, policy runLedgerPolicy, now time.Time, acknowledged []byte, terminal []byte, acknowledgedLog []byte, diagnostic string, restore *runLedgerRecord) (runLedgerRecord, error) {
-	var terminalLedger runLedgerRecord
-	err := withRunLedgerLock(repoDir, manifest.RunID, func() error {
-		var err error
-		terminalLedger, err = finalizeAcknowledgedHostAgentFailureUnlocked(repoDir, outcome, manifest, policy, now, acknowledged, terminal, acknowledgedLog, diagnostic, restore)
-		return err
-	})
-	return terminalLedger, err
-}
-
-func finalizeAcknowledgedHostAgentFailureUnlocked(repoDir string, outcome runOutcome, manifest runManifest, policy runLedgerPolicy, now time.Time, acknowledged []byte, terminal []byte, acknowledgedLog []byte, diagnostic string, restore *runLedgerRecord) (runLedgerRecord, error) {
-	ledgerErr := finalizeRunLedgerUnlocked(repoDir, outcome, manifest, policy, now)
-	var preserveErr error
-	if ledgerErr == nil {
-		preserveErr = preserveAcknowledgedHostAgentFailureUnlocked(repoDir, manifest.RunID, acknowledged, terminal, acknowledgedLog, diagnostic, policy)
-	}
-	var terminalLedger runLedgerRecord
-	var terminalErr error
-	if ledgerErr == nil && preserveErr == nil {
-		terminalLedger, terminalErr = readRunLedgerRecord(repoDir, manifest.RunID)
-	}
-	var restoreErr error
-	if restore != nil {
-		restoreErr = writeRunLedgerRecord(repoDir, *restore)
-	}
-	return terminalLedger, errors.Join(ledgerErr, preserveErr, terminalErr, restoreErr)
-}
-
-func preserveAcknowledgedHostAgentFailureUnlocked(repoDir string, runID string, acknowledged []byte, terminal []byte, acknowledgedLog []byte, diagnostic string, policy runLedgerPolicy) error {
-	record, err := readRunLedgerRecord(repoDir, runID)
-	if err != nil {
-		return err
-	}
-	lines := bytes.Split(bytes.TrimSpace(acknowledged), []byte{'\n'})
-	maxSequence := 0
-	hasFailure := false
-	for _, line := range lines {
-		var event map[string]any
-		if err := json.Unmarshal(line, &event); err != nil {
-			return err
-		}
-		sequence := ledgerEventSequence(event)
-		if event["type"] == "run-ledger.events.truncated" {
-			gapLast, ok := validHostAgentEventGap(line, sequence)
-			if !ok {
-				return fmt.Errorf("invalid acknowledged Host Agent event gap")
-			}
-			sequence = gapLast
-		}
-		if sequence > maxSequence {
-			maxSequence = sequence
-		}
-		hasFailure = hasFailure || fmt.Sprint(event["type"]) == "run.failed"
-	}
-	if !hasFailure {
-		var failureEvent map[string]any
-		for _, line := range bytes.Split(bytes.TrimSpace(terminal), []byte{'\n'}) {
-			var event map[string]any
-			if json.Unmarshal(line, &event) == nil && fmt.Sprint(event["type"]) == "run.failed" {
-				failureEvent = event
-				break
-			}
-		}
-		if failureEvent == nil {
-			failureEvent = map[string]any{"event": "run.failed", "type": "run.failed", "timestamp": record.UpdatedAt, "details": map[string]any{"message": diagnostic}}
-		}
-		failureEvent = normalizeRunLedgerEvent(failureEvent, maxSequence+1, record.UpdatedAt)
-		encoded, err := json.Marshal(failureEvent)
-		if err != nil {
-			return err
-		}
-		lines = append(lines, encoded)
-	}
-	temporaryDir, err := os.MkdirTemp(repoDir, ".host-agent-failure-*")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.RemoveAll(temporaryDir) }()
-	eventsSource := filepath.Join(temporaryDir, runLedgerEventsFileName)
-	if err := writeRunLedgerBytes(eventsSource, append(bytes.Join(lines, []byte{'\n'}), '\n')); err != nil {
-		return err
-	}
-	eventsPath := filepath.Join(runLedgerDir(repoDir, runID), filepath.FromSlash(record.Events))
-	record.EventCount, record.EventsOmitted, record.EventsTruncated, record.EventBytes, err = copyBoundedLedgerEvents(eventsSource, eventsPath, policy.MaxEvents, policy.MaxEventBytes, record.AcceptedAt)
-	if err != nil {
-		return err
-	}
-	combinedLog := append([]byte(nil), acknowledgedLog...)
-	if len(combinedLog) > 0 && combinedLog[len(combinedLog)-1] != '\n' {
-		combinedLog = append(combinedLog, '\n')
-	}
-	combinedLog = append(combinedLog, []byte("Host Agent failure: "+diagnostic+"\n")...)
-	logSource := filepath.Join(temporaryDir, "failure.log")
-	if err := writeRunLedgerBytes(logSource, combinedLog); err != nil {
-		return err
-	}
-	record.LogBytes, record.LogTruncated, err = copyBoundedLedgerLog(logSource, filepath.Join(runLedgerDir(repoDir, runID), filepath.FromSlash(record.Log)), policy.MaxLogBytes)
-	if err != nil {
-		return err
-	}
-	return writeRunLedgerRecord(repoDir, record)
-}
-
 func (handler *controlPlaneHandler) resetHostAgentFinishing(assignment *controlPlaneHostAgentAssignment) error {
 	handler.mu.Lock()
 	defer handler.mu.Unlock()
 	if handler.assignments[assignment.record.RunID] == assignment && assignment.record.State == "confirmed" {
 		if assignment.originalLedger != nil {
-			if err := writeRunLedgerRecord(assignment.repoDir, *assignment.originalLedger); err != nil {
+			if err := newRunLedgerStore(assignment.repoDir).Replace(*assignment.originalLedger); err != nil {
 				return err
 			}
 		}
@@ -2189,7 +2025,7 @@ func (handler *controlPlaneHandler) finishHostAgentAssignment(assignment *contro
 	finishing.Terminal = &terminal
 	finishing.TerminalLedger = assignment.terminalLedger
 	finishing.AssignedLedger = assignment.terminalLedger
-	if err := handler.ensureHostAgentTransition(finishing); err != nil {
+	if err := newHostAgentTransitionStore(handler.dataDir).Commit(finishing, handler.prepareRecoveredHostAgentTransition); err != nil {
 		return err
 	}
 	assignment.record = finishing
@@ -2204,7 +2040,7 @@ func (handler *controlPlaneHandler) finishHostAgentAssignment(assignment *contro
 	}
 	completed := finishing
 	completed.State = "completed"
-	if err := handler.ensureHostAgentTransition(completed); err != nil {
+	if err := newHostAgentTransitionStore(handler.dataDir).Commit(completed, handler.prepareRecoveredHostAgentTransition); err != nil {
 		return err
 	}
 	assignment.record = completed
@@ -2240,7 +2076,7 @@ func (handler *controlPlaneHandler) resumeFinishingHostAgentAssignment(assignmen
 	}
 	completed := assignment.record
 	completed.State = "completed"
-	if err := handler.ensureHostAgentTransition(completed); err != nil {
+	if err := newHostAgentTransitionStore(handler.dataDir).Commit(completed, handler.prepareRecoveredHostAgentTransition); err != nil {
 		return runCommandJSON{}, err
 	}
 	assignment.record = completed
@@ -2285,7 +2121,7 @@ func (handler *controlPlaneHandler) quarantineHostAgentCleanupFailure(assignment
 	quarantined.TerminalLedger = &ledger
 	terminal := controlPlaneTerminalResponse(outcome, cleanupErr, assignment.repoDir)
 	quarantined.Terminal = &terminal
-	if err := handler.ensureHostAgentTransition(quarantined); err != nil {
+	if err := newHostAgentTransitionStore(handler.dataDir).Commit(quarantined, handler.prepareRecoveredHostAgentTransition); err != nil {
 		return errors.Join(cleanupErr, err)
 	}
 	assignment.record = quarantined
@@ -2346,7 +2182,7 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 		if run != nil && run.accepted {
 			run.failedLayer = failureLayerHostSelection
 			outcome, finishErr := run.finishEarlyFailure(err)
-			ledgerErr := finalizeRunLedger(run.repoDir, outcome, run.manifest, run.ledgerPolicy, run.runtime.Now())
+			ledgerErr := newRunLedgerStore(run.repoDir).Finalize(outcome, run.manifest, run.ledgerPolicy, run.runtime.Now())
 			var queueErr error
 			if ledgerErr == nil {
 				handler.mu.Lock()
@@ -2359,7 +2195,7 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 	}
 	failBeforeTransition := func(runErr error) (runOutcome, error) {
 		outcome, finishErr := handler.finishAcceptedHostAgentFailure(run, selected, errors.Join(runErr, sharedFakeHostRelease()))
-		terminalLedger, terminalErr := readRunLedgerRecord(run.repoDir, run.manifest.RunID)
+		terminalLedger, terminalErr := newRunLedgerStore(run.repoDir).Read(run.manifest.RunID)
 		var queueErr error
 		if terminalErr == nil && terminalRunLedgerRecord(terminalLedger) {
 			handler.mu.Lock()
@@ -2383,16 +2219,14 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 		return failBeforeTransition(err)
 	}
 	createdAt := handler.runtime.Now().UTC().Format(time.RFC3339Nano)
-	assignedLedger, err := readRunLedgerRecord(repoDir, runID)
+	ledgerSnapshot, err := newRunLedgerStore(repoDir).Snapshot(runID)
 	if err != nil {
 		return failBeforeTransition(err)
 	}
+	assignedLedger := ledgerSnapshot.Record
 	assignedLedger.State = "submitted"
 	assignedLedger.Host = selected.status.HostID
-	eventPrefix, err := os.ReadFile(filepath.Join(runLedgerDir(repoDir, runID), runLedgerEventsFileName))
-	if err != nil {
-		return failBeforeTransition(err)
-	}
+	eventPrefix := ledgerSnapshot.Events
 	record := hostAgentAssignmentRecord{
 		Version: hostAgentAPIVersion, RunID: runID, AgentID: selected.status.AgentID, HostID: selected.status.HostID,
 		LockToken: lockToken, State: "assigned", CreatedAt: createdAt, Submission: submission, EventPrefix: eventPrefix,
@@ -2490,7 +2324,7 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 		return failBeforeTransition(errors.Join(eligibilityErr, markerCleanupErr, releaseErr))
 	}
 	if transitionErr == nil {
-		transitionErr = handler.ensureHostAgentTransition(record)
+		transitionErr = newHostAgentTransitionStore(handler.dataDir).Commit(record, handler.prepareRecoveredHostAgentTransition)
 	}
 	if transitionErr == nil {
 		transitionErr = handler.removeQueuedRunLocked(runID)
@@ -2518,7 +2352,7 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 		handler.mu.Unlock()
 		outcome, failureErr := handler.finishAcceptedHostAgentFailure(run, selected, errors.Join(transitionErr, markerErr, statusErr, errors.New("Windows Host Agent slot quarantined after incomplete assignment transition"))) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 		handler.mu.Lock()
-		terminalLedger, terminalLedgerErr := readRunLedgerRecord(repoDir, runID)
+		terminalLedger, terminalLedgerErr := newRunLedgerStore(repoDir).Read(runID)
 		var quarantineTransitionErr error
 		var markerCleanupErr error
 		var queueErr error
@@ -2527,7 +2361,7 @@ func (handler *controlPlaneHandler) runScenarioThroughHostAgent(repoDir string, 
 			record.AssignedLedger = &terminalLedger
 			record.TerminalLedger = &terminalLedger
 			record.Terminal = &terminal
-			quarantineTransitionErr = handler.ensureHostAgentTransition(record)
+			quarantineTransitionErr = newHostAgentTransitionStore(handler.dataDir).Commit(record, handler.prepareRecoveredHostAgentTransition)
 			if quarantineTransitionErr == nil {
 				assignment.record = record
 				assignment.terminalLedger = &terminalLedger
@@ -2600,7 +2434,7 @@ func failHostAgentSelection(repoDir string, options runOptions, runtime runRunti
 	}
 	run.failedLayer = failureLayerHostSelection
 	outcome, runErr := run.finishEarlyFailure(selectionErr)
-	ledgerErr := finalizeRunLedger(run.repoDir, outcome, run.manifest, run.ledgerPolicy, run.runtime.Now())
+	ledgerErr := newRunLedgerStore(run.repoDir).Finalize(outcome, run.manifest, run.ledgerPolicy, run.runtime.Now())
 	return outcome, errors.Join(runErr, ledgerErr)
 }
 
@@ -2613,7 +2447,7 @@ func (handler *controlPlaneHandler) finishAcceptedHostAgentFailure(run *freshRun
 	handler.mu.Unlock()
 	run.failedLayer = failureLayerHostSelection
 	outcome, finishErr := run.finishEarlyFailure(runErr)
-	ledgerErr := finalizeRunLedger(run.repoDir, outcome, run.manifest, run.ledgerPolicy, run.runtime.Now())
+	ledgerErr := newRunLedgerStore(run.repoDir).Finalize(outcome, run.manifest, run.ledgerPolicy, run.runtime.Now())
 	return outcome, errors.Join(finishErr, ledgerErr)
 }
 
@@ -2634,119 +2468,12 @@ func (handler *controlPlaneHandler) persistHostAgentStatus(agent *controlPlaneHo
 	return writePrivateJSON(filepath.Join(handler.dataDir, "host-agents", agent.status.AgentID, "status.json"), agent.status)
 }
 
-func (handler *controlPlaneHandler) persistAssignment(record hostAgentAssignmentRecord) error {
-	return writePrivateJSON(filepath.Join(handler.dataDir, "assignments", record.RunID+".json"), record)
-}
-
-func (handler *controlPlaneHandler) persistHostAgentTransition(record hostAgentAssignmentRecord) error {
-	transactionPath := filepath.Join(handler.dataDir, "assignment-transactions", record.RunID+".json")
-	if err := writePrivateJSON(transactionPath, record); err != nil {
-		return err
-	}
-	if err := handler.applyHostAgentTransition(record); err != nil {
-		return err
-	}
-	if err := os.Remove(transactionPath); err != nil {
-		return err
-	}
-	return syncRunLedgerDirectory(filepath.Dir(transactionPath))
-}
-
-func (handler *controlPlaneHandler) ensureHostAgentTransition(record hostAgentAssignmentRecord) error {
-	persistErr := handler.persistHostAgentTransition(record)
-	if persistErr == nil {
-		return nil
-	}
-	recoverErr := handler.recoverHostAgentTransactions()
-	verifyErr := handler.verifyHostAgentTransition(record)
-	if recoverErr == nil && verifyErr == nil {
-		return nil
-	}
-	return errors.Join(persistErr, recoverErr, verifyErr)
-}
-
-func (handler *controlPlaneHandler) verifyHostAgentTransition(want hostAgentAssignmentRecord) error {
-	var assignment hostAgentAssignmentRecord
-	if err := readPrivateJSON(filepath.Join(handler.dataDir, "assignments", want.RunID+".json"), &assignment); err != nil {
-		return err
-	}
-	if assignment.State != want.State || assignment.AgentID != want.AgentID || assignment.HostID != want.HostID || !sameLockToken(assignment.LockToken, want.LockToken) || assignment.SessionBindingRequired != want.SessionBindingRequired || !sameBrokerSession(assignment.BrokerSession, want.BrokerSession) {
-		return fmt.Errorf("durable Host Agent assignment does not match transition")
-	}
-	if want.State == "completed" {
-		if want.TerminalLedger == nil {
-			return fmt.Errorf("completed Host Agent transition is missing its terminal Run Ledger")
-		}
-		live, err := readRunLedgerRecord(filepath.Join(handler.dataDir, "runs", want.RunID, "repo"), want.RunID)
-		if err != nil || live.State != want.TerminalLedger.State || live.Status != want.TerminalLedger.Status || live.AcceptedAt != want.TerminalLedger.AcceptedAt {
-			return errors.Join(fmt.Errorf("completed Host Agent transition did not publish its terminal Run Ledger"), err)
-		}
-		if _, err := os.Lstat(handler.hostLockPath(want.HostID)); !errors.Is(err, os.ErrNotExist) {
-			return errors.Join(fmt.Errorf("completed Host Agent transition retained its Host Lock"), err)
-		}
-		return nil
-	}
-	var lock hostAgentLockRecord
-	if err := readPrivateJSON(handler.hostLockPath(want.HostID), &lock); err != nil {
-		return err
-	}
-	if lock.State != want.State || lock.RunID != want.RunID || lock.AgentID != want.AgentID || !sameLockToken(lock.LockToken, want.LockToken) || lock.SessionBindingRequired != want.SessionBindingRequired || !sameBrokerSession(lock.BrokerSession, want.BrokerSession) {
-		return fmt.Errorf("durable Host Lock does not match transition")
-	}
-	if want.AssignedLedger == nil {
-		return fmt.Errorf("active Host Agent transition is missing its assigned Run Ledger")
-	}
-	live, err := readRunLedgerRecord(filepath.Join(handler.dataDir, "runs", want.RunID, "repo"), want.RunID)
-	if err != nil || live.Host != want.HostID || live.AcceptedAt != want.AssignedLedger.AcceptedAt {
-		return errors.Join(fmt.Errorf("active Host Agent transition did not publish its assigned Run Ledger"), err)
-	}
-	return nil
-}
-
-func (handler *controlPlaneHandler) applyHostAgentTransition(record hostAgentAssignmentRecord) error {
-	if record.State == "completed" {
-		if err := handler.persistAssignment(record); err != nil {
-			return err
-		}
-		if record.TerminalLedger == nil {
-			return fmt.Errorf("completed Host Agent transition is missing its terminal Run Ledger")
-		}
-		repoDir := filepath.Join(handler.dataDir, "runs", record.RunID, "repo")
-		if err := writeRunLedgerRecord(repoDir, *record.TerminalLedger); err != nil {
-			return err
-		}
-		if err := os.Remove(handler.hostLockPath(record.HostID)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		return syncRunLedgerDirectory(filepath.Join(handler.dataDir, "host-locks"))
-	}
-	if record.AssignedLedger == nil {
-		return fmt.Errorf("active Host Agent transition is missing its assigned Run Ledger")
-	}
-	repoDir := filepath.Join(handler.dataDir, "runs", record.RunID, "repo")
-	if err := writeRunLedgerRecord(repoDir, *record.AssignedLedger); err != nil {
-		return err
-	}
-	if err := handler.persistHostLock(record, record.State); err != nil {
-		return err
-	}
-	return handler.persistAssignment(record)
-}
-
 func (handler *controlPlaneHandler) hostLockPath(hostID string) string {
-	return filepath.Join(handler.dataDir, "host-locks", hostID+".json")
+	return newHostAgentTransitionStore(handler.dataDir).hostLockPath(hostID)
 }
 
 func (handler *controlPlaneHandler) hostAgentQuarantinePath(agentID string) string {
 	return filepath.Join(handler.dataDir, "host-agents", agentID, "quarantine.json")
-}
-
-func (handler *controlPlaneHandler) persistHostLock(assignment hostAgentAssignmentRecord, state string) error {
-	return writePrivateJSON(handler.hostLockPath(assignment.HostID), hostAgentLockRecord{
-		Version: hostAgentAPIVersion, RunID: assignment.RunID, AgentID: assignment.AgentID, HostID: assignment.HostID,
-		LockToken: assignment.LockToken, State: state, CreatedAt: assignment.CreatedAt,
-		SessionBindingRequired: assignment.SessionBindingRequired, BrokerSession: assignment.BrokerSession,
-	})
 }
 
 func sameBrokerSession(left *brokerSessionIdentity, right *brokerSessionIdentity) bool {
@@ -2790,7 +2517,7 @@ func (handler *controlPlaneHandler) acceptHostAgentCompletion(assignment *contro
 	if err := materializeControlPlaneFiles(stagingRoot, completion.Files); err != nil {
 		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, err
 	}
-	record, err := readRunLedgerRecord(stagingRoot, assignment.record.RunID)
+	record, err := newRunLedgerStore(stagingRoot).Read(assignment.record.RunID)
 	if err != nil {
 		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, err
 	}
@@ -2823,7 +2550,7 @@ func (handler *controlPlaneHandler) acceptHostAgentCompletion(assignment *contro
 	if stagedOutcome.Result.Status != record.Status || result.Status != record.Status || result.Result.Status != record.Status || evidence.Bundle.Status != record.Status {
 		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, fmt.Errorf("Windows Host Agent terminal status does not match durable result") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
-	original, err := readRunLedgerRecord(assignment.repoDir, assignment.record.RunID)
+	original, err := newRunLedgerStore(assignment.repoDir).Read(assignment.record.RunID)
 	if err != nil {
 		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, err
 	}
@@ -2857,15 +2584,15 @@ func (handler *controlPlaneHandler) acceptHostAgentCompletion(assignment *contro
 	merged.EventsTruncated = false
 	merged.LogBytes = 0
 	merged.LogTruncated = false
-	if err := syncRunLedgerArtifacts(stagingRoot, &merged, policy); err != nil {
+	stagedLedgerStore := newRunLedgerStore(stagingRoot)
+	if err := stagedLedgerStore.SyncArtifacts(&merged, policy); err != nil {
 		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, err
 	}
-	currentEvents, err := readRunLedgerBytes(filepath.Join(runLedgerDir(assignment.repoDir, original.RunID), filepath.FromSlash(original.Events)))
+	_, currentEvents, err := newRunLedgerStore(assignment.repoDir).ReadEvents(original.RunID)
 	if err != nil {
 		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, err
 	}
-	stagedEventsPath := filepath.Join(runLedgerDir(stagingRoot, merged.RunID), filepath.FromSlash(merged.Events))
-	stagedEvents, err := readRunLedgerBytes(stagedEventsPath)
+	_, stagedEvents, err := stagedLedgerStore.ReadEvents(merged.RunID)
 	if err != nil {
 		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, err
 	}
@@ -2873,13 +2600,14 @@ func (handler *controlPlaneHandler) acceptHostAgentCompletion(assignment *contro
 	if err != nil {
 		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, fmt.Errorf("Windows Host Agent terminal events changed acknowledged identity: %w", err) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
-	if err := writeRunLedgerBytes(stagedEventsPath, identityPreservingEvents); err != nil {
+	if err := stagedLedgerStore.ReplaceEvents(merged.RunID, identityPreservingEvents); err != nil {
 		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, err
 	}
-	merged.EventCount, merged.EventsOmitted, merged.EventsTruncated, merged.EventBytes, err = readRetainedRunLedgerEventMetadata(stagedEventsPath)
+	merged.EventCount, merged.EventsOmitted, merged.EventsTruncated, err = retainedRunLedgerEventMetadata(bytes.NewReader(identityPreservingEvents))
 	if err != nil {
 		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, err
 	}
+	merged.EventBytes = len(identityPreservingEvents)
 	stagedFiles, err := buildHostAgentResultFiles(stagingRoot, assignment.record.RunID)
 	if err != nil {
 		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, err
@@ -3296,7 +3024,7 @@ func boundSanitizedHostAgentProgressArtifacts(temporaryDir string, events []byte
 }
 
 func buildHostAgentProgress(repoDir string, assignment hostAgentAssignmentResponse, options hostAgentRunOnceOptions) (hostAgentProgressRequest, error) {
-	record, err := readRunLedgerRecord(repoDir, assignment.RunID)
+	record, err := newRunLedgerStore(repoDir).Read(assignment.RunID)
 	if err != nil {
 		return hostAgentProgressRequest{}, err
 	}

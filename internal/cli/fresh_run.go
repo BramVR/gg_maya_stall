@@ -545,7 +545,7 @@ func (run *freshRunLifecycle) accept() error {
 				scenarioResultEnvVar: workspace.LocalScenarioResultPath(),
 			},
 		}
-		exists, err := newRunLedgerStore(run.repoDir).Exists(runID)
+		exists, err := newRunLedgerStore(run.repoDir).Occupied(runID)
 		if err != nil {
 			return err
 		}

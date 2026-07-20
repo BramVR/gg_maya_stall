@@ -258,6 +258,37 @@ func TestQueueRecoveryRemovesAbandonedPreLedgerAdmission(t *testing.T) {
 	}
 }
 
+func TestQueueRecoveryPreservesInterruptedLedgerInitialization(t *testing.T) {
+	dataDir := privateTempDir(t)
+	if _, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime()); err != nil {
+		t.Fatal(err)
+	}
+	runID := "20260717T120000.000000000Z"
+	repoDir := filepath.Join(dataDir, "runs", runID, "repo")
+	partialPath := filepath.Join(runLedgerDir(repoDir, runID), runLedgerEventsFileName)
+	if err := os.MkdirAll(filepath.Dir(partialPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(partialPath, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := controlPlaneQueueRecord{Version: controlPlaneQueueVersion, RunID: runID, State: "admitting", Submission: controlPlaneSubmission{Version: controlPlaneAPIVersion, Scenario: "smoke", StopAfter: stopAfterAlways}, HostPool: "windows-maya"}
+	queuePath := filepath.Join(dataDir, "queued-runs", runID+".json")
+	if err := writePrivateJSON(queuePath, record); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime()); err == nil || !strings.Contains(err.Error(), "has no recoverable durable ledger") {
+		t.Fatalf("recover interrupted ledger error = %v", err)
+	}
+	if content, err := os.ReadFile(partialPath); err != nil || string(content) != "partial" {
+		t.Fatalf("interrupted ledger changed: content %q, error %v", content, err)
+	}
+	if _, err := os.Stat(queuePath); err != nil {
+		t.Fatalf("queue intent removed: %v", err)
+	}
+}
+
 func TestConfiguredStopRequiresExactCanceledStatus(t *testing.T) {
 	runID := "20260717T120000.000000000Z"
 	t.Setenv(defaultControlPlaneTokenEnv, "operator-token")

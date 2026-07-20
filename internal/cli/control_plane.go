@@ -502,7 +502,7 @@ func (handler *controlPlaneHandler) serveRunHistory(response http.ResponseWriter
 	records := make([]runLedgerRecord, 0, maximumControlPlaneHistoryRuns)
 	for _, runID := range names {
 		repoDir := filepath.Join(handler.dataDir, "runs", runID, "repo")
-		exists, err := newRunLedgerStore(repoDir).Exists(runID)
+		exists, err := newRunLedgerStore(repoDir).HasRecord(runID)
 		if err == nil && !exists {
 			continue
 		} else if err != nil {

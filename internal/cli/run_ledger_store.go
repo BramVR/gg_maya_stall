@@ -58,8 +58,18 @@ func (store runLedgerStore) Read(runID string) (runLedgerRecord, error) {
 	return readRunLedgerRecord(store.repoDir, runID)
 }
 
-func (store runLedgerStore) Exists(runID string) (bool, error) {
+func (store runLedgerStore) HasRecord(runID string) (bool, error) {
 	_, err := os.Lstat(filepath.Join(runLedgerDir(store.repoDir, runID), "run.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// Occupied reports whether durable state has claimed the Run ID, including an
+// interrupted initialization that has not published run.json yet.
+func (store runLedgerStore) Occupied(runID string) (bool, error) {
+	_, err := os.Lstat(runLedgerDir(store.repoDir, runID))
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}

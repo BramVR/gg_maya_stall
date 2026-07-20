@@ -30,6 +30,27 @@ func TestRetainedRunLedgerEventMetadataStreamsInput(t *testing.T) {
 	}
 }
 
+func TestFreshRunDoesNotReuseInterruptedLedgerRunID(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	runID := "20260720T120000.000000000Z"
+	partialPath := filepath.Join(runLedgerDir(dir, runID), runLedgerEventsFileName)
+	if err := os.MkdirAll(filepath.Dir(partialPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(partialPath, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := newFreshRun(dir, runOptions{ScenarioName: "smoke", TargetProfile: "default", StopAfter: stopAfterAlways, AssignedRunID: runID}, defaultRunRuntime()).(*freshRunLifecycle)
+
+	err := run.accept()
+	if err == nil || !strings.Contains(err.Error(), "assigned Run ID "+runID+" already exists") {
+		t.Fatalf("accept with occupied Run ID error = %v", err)
+	}
+	if content, readErr := os.ReadFile(partialPath); readErr != nil || string(content) != "partial" {
+		t.Fatalf("interrupted ledger changed: content %q, error %v", content, readErr)
+	}
+}
+
 func TestCompletedRunRemainsInEmbeddedHistoryAfterRunStateCleanup(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	now := time.Date(2026, time.July, 14, 12, 0, 0, 0, time.UTC)

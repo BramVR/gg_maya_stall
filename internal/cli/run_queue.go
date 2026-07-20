@@ -88,7 +88,7 @@ func (handler *controlPlaneHandler) loadControlPlaneQueue() error {
 			continue
 		}
 		if record.State == "admitting" {
-			ledgerExists, ledgerPathErr := ledgerStore.Exists(record.RunID)
+			ledgerExists, ledgerPathErr := ledgerStore.Occupied(record.RunID)
 			if err != nil && ledgerPathErr == nil && !ledgerExists {
 				if cleanupErr := cleanupAbandonedQueueAdmission(repoDir, record.RunID); cleanupErr != nil {
 					return cleanupErr

@@ -11,8 +11,24 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 )
+
+func TestRetainedRunLedgerEventMetadataStreamsInput(t *testing.T) {
+	events := strings.Join([]string{
+		`{"sequence":1,"type":"scenario.started"}`,
+		`{"sequence":2,"type":"run-ledger.events.truncated","details":{"omittedCount":3}}`,
+	}, "\n") + "\n"
+
+	count, omitted, truncated, err := retainedRunLedgerEventMetadata(iotest.OneByteReader(strings.NewReader(events)))
+	if err != nil {
+		t.Fatalf("read retained event metadata: %v", err)
+	}
+	if count != 2 || omitted != 3 || !truncated {
+		t.Fatalf("retained event metadata = count %d, omitted %d, truncated %t", count, omitted, truncated)
+	}
+}
 
 func TestCompletedRunRemainsInEmbeddedHistoryAfterRunStateCleanup(t *testing.T) {
 	dir := writeRunConfigFixture(t)

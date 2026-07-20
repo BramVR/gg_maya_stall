@@ -1431,7 +1431,7 @@ func (handler *controlPlaneHandler) serveHostAgentProgress(response http.Respons
 			identityErr = err
 			return err
 		}
-		eventCount, eventsOmitted, eventsTruncated, err := retainedRunLedgerEventMetadata(mergedEvents)
+		eventCount, eventsOmitted, eventsTruncated, err := retainedRunLedgerEventMetadata(bytes.NewReader(mergedEvents))
 		if err != nil {
 			return err
 		}
@@ -2603,7 +2603,7 @@ func (handler *controlPlaneHandler) acceptHostAgentCompletion(assignment *contro
 	if err := stagedLedgerStore.ReplaceEvents(merged.RunID, identityPreservingEvents); err != nil {
 		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, err
 	}
-	merged.EventCount, merged.EventsOmitted, merged.EventsTruncated, err = retainedRunLedgerEventMetadata(identityPreservingEvents)
+	merged.EventCount, merged.EventsOmitted, merged.EventsTruncated, err = retainedRunLedgerEventMetadata(bytes.NewReader(identityPreservingEvents))
 	if err != nil {
 		return runOutcome{}, runLedgerRecord{}, runLedgerRecord{}, err
 	}

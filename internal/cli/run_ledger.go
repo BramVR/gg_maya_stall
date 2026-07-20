@@ -395,16 +395,12 @@ func readRetainedRunLedgerEventMetadata(path string) (int, int, bool, int, error
 	if err != nil {
 		return 0, 0, false, 0, err
 	}
-	content, err := io.ReadAll(file)
-	if err != nil {
-		return 0, 0, false, 0, err
-	}
-	count, omitted, truncated, err := retainedRunLedgerEventMetadata(content)
+	count, omitted, truncated, err := retainedRunLedgerEventMetadata(file)
 	return count, omitted, truncated, int(info.Size()), err
 }
 
-func retainedRunLedgerEventMetadata(content []byte) (int, int, bool, error) {
-	reader := bufio.NewReaderSize(bytes.NewReader(content), 64*1024)
+func retainedRunLedgerEventMetadata(source io.Reader) (int, int, bool, error) {
+	reader := bufio.NewReaderSize(source, 64*1024)
 	count := 0
 	omitted := 0
 	truncated := false

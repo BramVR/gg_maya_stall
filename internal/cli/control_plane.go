@@ -35,6 +35,7 @@ type controlPlaneSubmission struct {
 	Scenario        string             `json:"scenario"`
 	TargetProfile   string             `json:"targetProfile,omitempty"`
 	StopAfter       string             `json:"stopAfter"`
+	KeepTTL         string             `json:"keepTTL,omitempty"`
 	ConfigName      string             `json:"configName"`
 	Config          []byte             `json:"config"`
 	Files           []controlPlaneFile `json:"files,omitempty"`
@@ -63,6 +64,8 @@ type controlPlaneStatusResponse struct {
 	WaitReason    string                `json:"waitReason,omitempty"`
 	HostPool      string                `json:"hostPool,omitempty"`
 	Requirements  *scenarioRequirements `json:"requiredCapabilities,omitempty"`
+	KeepDeadline  string                `json:"keepDeadline,omitempty"`
+	KeepRemaining string                `json:"keepRemaining,omitempty"`
 }
 
 type controlPlaneEventsResponse struct {
@@ -382,6 +385,10 @@ func (handler *controlPlaneHandler) ServeHTTP(response http.ResponseWriter, requ
 		writeControlPlaneError(response, http.StatusBadRequest, "invalid Stop Policy")
 		return
 	}
+	if _, err := parseKeepTTL(submission.KeepTTL); err != nil {
+		writeControlPlaneError(response, http.StatusBadRequest, "invalid kept-session TTL")
+		return
+	}
 	if err := validateControlPlaneSubmissionFiles(submission); err != nil {
 		writeControlPlaneError(response, http.StatusBadRequest, "invalid submission files")
 		return
@@ -419,7 +426,8 @@ func (handler *controlPlaneHandler) ServeHTTP(response http.ResponseWriter, requ
 	}
 	options := runOptions{
 		ScenarioName: submission.Scenario, TargetProfile: targetProfile, StopAfter: submission.StopAfter,
-		AssignedRunID: runID, SharedFakeWorkRoot: filepath.Join(handler.dataDir, "fake-host"),
+		KeepTTL: keepTTLOrDefault(submission.KeepTTL), AssignedRunID: runID, SharedFakeWorkRoot: filepath.Join(handler.dataDir, "fake-host"),
+		KeptSessionRepoRoot: filepath.Join(handler.dataDir, "runs"),
 	}
 	serverRuntime := handler.runtime
 	previousAccepted := serverRuntime.Accepted
@@ -652,6 +660,7 @@ func (handler *controlPlaneHandler) serveRunRead(response http.ResponseWriter, r
 	switch parts[3] {
 	case "status":
 		result := controlPlaneStatusFromRecord(repoDir, record, "/v1/runs/"+runID+"/evidence")
+		addKeptSessionTTLToStatus(repoDir, runID, &result)
 		handler.addControlPlaneQueueStatus(&result)
 		response.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(response).Encode(result)
@@ -1299,7 +1308,21 @@ func printStatusThroughMode(repoDir string, options statusOptions, stdout io.Wri
 	if err == nil && result.State == "queued" {
 		_, err = fmt.Fprintf(stdout, "queuePosition: %d\nwaitReason: %s\nhostPool: %s\n", result.QueuePosition, result.WaitReason, result.HostPool)
 	}
+	if err == nil && result.KeepDeadline != "" {
+		_, err = fmt.Fprintf(stdout, "keepDeadline: %s\nkeepRemaining: %s\n", result.KeepDeadline, result.KeepRemaining)
+	}
 	return err
+}
+
+func addKeptSessionTTLToStatus(repoDir string, runID string, result *controlPlaneStatusResponse) {
+	if result.State != "kept" && result.State != "cleanup-failed" {
+		return
+	}
+	run, err := readKeptRunState(repoDir, runID)
+	if err != nil {
+		return
+	}
+	result.KeepDeadline, result.KeepRemaining = keptSessionTTLStatus(run.Record, time.Now())
 }
 
 func readEmbeddedStatusResponse(repoDir string, runID string) (controlPlaneStatusResponse, error) {
@@ -1342,6 +1365,7 @@ func readEmbeddedStatusResponse(repoDir string, runID string) (controlPlaneStatu
 		result.State = run.RemoteStatus.State
 	}
 	result.Status = run.Bundle.Status
+	result.KeepDeadline, result.KeepRemaining = keptSessionTTLStatus(run.Record, time.Now())
 	return result, nil
 }
 
@@ -1768,6 +1792,9 @@ func buildControlPlaneSubmission(repoDir string, options runOptions) (controlPla
 		Version: controlPlaneAPIVersion, Scenario: options.ScenarioName, TargetProfile: options.TargetProfile,
 		StopAfter: options.StopAfter,
 	}
+	if options.KeepTTL > 0 {
+		submission.KeepTTL = options.KeepTTL.String()
+	}
 	configPath, err := DiscoverConfig(repoDir)
 	if errors.Is(err, errRepoRunConfigNotFound) {
 		return submission, nil
@@ -1803,6 +1830,25 @@ func buildControlPlaneSubmission(repoDir string, options runOptions) (controlPla
 		}
 	}
 	return submission, nil
+}
+
+func parseKeepTTL(value string) (time.Duration, error) {
+	if value == "" {
+		return defaultKeepTTL, nil
+	}
+	keepTTL, err := time.ParseDuration(value)
+	if err != nil || keepTTL <= 0 {
+		return 0, fmt.Errorf("invalid keep TTL %q", value)
+	}
+	return keepTTL, nil
+}
+
+func keepTTLOrDefault(value string) time.Duration {
+	keepTTL, err := parseKeepTTL(value)
+	if err != nil {
+		return defaultKeepTTL
+	}
+	return keepTTL
 }
 
 func appendControlPlanePath(repoDir string, relativePath string, files *[]controlPlaneFile, seen map[string]bool, estimatedBytes *int64) error {
@@ -1958,6 +2004,7 @@ func runCommandJSONForOutcome(outcome runOutcome) runCommandJSON {
 		Version: controlPlaneAPIVersion, Kind: "run", Accepted: outcome.Accepted, RunID: outcome.RunID,
 		Scenario: outcome.Scenario, TargetProfile: outcome.TargetProfile, Host: outcome.Host,
 		Status: outcome.Result.Status, StopPolicy: outcome.StopPolicy,
+		Warnings: outcome.Warnings,
 	}
 	if outcome.Failure != nil {
 		result.FailedLayer = outcome.Failure.FailedLayer
@@ -1972,6 +2019,7 @@ func runOutcomeFromCommandJSON(result runCommandJSON) runOutcome {
 		RunID: result.RunID, Scenario: result.Scenario, TargetProfile: result.TargetProfile, Host: result.Host,
 		StateDir: result.StateDir, EvidenceDir: result.EvidenceDir, Result: ScenarioResult{Status: result.Status},
 		StopPolicy: result.StopPolicy, FollowUpCommands: result.FollowUpCommands, Accepted: result.Accepted,
+		Warnings: result.Warnings,
 	}
 	if result.FailedLayer != "" {
 		outcome.Failure = &runFailureEvidence{FailedLayer: result.FailedLayer, Diagnostic: result.Diagnostic, RemediationHint: result.RemediationHint}

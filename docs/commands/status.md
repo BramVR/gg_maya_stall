@@ -30,7 +30,10 @@ durable cleanup failure is recorded.
 Use it after `--keep-on-failure` or `--stop-after never` to find sessions that
 still hold Host Locks. Kept run status includes the resolved runtime profile,
 host adapter, broker adapter, live-proof eligibility, retention reason, local
-state path, remote workspace, and broker session id recorded at run time.
+state path, remote workspace, broker session id, `keepDeadline`, and human
+`keepRemaining` value recorded at run time. Remaining time is rendered like
+`42m left`; an elapsed deadline is `expired`, while a legacy record not yet
+contacted by `run` or `doctor` is `unstamped`. The same fields appear in JSON.
 
 For broker-backed runs, status is truth-seeking: it reads the local Run Record,
 then asks the Session Broker whether the retained Maya UI Session still exists.

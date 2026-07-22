@@ -10,6 +10,7 @@ maya-stall run --host-config ci-hosts.yaml --target-profile ci --host maya-win-0
 maya-stall run --host-lock-wait 30s smoke
 maya-stall run --host-lock-fail-fast smoke
 maya-stall run --keep-on-failure smoke
+maya-stall run --keep-ttl 2h --keep-on-failure smoke
 maya-stall run --stop-after success smoke
 maya-stall run --stop-after failure smoke
 maya-stall run --stop-after always smoke
@@ -86,7 +87,7 @@ execute, and settle flow:
 4. Resolve Target Profile, Host Pool, and Maya Host from host config if
    provided.
 5. Resolve the Host/Broker runtime contract.
-6. Acquire a Host Lock.
+6. Opportunistically expire overdue Kept Sessions recorded for each candidate Maya Host, then acquire a Host Lock.
 7. Run bounded live SSH and Session Broker status probes; release the Host Lock and fail at the named layer if either is unavailable.
 8. Ask the Session Broker to stop any inherited Maya UI Session and start a new identified Maya UI Session.
 9. Stage only declared Run Payload paths.
@@ -227,8 +228,10 @@ One active Fresh Run may use a Maya Host at a time. Real SSH hosts store the
 authoritative lock at `workRoot/state/locks/host.lock`, so independent
 controllers and repo checkouts contend on the same host-owned state. Each
 active lock binds a unique token to its Run ID and renews a bounded lease while
-the controller is alive. A kept run has no expiring lease and remains locked
-until `maya-stall stop <run-id>` verifies ownership and stops it.
+the controller is alive. A kept lock has no active-controller lease, but its Run
+Record has a 90-minute keep deadline by default. It remains locked until
+`maya-stall stop <run-id>` verifies ownership and stops it or a later `run` or
+`doctor` contact with that Maya Host expires it through the same broker path.
 
 An expired lease is recoverable only after the configured Session Broker proves
 that no Maya UI Session is active. Unreadable ownership, a live lease, or an
@@ -254,10 +257,18 @@ Explicit `--stop-after` values are:
 
 Kept sessions write a hidden Run Record under `.maya-stall/state/runs/<run-id>/`
 with the local paths, remote workspace, broker adapter, broker capabilities, and
-remote session metadata needed by `status`, `attach`, and `stop`.
+remote session metadata needed by `status`, `attach`, and `stop`. The record also
+stores `keepTTL` and an RFC3339Nano UTC `keepDeadline`. The built-in TTL is 90
+minutes; `--keep-ttl <duration>` overrides it for that run. No Repo Run Config
+default exists because the current config has no Stop Policy/kept-session
+defaults section.
 
 Kept sessions are visible through truth-seeking `status`, readable through
-read-only `attach`, and cleaned with broker-backed `stop`.
+read-only `attach`, and cleaned with broker-backed `stop`. `run` sweeps only
+Maya Stall Run Records for the candidate host before Host Lock acquisition. It
+grace-stamps legacy records without a deadline on first contact, stops overdue
+records through the explicit retained-session broker path, and reports cleanup
+failures without failing an otherwise viable successor run.
 
 Accepted runs remain discoverable with `maya-stall history` while their ledger
 records are retained. Completed and failed records expire after the configured

@@ -53,6 +53,7 @@ type freshRunLifecycle struct {
 	selectionCleanupState         string
 	acceptedAt                    time.Time
 	ledgerPolicy                  runLedgerPolicy
+	warnings                      []string
 }
 
 func newFreshRun(repoDir string, options runOptions, runtime runRuntime) freshRun {
@@ -393,7 +394,20 @@ func (run *freshRunLifecycle) setup() error {
 	}
 	var resolved resolvedRuntime
 	run.failedLayer = failureLayerHostSelection
-	host, err := selectHostForRunValidated(run.repoDir, run.options, func(config mayaHostConfig) error {
+	sweepRepoDirs, sweepRepoWarnings := keptSessionSweepRepoDirs(run.repoDir, run.options.KeptSessionRepoRoot)
+	run.warnings = append(run.warnings, sweepRepoWarnings...)
+	selectionOptions := run.options
+	sweptHosts := make(map[string]bool)
+	selectionOptions.BeforeHostLock = func(host mayaHostConfig) {
+		if sweptHosts[host.ID] {
+			return
+		}
+		sweptHosts[host.ID] = true
+		for _, repoDir := range sweepRepoDirs {
+			run.warnings = append(run.warnings, sweepKeptSessions(repoDir, host.ID, run.runtime.Now())...)
+		}
+	}
+	host, err := selectHostForRunValidated(run.repoDir, selectionOptions, func(config mayaHostConfig) error {
 		run.failedLayer = failureLayerRemoteCheck
 		targetProfile := run.options.TargetProfile
 		if targetProfile == "" {
@@ -1482,6 +1496,7 @@ func (run *freshRunLifecycle) retainSession(reason string) error {
 		return fmt.Errorf("session broker retained a different Maya UI Session: started %s/%s, retained %s/%s", run.session.BrokerAdapter, run.session.SessionID, session.BrokerAdapter, session.SessionID)
 	}
 	record := newRunRetentionRecord(run.context, run.manifest, run.host.Config, "kept", reason)
+	stampKeptSessionDeadline(&record, run.runtime.Now(), effectiveKeepTTL(run.options.KeepTTL))
 	record.BrokerCapabilities = retention.RetentionCapabilities()
 	record.RemoteSession = session
 	if err := writeRunRetentionRecord(run.context, record); err != nil {
@@ -1515,7 +1530,15 @@ func (run *freshRunLifecycle) currentOutcome() runOutcome {
 		FollowUpCommands: run.followUp,
 		Accepted:         run.accepted,
 		Failure:          run.failure,
+		Warnings:         append([]string(nil), run.warnings...),
 	}
+}
+
+func effectiveKeepTTL(keepTTL time.Duration) time.Duration {
+	if keepTTL > 0 {
+		return keepTTL
+	}
+	return defaultKeepTTL
 }
 
 func (run *freshRunLifecycle) finishStoppedRunCleanup() error {

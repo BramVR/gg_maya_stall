@@ -150,6 +150,7 @@ type runOutcome struct {
 	Accepted          bool
 	Failure           *runFailureEvidence
 	DurabilityWarning string
+	Warnings          []string
 }
 
 type runManifest struct {

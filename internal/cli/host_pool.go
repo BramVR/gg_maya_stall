@@ -403,6 +403,9 @@ func selectHostForRunValidated(repoDir string, options runOptions, validate func
 			if !isHealthyHost(candidate) {
 				continue
 			}
+			if options.BeforeHostLock != nil {
+				options.BeforeHostLock(candidate)
+			}
 			lock, locked, err := acquireRunHostLock(repoDir, candidate)
 			if err != nil {
 				return hostRuntime{}, err

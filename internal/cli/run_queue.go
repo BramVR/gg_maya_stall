@@ -231,7 +231,7 @@ func (handler *controlPlaneHandler) resumeControlPlaneQueue() {
 			_, _ = handler.runScenarioThroughHostAgent(
 				filepath.Join(handler.dataDir, "runs", record.RunID, "repo"),
 				record.Submission,
-				runOptions{ScenarioName: record.Submission.Scenario, TargetProfile: targetProfile, StopAfter: record.Submission.StopAfter, AssignedRunID: record.RunID, SharedFakeWorkRoot: filepath.Join(handler.dataDir, "fake-host")},
+				runOptions{ScenarioName: record.Submission.Scenario, TargetProfile: targetProfile, StopAfter: record.Submission.StopAfter, KeepTTL: keepTTLOrDefault(record.Submission.KeepTTL), AssignedRunID: record.RunID, SharedFakeWorkRoot: filepath.Join(handler.dataDir, "fake-host"), KeptSessionRepoRoot: filepath.Join(handler.dataDir, "runs")},
 				runtime,
 			)
 		}()

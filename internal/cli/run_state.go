@@ -235,8 +235,8 @@ func printKeptRunStatus(stdout io.Writer, run keptRun) {
 		fmt.Fprintf(stdout, "retentionReason: %s\n", run.Record.RetentionReason)
 	}
 	keepDeadline, keepRemaining := keptSessionTTLStatus(run.Record, time.Now())
-	fmt.Fprintf(stdout, "keepDeadline: %s\n", keepDeadline)
-	fmt.Fprintf(stdout, "keepRemaining: %s\n", keepRemaining)
+	_, _ = fmt.Fprintf(stdout, "keepDeadline: %s\n", keepDeadline)
+	_, _ = fmt.Fprintf(stdout, "keepRemaining: %s\n", keepRemaining)
 	if run.RemoteStatus.BrokerStatus != "" {
 		fmt.Fprintf(stdout, "remoteState: %s\n", run.RemoteStatus.BrokerStatus)
 	}

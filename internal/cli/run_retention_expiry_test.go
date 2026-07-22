@@ -439,6 +439,37 @@ func TestStatusShowsKeptSessionTTL(t *testing.T) {
 	}
 }
 
+func TestStatusOmitsKeptSessionTTLForNonKeptRuns(t *testing.T) {
+	dir := writeRunConfigFixture(t)
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"run", "smoke"}, &stdout, &stderr, dir, "test-version"); code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	runID := runIDFromOutput(t, stdout.String())
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"status", "--run", runID}, &stdout, &stderr, dir, "test-version"); code != 0 {
+		t.Fatalf("status exit code = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "keepDeadline") {
+		t.Fatalf("non-kept status must omit keepDeadline:\n%s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"status", "--json", "--run", runID}, &stdout, &stderr, dir, "test-version"); code != 0 {
+		t.Fatalf("JSON status exit code = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var status map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
+		t.Fatalf("parse JSON status: %v", err)
+	}
+	if _, found := status["keepDeadline"]; found {
+		t.Fatalf("non-kept JSON status must omit keepDeadline: %#v", status)
+	}
+}
+
 func TestRunWarnsAndContinuesWhenExpiredBrokerCannotStopRetainedSession(t *testing.T) {
 	dir := writeRunConfigFixture(t)
 	hostConfigPath := filepath.Join(dir, "ci-hosts.yaml")

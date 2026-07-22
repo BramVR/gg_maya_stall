@@ -1365,7 +1365,9 @@ func readEmbeddedStatusResponse(repoDir string, runID string) (controlPlaneStatu
 		result.State = run.RemoteStatus.State
 	}
 	result.Status = run.Bundle.Status
-	result.KeepDeadline, result.KeepRemaining = keptSessionTTLStatus(run.Record, time.Now())
+	if result.State == "kept" || result.State == "cleanup-failed" {
+		result.KeepDeadline, result.KeepRemaining = keptSessionTTLStatus(run.Record, time.Now())
+	}
 	return result, nil
 }
 

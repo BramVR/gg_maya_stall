@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -2124,29 +2125,35 @@ func mergeHostAgentTerminalEvents(current []byte, incoming []byte) ([]byte, erro
 }
 
 func mergeHostAgentTerminalEventsAfterAuthoritySuffix(currentLines [][]byte, incoming []byte) ([]byte, bool, error) {
-	authorityStart := -1
-	lastCurrentSequence := 0
-	for index, line := range currentLines {
+	var baseLines [][]byte
+	var authorityLines [][]byte
+	var stagedExecutionLines [][]byte
+	authoritySeen := false
+	stagedExecutionSeen := false
+	for _, line := range currentLines {
 		var event map[string]any
 		if err := json.Unmarshal(line, &event); err != nil {
 			return nil, false, fmt.Errorf("invalid current event identity")
 		}
-		if sequence := ledgerEventSequence(event); sequence > lastCurrentSequence {
-			lastCurrentSequence = sequence
-		}
 		id, authority := event["deadlineEventId"].(string)
 		if authority && id != "" {
-			if authorityStart < 0 {
-				authorityStart = index
+			if stagedExecutionSeen {
+				return nil, true, fmt.Errorf("Host Lock authority event follows staged execution")
 			}
-		} else if authorityStart >= 0 {
-			return nil, true, fmt.Errorf("Host Lock authority events are not a terminal suffix")
+			authoritySeen = true
+			authorityLines = append(authorityLines, line)
+			continue
+		}
+		if authoritySeen {
+			stagedExecutionSeen = true
+			stagedExecutionLines = append(stagedExecutionLines, line)
+		} else {
+			baseLines = append(baseLines, line)
 		}
 	}
-	if authorityStart < 0 {
+	if !authoritySeen {
 		return nil, false, nil
 	}
-	baseLines := currentLines[:authorityStart]
 	if len(baseLines) == 0 {
 		return nil, true, fmt.Errorf("Host Lock authority events have no acknowledged execution prefix")
 	}
@@ -2164,8 +2171,20 @@ func mergeHostAgentTerminalEventsAfterAuthoritySuffix(currentLines [][]byte, inc
 			lastBaseSequence = sequence
 		}
 	}
-	result := append([][]byte(nil), currentLines...)
-	nextSequence := lastCurrentSequence + 1
+	result := append([][]byte(nil), baseLines...)
+	nextSequence := lastBaseSequence + 1
+	for _, line := range authorityLines {
+		var event map[string]any
+		if err := json.Unmarshal(line, &event); err != nil {
+			return nil, true, fmt.Errorf("invalid Host Lock authority event")
+		}
+		if ledgerEventSequence(event) != nextSequence {
+			return nil, true, fmt.Errorf("Host Lock authority event sequence changed")
+		}
+		nextSequence++
+		result = append(result, line)
+	}
+	mergedExecutionLines := make([][]byte, 0)
 	for _, line := range bytes.Split(bytes.TrimSpace(mergedExecution), []byte{'\n'}) {
 		var event map[string]any
 		if err := json.Unmarshal(line, &event); err != nil {
@@ -2183,9 +2202,41 @@ func mergeHostAgentTerminalEventsAfterAuthoritySuffix(currentLines [][]byte, inc
 		if err != nil {
 			return nil, true, err
 		}
-		result = append(result, encoded)
+		mergedExecutionLines = append(mergedExecutionLines, encoded)
 	}
-	return append(bytes.Join(result, []byte{'\n'}), '\n'), true, nil
+	if len(stagedExecutionLines) > len(mergedExecutionLines) {
+		return nil, true, fmt.Errorf("incoming terminal events are older than the staged execution tail")
+	}
+	for index, staged := range stagedExecutionLines {
+		same, err := sameHostAgentEventIgnoringSequence(staged, mergedExecutionLines[index])
+		if err != nil {
+			return nil, true, err
+		}
+		if !same {
+			return nil, true, fmt.Errorf("staged terminal event %d changed", index+1)
+		}
+	}
+	result = append(result, mergedExecutionLines...)
+	normalized := append(bytes.Join(result, []byte{'\n'}), '\n')
+	current := append(bytes.Join(currentLines, []byte{'\n'}), '\n')
+	if bytes.Equal(normalized, current) {
+		return current, true, nil
+	}
+	return normalized, true, nil
+}
+
+func sameHostAgentEventIgnoringSequence(left []byte, right []byte) (bool, error) {
+	var leftEvent map[string]any
+	if err := json.Unmarshal(left, &leftEvent); err != nil {
+		return false, fmt.Errorf("invalid staged terminal event")
+	}
+	var rightEvent map[string]any
+	if err := json.Unmarshal(right, &rightEvent); err != nil {
+		return false, fmt.Errorf("invalid merged terminal event")
+	}
+	delete(leftEvent, "sequence")
+	delete(rightEvent, "sequence")
+	return reflect.DeepEqual(leftEvent, rightEvent), nil
 }
 
 func (handler *controlPlaneHandler) serveHostAgentComplete(response http.ResponseWriter, request *http.Request, agentID string, runID string) {

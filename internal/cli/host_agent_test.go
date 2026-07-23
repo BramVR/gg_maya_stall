@@ -946,9 +946,10 @@ func TestMergeHostAgentTerminalEventsPreservesCheckpointGapAndTerminalTail(t *te
 }
 
 func TestMergeHostAgentTerminalEventsPreservesPublishedAuthoritySuffix(t *testing.T) {
+	authorityLine := `{"type":"host-lock.expired", "sequence":3, "deadlineEventId":"expiry-1"}`
 	current := []byte("{\"sequence\":1,\"type\":\"run.accepted\"}\n" +
 		"{\"sequence\":2,\"type\":\"run.queued\"}\n" +
-		"{\"deadlineEventId\":\"expiry-1\",\"sequence\":3,\"type\":\"host-lock.expired\"}\n")
+		authorityLine + "\n")
 	incoming := []byte("{\"sequence\":1,\"type\":\"run.accepted\"}\n" +
 		"{\"sequence\":2,\"type\":\"run.queued\"}\n" +
 		"{\"sequence\":3,\"type\":\"run.started\"}\n" +
@@ -971,6 +972,29 @@ func TestMergeHostAgentTerminalEventsPreservesPublishedAuthoritySuffix(t *testin
 	if !slices.Equal(types, []string{"run.accepted", "run.queued", "host-lock.expired", "run.started", "run.failed"}) ||
 		!slices.Equal(sequences, []int{1, 2, 3, 4, 5}) {
 		t.Fatalf("authority suffix merge = types %v sequences %v\n%s", types, sequences, merged)
+	}
+	if !bytes.Contains(merged, []byte(authorityLine+"\n")) {
+		t.Fatalf("authority merge rewrote published event bytes:\n%s", merged)
+	}
+	replayed, err := mergeHostAgentTerminalEvents(merged, incoming)
+	if err != nil {
+		t.Fatalf("replay terminal events after staged authority merge: %v", err)
+	}
+	if !bytes.Equal(replayed, merged) {
+		t.Fatalf("replayed authority merge changed bytes:\nfirst:\n%s\nreplay:\n%s", merged, replayed)
+	}
+}
+
+func TestMergeHostAgentTerminalEventsRejectsAuthorityAfterStagedExecution(t *testing.T) {
+	current := []byte("{\"sequence\":1,\"type\":\"run.accepted\"}\n" +
+		"{\"deadlineEventId\":\"expiry-1\",\"sequence\":2,\"type\":\"host-lock.expired\"}\n" +
+		"{\"sequence\":3,\"type\":\"run.failed\"}\n" +
+		"{\"deadlineEventId\":\"expiry-2\",\"sequence\":4,\"type\":\"host-lock.released\"}\n")
+	incoming := []byte("{\"sequence\":1,\"type\":\"run.accepted\"}\n" +
+		"{\"sequence\":2,\"type\":\"run.failed\"}\n")
+
+	if _, err := mergeHostAgentTerminalEvents(current, incoming); err == nil {
+		t.Fatal("terminal merge accepted an authority event after staged execution")
 	}
 }
 
@@ -2131,6 +2155,7 @@ func TestSharedFakeHostLockQueuesCompatibleRunWithoutAgentAssignment(t *testing.
 		done <- RunWithRuntime([]string{"run", "--json", "--control-plane", server.URL, "smoke"}, io.Discard, io.Discard, repoDir, "test-version", runtime)
 	}()
 	queuedRunID := waitForQueuedRunID(t, handler.(*controlPlaneHandler))
+	waitForHostAgentState(t, server.Client(), server.URL, "windows-agent-01", "ready")
 	status = readHostAgentStatus(t, server.Client(), server.URL, "windows-agent-01")
 	if status.State != "ready" || status.RunID != "" {
 		t.Fatalf("Host Agent selected despite shared fake Host Lock: %+v", status)
@@ -2507,7 +2532,31 @@ func TestRegisteredHostAgentExpiresActiveRunAtHardDeadline(t *testing.T) {
 	}
 	handler := handlerValue.(*controlPlaneHandler)
 	heartbeatObserved := make(chan time.Time)
+	completionStagedBeforeCrash := make(chan error, 1)
+	var crashAfterCompletionStaging atomic.Bool
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if strings.HasSuffix(request.URL.Path, "/complete") && crashAfterCompletionStaging.CompareAndSwap(false, true) {
+			var completion hostAgentCompletionRequest
+			if err := json.NewDecoder(request.Body).Decode(&completion); err != nil {
+				completionStagedBeforeCrash <- err
+				response.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			handler.mu.Lock()
+			assignment := handler.assignments[completion.RunID]
+			handler.mu.Unlock()
+			if assignment == nil {
+				completionStagedBeforeCrash <- errors.New("completion crash fixture has no active assignment")
+				response.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			assignment.checkpointMu.Lock()
+			_, _, _, err := handler.acceptHostAgentCompletion(assignment, completion)
+			assignment.checkpointMu.Unlock()
+			completionStagedBeforeCrash <- err
+			response.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		handler.ServeHTTP(response, request)
 		if strings.HasSuffix(request.URL.Path, "/heartbeat") {
 			heartbeatObserved <- runtime.Now()
@@ -2575,6 +2624,14 @@ func TestRegisteredHostAgentExpiresActiveRunAtHardDeadline(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("expired active Agent did not stop")
+	}
+	select {
+	case err := <-completionStagedBeforeCrash:
+		if err != nil {
+			t.Fatalf("stage completion before simulated Control Plane crash: %v", err)
+		}
+	default:
+		t.Fatal("expired active completion did not exercise the staged-ledger crash window")
 	}
 	select {
 	case code := <-runDone:

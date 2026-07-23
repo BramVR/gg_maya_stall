@@ -187,7 +187,7 @@ func runOptInRealSharedKeptSessionDeadlineSmoke(t *testing.T) {
 	}
 	handler := handlerValue.(*controlPlaneHandler)
 	server := httptest.NewTLSServer(handler)
-	t.Cleanup(server.Close)
+	t.Cleanup(func() { closeHostAgentTestServer(server, handler) })
 	runtime.ControlPlaneHTTPClient = server.Client()
 
 	var enrollStdout, enrollStderr bytes.Buffer
@@ -260,7 +260,7 @@ func runOptInRealSharedKeptSessionDeadlineSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse live extended deadline: %v", err)
 	}
-	clock.Store(deadline.UnixNano())
+	advanceHostAgentTestClock(t, handler, &clock, "windows-agent-kept-live", runID, deadline)
 	var expired controlPlaneStatusResponse
 	if err := getControlPlaneJSON(server.URL, "", "/v1/runs/"+runID+"/status", runtime, &expired); err != nil {
 		t.Fatalf("observe live Kept Session expiry: %v", err)

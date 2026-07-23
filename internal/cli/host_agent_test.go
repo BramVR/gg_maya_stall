@@ -2813,6 +2813,105 @@ func TestRegisteredHostAgentExtendsAndExplicitlyStopsKeptSessionWithinPolicy(t *
 	}
 }
 
+func TestRegisteredHostAgentExpiresExtendedKeptSessionAfterControllableClockJump(t *testing.T) {
+	repoDir := writeRunConfigFixture(t)
+	dataDir := privateTempDir(t)
+	start := time.Date(2026, 7, 23, 10, 0, 0, 0, time.UTC)
+	var clock atomic.Int64
+	clock.Store(start.UnixNano())
+	runtime := defaultRunRuntime()
+	runtime.Now = func() time.Time { return time.Unix(0, clock.Load()).UTC() }
+	handlerValue, err := newControlPlaneHandlerWithPolicy(dataDir, "operator-token", runtime, hostLockDeadlinePolicy{
+		IdleTimeout: 30 * time.Minute, HardLifetime: 3 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("create Control Plane handler: %v", err)
+	}
+	handler := handlerValue.(*controlPlaneHandler)
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(func() { closeHostAgentTestServer(server, handler) })
+	t.Setenv(defaultControlPlaneTokenEnv, "operator-token")
+	t.Setenv("TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL", testHostAgentCredential)
+	runtime.ControlPlaneHTTPClient = server.Client()
+	enrollTestHostAgent(t, repoDir, server.URL, runtime)
+
+	agentWorkRoot := privateTempDir(t)
+	agentDone := make(chan int, 1)
+	var agentStderr bytes.Buffer
+	go func() {
+		agentDone <- RunWithRuntime([]string{
+			"host-agent", "run-once", "--control-plane", server.URL,
+			"--agent-id", "windows-agent-01", "--host", "maya-win-01",
+			"--work-root", agentWorkRoot, "--credential-env", "TEST_MAYA_STALL_HOST_AGENT_CREDENTIAL",
+		}, io.Discard, &agentStderr, repoDir, "test-version", runtime)
+	}()
+	waitForHostAgentState(t, server.Client(), server.URL, "windows-agent-01", "ready")
+
+	runDone := make(chan int, 1)
+	var runStdout, runStderr bytes.Buffer
+	go func() {
+		runDone <- RunWithRuntime([]string{
+			"run", "--json", "--control-plane", server.URL,
+			"--keep-ttl", "1h", "--stop-after", "never", "smoke",
+		}, &runStdout, &runStderr, repoDir, "test-version", runtime)
+	}()
+	waitForHostAgentState(t, server.Client(), server.URL, "windows-agent-01", "kept")
+	status := readHostAgentStatus(t, server.Client(), server.URL, "windows-agent-01")
+	runID := status.RunID
+	if runID == "" {
+		t.Fatal("Kept Session has no Run ID")
+	}
+
+	var extendStdout, extendStderr bytes.Buffer
+	if code := RunWithRuntime([]string{
+		"extend", "--control-plane", server.URL, "--by", "30m", runID,
+	}, &extendStdout, &extendStderr, repoDir, "test-version", runtime); code != 0 {
+		t.Fatalf("extend exit code = %d; stdout: %s stderr: %s", code, extendStdout.String(), extendStderr.String())
+	}
+	handler.mu.Lock()
+	extendedDeadline := handler.assignments[runID].record.KeepDeadline
+	handler.mu.Unlock()
+	deadline, err := time.Parse(time.RFC3339Nano, extendedDeadline)
+	if err != nil {
+		t.Fatalf("parse extended deadline: %v", err)
+	}
+	advanceHostAgentTestClock(t, handler, &clock, "windows-agent-01", runID, deadline)
+
+	var expired controlPlaneStatusResponse
+	if err := getControlPlaneJSON(server.URL, "", "/v1/runs/"+runID+"/status", runtime, &expired); err != nil {
+		t.Fatalf("observe Kept Session expiry: %v", err)
+	}
+	if expired.State != "expiring" || expired.ExpiryReason != "kept-session" {
+		t.Fatalf("expired Kept Session status = %+v", expired)
+	}
+	select {
+	case code := <-agentDone:
+		if code != 0 {
+			t.Fatalf("Host Agent exit code = %d; stderr: %s", code, agentStderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Host Agent did not clean expired Kept Session; stderr: %s", agentStderr.String())
+	}
+	select {
+	case code := <-runDone:
+		if code != 0 {
+			t.Fatalf("Run exit code = %d; stdout: %s stderr: %s", code, runStdout.String(), runStderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Control Plane Run did not finish after Kept Session expiry")
+	}
+	if _, err := os.Lstat(handler.hostLockPath("maya-win-01")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired Kept Session Host Lock residue: %v", err)
+	}
+	var completed hostAgentAssignmentRecord
+	if err := readPrivateJSON(filepath.Join(dataDir, "assignments", runID+".json"), &completed); err != nil {
+		t.Fatalf("read completed assignment: %v", err)
+	}
+	if completed.State != "completed" || completed.ExtensionCount != 1 {
+		t.Fatalf("completed Kept Session assignment = %+v", completed)
+	}
+}
+
 func TestControlPlaneRecoversJournaledHostAgentAssignmentTransition(t *testing.T) {
 	dataDir := privateTempDir(t)
 	handler, err := newControlPlaneHandler(dataDir, "operator-token", defaultRunRuntime())
@@ -3626,6 +3725,41 @@ func TestHostAgentStatusHelpersUseProvidedOperatorToken(t *testing.T) {
 func waitForHostAgentState(t *testing.T, client *http.Client, serverURL string, agentID string, want string) {
 	t.Helper()
 	waitForHostAgentStateWithToken(t, client, serverURL, "operator-token", agentID, want)
+}
+
+func advanceHostAgentTestClock(t *testing.T, handler *controlPlaneHandler, clock *atomic.Int64, agentID string, runID string, now time.Time) {
+	t.Helper()
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	agent := handler.hostAgents[agentID]
+	if agent == nil || agent.status.SessionID == "" || agent.status.RunID != runID {
+		t.Fatalf("Host Agent %s cannot preserve its process-session lease for Run %s: %+v", agentID, runID, agent)
+	}
+	// The jump represents deadline passage, not loss of the still-running real-time test Agent.
+	now = now.UTC()
+	clock.Store(now.UnixNano())
+	agent.sessionExpiresAt = now.Add(hostAgentSessionLease)
+}
+
+func closeHostAgentTestServer(server *httptest.Server, handler *controlPlaneHandler) {
+	// Streaming submissions otherwise keep httptest.Server.Close blocked after an early assertion.
+	handler.mu.Lock()
+	for _, queued := range handler.queuedRuns {
+		if queued != nil && !queued.waiterReleased {
+			queued.canceled = true
+			handler.releaseQueuedWaiterLocked(queued)
+		}
+	}
+	for _, assignment := range handler.assignments {
+		if assignment != nil && !assignment.finished && assignment.done != nil {
+			assignment.err = errors.New("test cleanup interrupted unfinished assignment")
+			assignment.finished = true
+			close(assignment.done)
+		}
+	}
+	handler.mu.Unlock()
+	server.CloseClientConnections()
+	server.Close()
 }
 
 func waitForHostAgentStateWithToken(t *testing.T, client *http.Client, serverURL string, operatorToken string, agentID string, want string) {

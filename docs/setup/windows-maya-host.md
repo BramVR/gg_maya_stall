@@ -450,7 +450,9 @@ Doctor layer:
 - Recover an expired active lease only after `gg_mayasessiond status` proves the Maya UI Session is inactive. An unavailable or active broker must leave the host locked.
 - Inspect Kept Sessions before clearing Host Locks manually.
 - Use Stop Policy intentionally: cleanup after success, keep on failure for debugging, and stop Kept Sessions when done.
+- Kept Run Records carry a 90-minute deadline by default; use `run --keep-ttl <duration>` for a one-run override. `run` checks candidate hosts before Host Lock acquisition, and `doctor` checks its selected host before Host Lock health. Both grace-stamp legacy records and expire overdue records through broker-backed retained cleanup.
 - Keep Session Broker `status`, `report`, `stop`, and remote workspace cleanup working for retained runs. `maya-stall status --run <id>` checks broker truth, `attach <id>` prints local run evidence plus broker report data, and `stop <id>` only releases the Host Lock after broker stop and cleanup succeed.
+- Expiry sweeps use only Maya Stall retained Run Records and never enumerate arbitrary Session Broker sessions. If the recorded broker lacks `StopRetainedSession` or cleanup fails, Maya Stall leaves the record and Host Lock intact, appends an expiry outcome event when possible, warns, and continues the surrounding command.
 - If a broker session disappears outside Maya Stall, `status --run <id>` reports stale/orphaned state. Use that signal to decide whether manual host cleanup is needed before clearing locks.
 
 Doctor layer:

@@ -82,9 +82,15 @@ Lock and stop flags:
 ```text
 --host-lock-wait <duration>
 --host-lock-fail-fast
+--keep-ttl <duration>
 --keep-on-failure
 --stop-after success|failure|always|never
 ```
+
+Kept Sessions default to a 90-minute TTL. `--keep-ttl` sets a positive Go
+duration for the submitted run and is preserved in Configured Control Plane
+Mode. The current Repo Run Config has no Stop Policy/kept-session default;
+omitting the flag uses the built-in value.
 
 See [run](commands/run.md), [history](commands/history.md),
 [status](commands/status.md), [events](commands/events.md),

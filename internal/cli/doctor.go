@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 var mayaVersionPattern = regexp.MustCompile(`^[0-9]{4}(?:\.[0-9]+)?$`)
@@ -22,6 +23,7 @@ type hostHealthReport struct {
 	Runtime       runtimeMetadata
 	Layers        []hostHealthLayer
 	Healthy       bool
+	Warnings      []string
 }
 
 type hostHealthLayer struct {
@@ -127,6 +129,7 @@ func runDoctor(repoDir string, options doctorOptions) hostHealthReport {
 			host = realSSHHost
 		}
 	}
+	report.Warnings = append(report.Warnings, sweepKeptSessions(repoDir, host.ID, time.Now())...)
 	add(okCheck("host", host.ID))
 	report.HostID = host.ID
 	var repairRequiredPaths []string

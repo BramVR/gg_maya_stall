@@ -10,6 +10,13 @@ records Target Profile, Host Pool, selected Maya Host, runtime profile, layer
 statuses, Host Lock state, Session Broker source, interactive desktop proof, and
 Visual Evidence source.
 
+After selecting a specific Maya Host and before checking its Host Lock, doctor
+opportunistically sweeps Maya Stall Kept Session records for that host. Legacy
+records receive a fresh 90-minute grace deadline; overdue records stop through
+the same retained Session Broker cleanup path as `maya-stall stop`. Unsupported
+or failed cleanup is reported as a warning and doctor continues its normal Host
+Health checks without enumerating unrecorded broker sessions.
+
 ```sh
 maya-stall doctor
 maya-stall doctor --scenario smoke

@@ -51,6 +51,8 @@ type runRetentionRecord struct {
 	HostLockAuthoritative bool                  `json:"hostLockAuthoritative,omitempty"`
 	BrokerCapabilities    brokerCapabilities    `json:"brokerCapabilities"`
 	RemoteSession         retainedSessionRecord `json:"remoteSession"`
+	KeepTTL               string                `json:"keepTTL,omitempty"`
+	KeepDeadline          string                `json:"keepDeadline,omitempty"`
 	CreatedAt             string                `json:"createdAt"`
 	UpdatedAt             string                `json:"updatedAt"`
 	LegacyMissingRecord   bool                  `json:"-"`
@@ -58,7 +60,7 @@ type runRetentionRecord struct {
 
 func newRunRetentionRecord(context runContext, manifest runManifest, host mayaHostConfig, status string, reason string) runRetentionRecord {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	return runRetentionRecord{
+	record := runRetentionRecord{
 		RunID:                 manifest.RunID,
 		Scenario:              manifest.Scenario,
 		TargetProfile:         manifest.TargetProfile,
@@ -77,15 +79,44 @@ func newRunRetentionRecord(context runContext, manifest runManifest, host mayaHo
 		CreatedAt:             now,
 		UpdatedAt:             now,
 	}
+	if isKeptRetentionStatus(status) {
+		stampKeptSessionDeadline(&record, time.Now(), defaultKeepTTL)
+	}
+	return record
 }
 
 func writeRunRetentionRecord(context runContext, record runRetentionRecord) error {
+	if isKeptRetentionStatus(record.Status) && record.KeepDeadline == "" {
+		stampKeptSessionDeadline(&record, time.Now(), keepTTLFromRecord(record, defaultKeepTTL))
+	}
 	record.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	content, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		return err
 	}
 	return writeRunLedgerBytes(filepath.Join(context.StateDir, "run-record.json"), append(content, '\n'))
+}
+
+func isKeptRetentionStatus(status string) bool {
+	return status == "kept" || status == "retained"
+}
+
+func stampKeptSessionDeadline(record *runRetentionRecord, now time.Time, keepTTL time.Duration) {
+	if keepTTL <= 0 {
+		keepTTL = defaultKeepTTL
+	}
+	record.KeepTTL = keepTTL.String()
+	record.KeepDeadline = now.UTC().Add(keepTTL).Format(time.RFC3339Nano)
+}
+
+func keepTTLFromRecord(record runRetentionRecord, fallback time.Duration) time.Duration {
+	if keepTTL, err := time.ParseDuration(record.KeepTTL); err == nil && keepTTL > 0 {
+		return keepTTL
+	}
+	if fallback > 0 {
+		return fallback
+	}
+	return defaultKeepTTL
 }
 
 func fallbackRunRetentionRecord(repoDir string, stateDir string, manifest runManifest) runRetentionRecord {

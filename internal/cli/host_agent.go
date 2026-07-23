@@ -815,7 +815,7 @@ func loadAcceptedHostAgentRun(repoDir string, record hostAgentAssignmentRecord, 
 	return &freshRunLifecycle{
 		repoDir: repoDir, options: runOptions{
 			ScenarioName: record.Submission.Scenario, TargetProfile: targetProfile, HostPin: record.HostID,
-			StopAfter: record.Submission.StopAfter, AssignedRunID: record.RunID,
+			StopAfter: record.Submission.StopAfter, KeepTTL: keepTTLOrDefault(record.Submission.KeepTTL), AssignedRunID: record.RunID,
 		}, runtime: runtime, context: context, manifest: manifest, accepted: true, acceptedAt: acceptedAt,
 		stopPolicy: "stopped", ledgerPolicy: policy,
 	}, nil
@@ -2841,7 +2841,7 @@ func runHostAgentOnce(options hostAgentRunOnceOptions, runtime runRuntime, stdou
 	stopProgress := startHostAgentProgress(options, assignment, repoDir, runtime)
 	outcome, runErr := runScenario(repoDir, runOptions{
 		ScenarioName: assignment.Submission.Scenario, TargetProfile: targetProfile, HostPin: assignment.HostID,
-		HostConfig: hostConfigPath, StopAfter: assignment.Submission.StopAfter, AssignedRunID: assignment.RunID, AssignedMayaBuild: assignment.SelectedMayaBuild,
+		HostConfig: hostConfigPath, StopAfter: assignment.Submission.StopAfter, KeepTTL: keepTTLOrDefault(assignment.Submission.KeepTTL), AssignedRunID: assignment.RunID, AssignedMayaBuild: assignment.SelectedMayaBuild,
 		AssignedEventPrefix: assignment.EventPrefix,
 	}, agentRuntime)
 	progressErr := stopProgress()

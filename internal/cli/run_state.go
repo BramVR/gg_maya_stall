@@ -234,6 +234,9 @@ func printKeptRunStatus(stdout io.Writer, run keptRun) {
 	if run.Record.RetentionReason != "" {
 		fmt.Fprintf(stdout, "retentionReason: %s\n", run.Record.RetentionReason)
 	}
+	keepDeadline, keepRemaining := keptSessionTTLStatus(run.Record, time.Now())
+	_, _ = fmt.Fprintf(stdout, "keepDeadline: %s\n", keepDeadline)
+	_, _ = fmt.Fprintf(stdout, "keepRemaining: %s\n", keepRemaining)
 	if run.RemoteStatus.BrokerStatus != "" {
 		fmt.Fprintf(stdout, "remoteState: %s\n", run.RemoteStatus.BrokerStatus)
 	}
@@ -247,6 +250,26 @@ func printKeptRunStatus(stdout io.Writer, run keptRun) {
 		fmt.Fprintf(stdout, "detail: %s\n", run.RemoteStatus.Detail)
 	}
 	fmt.Fprintf(stdout, "stateDir: %s\n", run.StateDir)
+}
+
+func keptSessionTTLStatus(record runRetentionRecord, now time.Time) (string, string) {
+	if record.KeepDeadline == "" {
+		return "unstamped", "unstamped"
+	}
+	deadline, err := time.Parse(time.RFC3339Nano, record.KeepDeadline)
+	if err != nil {
+		return record.KeepDeadline, "invalid"
+	}
+	remaining := deadline.Sub(now)
+	if remaining <= 0 {
+		return record.KeepDeadline, "expired"
+	}
+	if remaining < time.Minute {
+		return record.KeepDeadline, "<1m left"
+	}
+	rounded := remaining.Round(time.Minute).String()
+	rounded = strings.TrimSuffix(rounded, "0s")
+	return record.KeepDeadline, rounded + " left"
 }
 
 func attachRun(repoDir string, runID string, stdout io.Writer) error {
@@ -347,6 +370,10 @@ func stopRun(repoDir string, runID string, now func() time.Time) error {
 }
 
 func stopKeptRun(repoDir string, runID string, now time.Time) error {
+	return stopKeptRunAfterBrokerStop(repoDir, runID, now, nil)
+}
+
+func stopKeptRunAfterBrokerStop(repoDir string, runID string, now time.Time, afterBrokerStop func(string)) error {
 	manifest, stateDir, found, err := readStopRunManifest(repoDir, runID)
 	if err != nil {
 		return err
@@ -445,6 +472,9 @@ func stopKeptRun(repoDir string, runID string, now time.Time) error {
 		return err
 	}
 	transientRecordErr := writeRunRetentionRecord(runContext{StateDir: stateDir}, record)
+	if afterBrokerStop != nil {
+		afterBrokerStop(stateDir)
+	}
 	if record.HostLockAuthoritative {
 		if err := releaseHostSideLock(record.HostConfig, runID); err != nil {
 			if !errors.Is(err, errHostLockOwnershipChanged) {

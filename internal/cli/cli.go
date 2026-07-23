@@ -59,6 +59,9 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 		}
 		report := runDoctor(workDir, options)
 		printHostHealthReport(stdout, report)
+		for _, warning := range report.Warnings {
+			_, _ = fmt.Fprintf(stderr, "maya-stall doctor: warning: %s\n", warning)
+		}
 		if report.Healthy {
 			return 0
 		}
@@ -148,6 +151,7 @@ func RunWithRuntime(args []string, stdout io.Writer, stderr io.Writer, workDir s
 		}
 		runtime = withRunAcceptanceOutput(runtime, stdout, jsonOutput)
 		outcome, err := runScenarioThroughMode(workDir, options, runtime)
+		printRunWarnings(stderr, outcome, jsonOutput)
 		if err != nil {
 			if outcome.RunID != "" {
 				printRunCommandOutcome(stdout, outcome, jsonOutput)
@@ -506,6 +510,7 @@ type runCommandJSON struct {
 	StopPolicy       string   `json:"stopPolicy,omitempty"`
 	FollowUpCommands []string `json:"followUpCommands,omitempty"`
 	Error            string   `json:"error,omitempty"`
+	Warnings         []string `json:"warnings,omitempty"`
 }
 
 func printRunCommandOutcome(stdout io.Writer, outcome runOutcome, asJSON bool) {
@@ -526,6 +531,7 @@ func printRunCommandOutcome(stdout io.Writer, outcome runOutcome, asJSON bool) {
 		EvidenceDir:      outcome.EvidenceDir,
 		StopPolicy:       outcome.StopPolicy,
 		FollowUpCommands: outcome.FollowUpCommands,
+		Warnings:         outcome.Warnings,
 	}
 	if outcome.Failure != nil {
 		result.FailedLayer = outcome.Failure.FailedLayer
@@ -533,6 +539,15 @@ func printRunCommandOutcome(stdout io.Writer, outcome runOutcome, asJSON bool) {
 		result.RemediationHint = outcome.Failure.RemediationHint
 	}
 	printRunCommandJSON(stdout, result)
+}
+
+func printRunWarnings(stderr io.Writer, outcome runOutcome, asJSON bool) {
+	if asJSON {
+		return
+	}
+	for _, warning := range outcome.Warnings {
+		_, _ = fmt.Fprintf(stderr, "maya-stall run: warning: %s\n", warning)
+	}
 }
 
 func printRunCommandJSON(stdout io.Writer, result runCommandJSON) {
@@ -566,7 +581,7 @@ Usage:
   maya-stall doctor [--host-config <path>] [--target-profile <name>] [--host <id>] [--scenario <name>] [--repair-trusted-plugin-allowlist]
   maya-stall plan [--json] [--host-config <path>] <scenario>
   maya-stall history [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] [--before-run <run-id>] [--scenario <name>] [--host <id>] [--state <state>] [--since <duration-or-rfc3339>]
-  maya-stall run [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] [--host-config <path>] [--target-profile <name>] [--host <id>] [--host-lock-wait <duration>|--host-lock-fail-fast] [--keep-on-failure|--stop-after <success|failure|always|never>] <scenario>
+  maya-stall run [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] [--host-config <path>] [--target-profile <name>] [--host <id>] [--host-lock-wait <duration>|--host-lock-fail-fast] [--keep-ttl <duration>] [--keep-on-failure|--stop-after <success|failure|always|never>] <scenario>
   maya-stall status [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] --run <run-id>
   maya-stall events [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] [--from-sequence <number>] <run-id>
   maya-stall logs [--json] [--control-plane <https-url>] [--control-plane-token-env <name>] <run-id>
@@ -617,6 +632,7 @@ type runOptions struct {
 	TargetProfile        string
 	HostPin              string
 	HostLockWait         time.Duration
+	KeepTTL              time.Duration
 	StopAfter            string
 	ControlPlane         string
 	ControlPlaneSet      bool
@@ -626,6 +642,8 @@ type runOptions struct {
 	AssignedEventPrefix  []byte
 	HostOptionsSet       bool
 	SharedFakeWorkRoot   string
+	KeptSessionRepoRoot  string
+	BeforeHostLock       func(mayaHostConfig)
 }
 
 func parseRunArgs(args []string) (runOptions, error) {
@@ -686,6 +704,16 @@ func parseRunArgs(args []string) (runOptions, error) {
 		case "--host-lock-fail-fast":
 			options.HostOptionsSet = true
 			options.HostLockWait = 0
+		case "--keep-ttl":
+			i++
+			if i >= len(args) || args[i] == "" || strings.HasPrefix(args[i], "--") {
+				return options, newUsageError("--keep-ttl needs a duration")
+			}
+			duration, err := time.ParseDuration(args[i])
+			if err != nil || duration <= 0 {
+				return options, newUsageError("invalid --keep-ttl duration %q", args[i])
+			}
+			options.KeepTTL = duration
 		case "--keep-on-failure":
 			if stopPolicySet {
 				return options, newUsageError("Stop Policy already set")

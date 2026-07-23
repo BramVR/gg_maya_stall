@@ -280,7 +280,7 @@ func newControlPlaneHandlerWithPolicy(dataDir string, token string, runtime runR
 		return nil, fmt.Errorf("control plane data directory must not be empty")
 	}
 	if hostLockPolicy.IdleTimeout <= 0 || hostLockPolicy.HardLifetime <= hostLockPolicy.IdleTimeout {
-		return nil, fmt.Errorf("Host Lock deadline policy needs a positive idle timeout and a longer hard lifetime")
+		return nil, fmt.Errorf("Host Lock deadline policy needs a positive idle timeout and a longer hard lifetime") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	var err error
 	dataDir, err = filepath.Abs(dataDir)
@@ -579,8 +579,8 @@ func (handler *controlPlaneHandler) serveKeptSessionExtension(response http.Resp
 
 var (
 	errControlPlaneRunNotKept        = errors.New("run is not a Kept Session")
-	errControlPlaneHostLockExpired   = errors.New("Host Lock deadline expired")
-	errControlPlaneExtensionRejected = errors.New("Kept Session extension rejected")
+	errControlPlaneHostLockExpired   = errors.New("Host Lock deadline expired")      //nolint:staticcheck // Product term starts the user-facing diagnostic.
+	errControlPlaneExtensionRejected = errors.New("Kept Session extension rejected") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 )
 
 func (handler *controlPlaneHandler) extendControlPlaneKeptSession(runID string, by time.Duration) (controlPlaneStatusResponse, error) {

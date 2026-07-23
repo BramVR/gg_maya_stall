@@ -46,14 +46,14 @@ func (deadlines *hostLockDeadlines) recordHeartbeat(now time.Time, policy hostLo
 	}
 	now = now.UTC()
 	if !now.Before(hard) {
-		return fmt.Errorf("Host Lock hard deadline has expired")
+		return fmt.Errorf("Host Lock hard deadline has expired") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	idle, err := parseHostLockDeadline(deadlines.IdleDeadline, "idle")
 	if err != nil {
 		return err
 	}
 	if !now.Before(idle) {
-		return fmt.Errorf("Host Lock idle deadline has expired")
+		return fmt.Errorf("Host Lock idle deadline has expired") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	nextIdle := now.Add(policy.IdleTimeout)
 	if nextIdle.After(hard) {
@@ -97,14 +97,14 @@ func (deadlines *hostLockDeadlines) extendKept(now time.Time, extension time.Dur
 	}
 	now = now.UTC()
 	if !now.Before(keep) {
-		return fmt.Errorf("Kept Session deadline has expired")
+		return fmt.Errorf("Kept Session deadline has expired") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	extended := keep.Add(extension)
 	if extended.After(hard) {
-		return fmt.Errorf("Kept Session extension exceeds Host Lock hard deadline %s", deadlines.HardDeadline)
+		return fmt.Errorf("Kept Session extension exceeds Host Lock hard deadline %s", deadlines.HardDeadline) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	if !now.Before(hard) {
-		return fmt.Errorf("Host Lock hard deadline has expired")
+		return fmt.Errorf("Host Lock hard deadline has expired") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	deadlines.KeepDeadline = extended.Format(time.RFC3339Nano)
 	deadlines.ExtensionCount++
@@ -139,7 +139,7 @@ func (deadlines hostLockDeadlines) validate() error {
 		return err
 	}
 	if idle.Before(lastHeartbeat) || hard.Before(idle) || deadlines.ExtensionCount < 0 {
-		return fmt.Errorf("Host Lock deadline order is invalid")
+		return fmt.Errorf("Host Lock deadline order is invalid") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	if deadlines.KeepDeadline != "" {
 		keep, err := parseHostLockDeadline(deadlines.KeepDeadline, "kept-session")
@@ -147,7 +147,7 @@ func (deadlines hostLockDeadlines) validate() error {
 			return err
 		}
 		if keep.After(hard) {
-			return fmt.Errorf("Host Lock kept-session deadline exceeds its hard deadline")
+			return fmt.Errorf("Host Lock kept-session deadline exceeds its hard deadline") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 		}
 	}
 	return nil
@@ -155,11 +155,11 @@ func (deadlines hostLockDeadlines) validate() error {
 
 func parseHostLockDeadline(value string, label string) (time.Time, error) {
 	if value == "" {
-		return time.Time{}, fmt.Errorf("Host Lock %s deadline is missing", label)
+		return time.Time{}, fmt.Errorf("Host Lock %s deadline is missing", label) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	deadline, err := time.Parse(time.RFC3339Nano, value)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("Host Lock %s deadline is invalid: %w", label, err)
+		return time.Time{}, fmt.Errorf("Host Lock %s deadline is invalid: %w", label, err) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	return deadline, nil
 }

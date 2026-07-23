@@ -653,7 +653,7 @@ func (handler *controlPlaneHandler) loadHostAgentState() error {
 				return fmt.Errorf("stamp durable Host Lock deadlines for %s: %w", lock.RunID, err)
 			}
 			lock.hostLockDeadlines = assignment.hostLockDeadlines
-		} else if assignment.hostLockDeadlines != lock.hostLockDeadlines || assignment.hostLockDeadlines.validate() != nil {
+		} else if assignment.hostLockDeadlines != lock.hostLockDeadlines || assignment.validate() != nil {
 			return fmt.Errorf("invalid durable Host Lock deadlines for %s", hostID)
 		}
 		if assignment.State == "finishing" {
@@ -1361,11 +1361,12 @@ func (handler *controlPlaneHandler) disconnectHostAgentSession(agentID string, s
 
 func assignmentResponse(record hostAgentAssignmentRecord) hostAgentAssignmentResponse {
 	action := "execute"
-	if record.State == "kept" {
+	switch record.State {
+	case "kept":
 		action = "wait"
-	} else if record.State == "expiring" {
+	case "expiring":
 		action = "cleanup"
-	} else if record.State == "finishing" {
+	case "finishing":
 		action = "finish"
 	}
 	return hostAgentAssignmentResponse{
@@ -1644,7 +1645,7 @@ func mergeHostAgentKeptProgress(repoDir string, assignment hostAgentAssignmentRe
 	if progress.Version != hostAgentAPIVersion || progress.RunID != assignment.RunID || !sameLockToken(progress.LockToken, assignment.LockToken) ||
 		progress.Ledger.RunID != assignment.RunID || progress.Ledger.Scenario != assignment.Submission.Scenario ||
 		progress.Ledger.TargetProfile != expectedProfile || progress.Ledger.Host != assignment.HostID || progress.Ledger.State != "submitted" {
-		return runLedgerRecord{}, fmt.Errorf("Kept Session progress changed run identity")
+		return runLedgerRecord{}, fmt.Errorf("Kept Session progress changed run identity") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	var mergedRecord runLedgerRecord
 	err := newRunLedgerStore(repoDir).UpdateSnapshot(assignment.RunID, func(snapshot *runLedgerSnapshot) error {
@@ -2138,7 +2139,7 @@ func mergeHostAgentTerminalEventsAfterAuthoritySuffix(currentLines [][]byte, inc
 		id, authority := event["deadlineEventId"].(string)
 		if authority && id != "" {
 			if stagedExecutionSeen {
-				return nil, true, fmt.Errorf("Host Lock authority event follows staged execution")
+				return nil, true, fmt.Errorf("Host Lock authority event follows staged execution") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 			}
 			authoritySeen = true
 			authorityLines = append(authorityLines, line)
@@ -2155,7 +2156,7 @@ func mergeHostAgentTerminalEventsAfterAuthoritySuffix(currentLines [][]byte, inc
 		return nil, false, nil
 	}
 	if len(baseLines) == 0 {
-		return nil, true, fmt.Errorf("Host Lock authority events have no acknowledged execution prefix")
+		return nil, true, fmt.Errorf("Host Lock authority events have no acknowledged execution prefix") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	mergedExecution, err := mergeHostAgentProgressEvents(append(bytes.Join(baseLines, []byte{'\n'}), '\n'), incoming)
 	if err != nil {
@@ -2179,7 +2180,7 @@ func mergeHostAgentTerminalEventsAfterAuthoritySuffix(currentLines [][]byte, inc
 			return nil, true, fmt.Errorf("invalid Host Lock authority event")
 		}
 		if ledgerEventSequence(event) != nextSequence {
-			return nil, true, fmt.Errorf("Host Lock authority event sequence changed")
+			return nil, true, fmt.Errorf("Host Lock authority event sequence changed") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 		}
 		nextSequence++
 		result = append(result, line)
@@ -3485,7 +3486,7 @@ func persistHostAgentMutationOutbox(options hostAgentRunOnceOptions, assignment 
 
 func persistHostAgentCleanupOutbox(options hostAgentRunOnceOptions, assignment hostAgentAssignmentResponse, brokerSession *brokerSessionIdentity, expiryFromState string) error {
 	if brokerSession == nil {
-		return fmt.Errorf("Host Lock cleanup has no exact Maya UI Session identity")
+		return fmt.Errorf("Host Lock cleanup has no exact Maya UI Session identity") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	cleanup := hostAgentCleanupMutation{BrokerSession: *brokerSession, ExpiryFromState: expiryFromState}
 	return persistHostAgentMutationOutbox(options, assignment, hostAgentMutationOutbox{
@@ -3922,7 +3923,7 @@ func resumeKeptHostAgentAssignment(options hostAgentRunOnceOptions, assignment h
 		}
 	}
 	if action.Action != "cleanup" {
-		return fmt.Errorf("Control Plane returned unsupported Kept Session action %q", action.Action)
+		return fmt.Errorf("Control Plane returned unsupported Kept Session action %q", action.Action) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	runRoot := filepath.Join(options.WorkRoot, "runs", assignment.RunID)
 	repoDir := filepath.Join(runRoot, "repo")
@@ -4070,7 +4071,7 @@ func reportHostAgentKeptSession(options hostAgentRunOnceOptions, assignment host
 		return hostAgentKeptResponse{}, err
 	}
 	if response.Version != hostAgentAPIVersion || response.Kind != "host-agent-kept-action" || response.RunID != assignment.RunID {
-		return hostAgentKeptResponse{}, fmt.Errorf("Control Plane returned an unsupported Kept Session response")
+		return hostAgentKeptResponse{}, fmt.Errorf("Control Plane returned an unsupported Kept Session response") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	return response, nil
 }
@@ -4086,7 +4087,7 @@ func pollHostAgentKeptAction(options hostAgentRunOnceOptions, assignment hostAge
 		return hostAgentKeptResponse{}, err
 	}
 	if response.Version != hostAgentAPIVersion || response.Kind != "host-agent-kept-action" || response.RunID != assignment.RunID {
-		return hostAgentKeptResponse{}, fmt.Errorf("Control Plane returned an unsupported Kept Session action")
+		return hostAgentKeptResponse{}, fmt.Errorf("Control Plane returned an unsupported Kept Session action") //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	return response, nil
 }
@@ -4341,7 +4342,7 @@ func startHostAgentHeartbeat(options hostAgentRunOnceOptions, runtime runRuntime
 				}
 				if err == nil && status.State == "cleaning" {
 					select {
-					case executionCancel <- errors.New("Host Lock deadline expired"):
+					case executionCancel <- errors.New("Host Lock deadline expired"): //nolint:staticcheck // Product term starts the user-facing diagnostic.
 					default:
 					}
 					// The accepted heartbeat just renewed one full cleanup lease.

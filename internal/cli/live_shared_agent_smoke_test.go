@@ -227,13 +227,16 @@ func runOptInRealSharedKeptSessionDeadlineSmoke(t *testing.T) {
 	runID := status.RunID
 	handler.mu.Lock()
 	assignment := handler.assignments[runID]
+	var session *brokerSessionIdentity
+	var initialDeadline string
+	if assignment != nil {
+		session = assignment.record.BrokerSession
+		initialDeadline = assignment.record.KeepDeadline
+	}
+	handler.mu.Unlock()
 	if assignment == nil {
-		handler.mu.Unlock()
 		t.Fatalf("live Kept Session %s has no durable assignment", runID)
 	}
-	session := assignment.record.BrokerSession
-	initialDeadline := assignment.record.KeepDeadline
-	handler.mu.Unlock()
 	if session == nil || session.SessionID == "" || initialDeadline == "" {
 		t.Fatalf("live Kept Session identity/deadline = %+v / %q", session, initialDeadline)
 	}

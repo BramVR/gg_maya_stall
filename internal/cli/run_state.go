@@ -199,17 +199,17 @@ func extendEmbeddedKeptSession(repoDir string, options extendOptions, now func()
 		return "", err
 	}
 	if run.Record.KeepDeadline == "" {
-		return "", fmt.Errorf("Kept Session %s has no deadline", options.RunID)
+		return "", fmt.Errorf("Kept Session %s has no deadline", options.RunID) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	keep, err := time.Parse(time.RFC3339Nano, run.Record.KeepDeadline)
 	if err != nil || !now().Before(keep) {
-		return "", fmt.Errorf("Kept Session %s has expired", options.RunID)
+		return "", fmt.Errorf("Kept Session %s has expired", options.RunID) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	if run.Record.HardDeadline == "" {
 		stampKeptSessionHardDeadline(&run.Record, now())
 		hard, parseErr := time.Parse(time.RFC3339Nano, run.Record.HardDeadline)
 		if parseErr != nil {
-			return "", fmt.Errorf("Kept Session %s has invalid Host Lock hard deadline", options.RunID)
+			return "", fmt.Errorf("Kept Session %s has invalid Host Lock hard deadline", options.RunID) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 		}
 		if keep.After(hard) {
 			keep = hard
@@ -221,11 +221,11 @@ func extendEmbeddedKeptSession(repoDir string, options extendOptions, now func()
 	}
 	hard, err := time.Parse(time.RFC3339Nano, run.Record.HardDeadline)
 	if err != nil {
-		return "", fmt.Errorf("Kept Session %s has invalid Host Lock hard deadline", options.RunID)
+		return "", fmt.Errorf("Kept Session %s has invalid Host Lock hard deadline", options.RunID) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	extended := keep.Add(options.By)
 	if extended.After(hard) {
-		return "", fmt.Errorf("Kept Session extension exceeds Host Lock hard deadline %s", hard.UTC().Format(time.RFC3339Nano))
+		return "", fmt.Errorf("Kept Session extension exceeds Host Lock hard deadline %s", hard.UTC().Format(time.RFC3339Nano)) //nolint:staticcheck // Product term starts the user-facing diagnostic.
 	}
 	previousRecord := run.Record
 	run.Record.KeepDeadline = extended.UTC().Format(time.RFC3339Nano)

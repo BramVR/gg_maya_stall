@@ -72,6 +72,25 @@ Maya Host, proves contention crosses checkout boundaries, leaves one lease
 behind as if its controller crashed, proves the Session Broker is inactive,
 and then recovers the expired lease through the real SSH/Session Broker path.
 
+Production-ready parallel-execution claims additionally require the opt-in
+two-Host smoke against a Target Profile whose Host Pool exposes at least two
+compatible, isolated, live-proof-eligible Maya Hosts. It proves two bound Host
+Locks and real Maya UI Sessions overlap, a third Run queues until one Host
+frees, and all three Evidence Bundles and cleanup paths remain isolated by Run
+ID:
+
+```sh
+env -u MAYA_STALL_SMOKE_HOST \
+  MAYA_STALL_SMOKE_HOST_CONFIG=/path/to/two-hosts.yaml \
+  MAYA_STALL_SMOKE_TARGET_PROFILE=ci \
+  go test ./internal/cli -run '^TestOptInRealTwoHostParallelRunsSmoke$' -count=1 -timeout=30m
+```
+
+The smoke skips with an explicit reason when the config is absent, the Host
+Pool is pinned, or fewer than two compatible live Hosts are configured. It is
+not part of the required eight-test live gate because the current protected CI
+fixture provides one Windows Maya Host.
+
 Non-live-only changes may merge with local gates plus a manifest saying
 `live_maya_required=false`.
 

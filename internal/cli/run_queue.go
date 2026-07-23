@@ -440,14 +440,7 @@ func (handler *controlPlaneHandler) dispatchQueuedRuns() {
 	for _, queued := range handler.queuedRuns {
 		queued.lockContended = false
 	}
-	for _, agent := range handler.hostAgents {
-		if agent.status.State == "ready" && agent.status.SessionID != "" && !now.Before(agent.sessionExpiresAt) {
-			agent.status.State = "offline"
-			agent.status.SessionID = ""
-			agent.sessionExpiresAt = time.Time{}
-			_ = handler.persistHostAgentStatus(agent)
-		}
-	}
+	handler.expireReadyHostAgentSessionsLocked(now)
 	hosts := make([]*controlPlaneHostAgent, 0, len(handler.hostAgents))
 	for _, agent := range handler.hostAgents {
 		if agent != nil && agent.status.State == "ready" && agent.status.RunID == "" && agent.status.SessionID != "" && agent.status.Slots == 1 && agent.status.SessionBinding && agent.status.DeadlineActions && now.Before(agent.sessionExpiresAt) {
@@ -566,6 +559,17 @@ func (handler *controlPlaneHandler) dispatchQueuedRuns() {
 		handler.signalQueuedRunLocked(candidate)
 	}
 	handler.mu.Unlock()
+}
+
+func (handler *controlPlaneHandler) expireReadyHostAgentSessionsLocked(now time.Time) {
+	for _, agent := range handler.hostAgents {
+		if agent.status.State == "ready" && agent.status.SessionID != "" && !now.Before(agent.sessionExpiresAt) {
+			agent.status.State = "offline"
+			agent.status.SessionID = ""
+			agent.sessionExpiresAt = time.Time{}
+			_ = handler.persistHostAgentStatus(agent)
+		}
+	}
 }
 
 func (handler *controlPlaneHandler) queueHasCompatibleBusyHostLocked(queued *controlPlaneQueuedRun, now time.Time) bool {
@@ -1011,6 +1015,7 @@ var (
 
 func (handler *controlPlaneHandler) cancelQueuedRun(runID string) (controlPlaneStatusResponse, error) {
 	handler.mu.Lock()
+	handler.expireReadyHostAgentSessionsLocked(handler.runtime.Now())
 	queued := handler.queuedRuns[runID]
 	if queued == nil {
 		handler.mu.Unlock()
